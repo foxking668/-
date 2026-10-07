@@ -14,25 +14,34 @@ namespace Contral
 
         log.logOutputConsole("Initialize Encoder", LOG_INFO);
 
+        try {
         this->direction_gpio = new GPIO(gpioNum);
         GPIO *directionGPIO = (GPIO *)this->direction_gpio;
         directionGPIO->setDirection("in");
 
-        this->control_buffer = mapRegister(base_addr + CONTROL_REG_OFFSET, PAGE_SIZE);
-        this->low_buffer = mapRegister(base_addr + LOW_BUFFER_OFFSET, PAGE_SIZE);
-        this->full_buffer = mapRegister(base_addr + FULL_BUFFER_OFFSET, PAGE_SIZE);
+        this->control_buffer = mapRegister(base_addr + CONTROL_REG_OFFSET, ENCODER_MAP_BYTES);
+        this->low_buffer = mapRegister(base_addr + LOW_BUFFER_OFFSET, ENCODER_MAP_BYTES);
+        this->full_buffer = mapRegister(base_addr + FULL_BUFFER_OFFSET, ENCODER_MAP_BYTES);
 
         pwmInit();
+        } catch(...) {releaseResources();throw;}
     }
 
     Encoder::~Encoder(void)
     {
-        // mapRegister returns an offset address; munmap requires the mapping base.
-        munmap(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(control_buffer) & ~(uintptr_t(PAGE_SIZE)-1)), PAGE_SIZE);
-        munmap(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(low_buffer) & ~(uintptr_t(PAGE_SIZE)-1)), PAGE_SIZE);
-        munmap(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(full_buffer) & ~(uintptr_t(PAGE_SIZE)-1)), PAGE_SIZE);
+        releaseResources();
+    }
+
+    void Encoder::releaseResources() noexcept
+    {
+        // Virtual mmap base need not be 64K-aligned: subtract the PHYSICAL offset.
+        void* addresses[]={control_buffer,low_buffer,full_buffer};
+        uint32_t offsets[]={CONTROL_REG_OFFSET,LOW_BUFFER_OFFSET,FULL_BUFFER_OFFSET};
+        for(int i=0;i<3;++i) if(addresses[i])
+            munmap(static_cast<char*>(addresses[i])-((base_addr+offsets[i])&(ENCODER_MAP_BYTES-1)),ENCODER_MAP_BYTES);
 
         delete (GPIO *)this->direction_gpio;
+        direction_gpio=control_buffer=low_buffer=full_buffer=nullptr;
     }
 
     /*

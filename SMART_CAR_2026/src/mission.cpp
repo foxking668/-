@@ -36,9 +36,11 @@ double Mission::follow(const Path& path,double& speed,const Telemetry& t) {
 }
 Command Mission::update(const Observation& o,const Telemetry& t,const Path& avoidance) {
     Command cmd;
-    if(!initialized_) { initialized_=true;stageTime_=lastTime_=t.time;stageDistance_=t.distance; }
+    if(!initialized_) { initialized_=true;stageTime_=lastTime_=t.time;stageDistance_=lastDistance_=t.distance; }
+    if(t.time<lastTime_ || t.distance<lastDistance_) fail("Telemetry time/distance moved backwards");
     const double dt=clamp(t.time-lastTime_,0.,.2);lastTime_=t.time;
-    if(!std::isfinite(t.time)||!std::isfinite(t.distance)||!std::isfinite(t.speed)||!t.encoderValid)
+    lastDistance_=t.distance;
+    if(!std::isfinite(t.time)||!std::isfinite(t.distance)||!std::isfinite(t.speed)||!std::isfinite(t.yaw)||!t.encoderValid)
         fail("Invalid telemetry");
     if(!o.frameValid && stage_!=Stage::Complete && stage_!=Stage::Fault) fail("Invalid camera frame");
     const double elapsed=t.time-stageTime_,travel=t.distance-stageDistance_;
@@ -58,9 +60,11 @@ Command Mission::update(const Observation& o,const Telemetry& t,const Path& avoi
         break;
     case Stage::ToCones:
         if(confirmed(!o.cones.empty())) {enter(Stage::Cones,t);cmd.speed=params_.cone_speed;cmd.steer=follow(avoidance,cmd.speed,t);}
+        else if(!o.cones.empty()) {cmd.speed=params_.cone_speed;cmd.steer=follow(avoidance,cmd.speed,t);}
         else black();
         break;
     case Stage::Cones:
+        if(avoidance.confidence<params_.line_min_confidence) {fail("Cone clearance unavailable");break;}
         cmd.speed=params_.cone_speed;cmd.steer=follow(avoidance,cmd.speed,t);
         if(stage_!=Stage::Fault && clearConfirmed(o.cones.empty() && o.blackPath.confidence>=params_.line_min_confidence) && travel>=params_.cone_min_travel_m)
             enter(Stage::ToRing,t);
@@ -113,7 +117,7 @@ Command Mission::update(const Observation& o,const Telemetry& t,const Path& avoi
             if(crossStopRequired_) {
                 // Decelerate progressively before the stop row, avoiding reverse braking.
                 cmd.speed=params_.cross_speed*clamp((params_.cross_stop_y_ratio-o.stripeY)/
-                    std::max(.02,params_.cross_stop_y_ratio-params_.cross_near_y_ratio),0.,1.);
+                    std::max(.02,params_.cross_stop_y_ratio-params_.cross_near_y_ratio),.25,1.);
                 if(o.stripeY>=params_.cross_stop_y_ratio) {enter(Stage::CrossWait,t);stopStarted_=spoke_=false;cmd.speed=0;}
             } else if(o.barObservable) enter(Stage::CrossPass,t);
             else {cmd.speed=0; /* Unknown bar state must not be interpreted as clear. */}
@@ -138,7 +142,8 @@ Command Mission::update(const Observation& o,const Telemetry& t,const Path& avoi
         if(travel>params_.cross_pass_m*2.5) fail("Cannot reacquire line after crossing");
         break;
     case Stage::ToGarage:
-        black();
+        if(o.garage && o.blackPath.confidence<params_.line_min_confidence) {cmd.speed=params_.parking_speed;road();}
+        else black();
         if(stage_!=Stage::Fault && travel>=params_.garage_min_after_cross_m && confirmed(o.garage)) {
             ++completedLaps_;
             if(completedLaps_<2) enter(Stage::ToCones,t);
@@ -153,8 +158,8 @@ Command Mission::update(const Observation& o,const Telemetry& t,const Path& avoi
     case Stage::GarageAlign: {
         cmd.speed=params_.parking_speed;
         double error=wrapDegrees(parkingYaw_-t.yaw);
-        cmd.steer=clamp(-error*params_.parking_heading_gain,-params_.max_steer_deg,params_.max_steer_deg);
-        if(confirmed(std::abs(error)<4) && travel>=params_.garage_align_distance_m) enter(Stage::GarageAdvance,t);
+        cmd.steer=clamp(-error*params_.parking_heading_gain+params_.lateral_gain*o.garageError,-params_.max_steer_deg,params_.max_steer_deg);
+        if(confirmed(std::abs(error)<4 && (!o.garage || std::abs(o.garageError)<params_.garage_align_tolerance)) && travel>=params_.garage_align_distance_m) enter(Stage::GarageAdvance,t);
         break;
     }
     case Stage::GarageAdvance:

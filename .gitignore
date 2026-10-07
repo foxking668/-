@@ -1,0 +1,12 @@
+# Local camera captures and distributable archives are not source code.
+/images10.6/
+/*.zip
+*.zip
+*.tar.gz
+*.exe
+*.pdb
+*.lib
+*.obj
+*.o
+*.log
+

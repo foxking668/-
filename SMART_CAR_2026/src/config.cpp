@@ -22,9 +22,8 @@ void Params::validate() const {
         throw std::runtime_error("Inconsistent parameter ranges");
     if(imu_format!="wit11" && imu_format!="ascii") throw std::runtime_error("Unknown IMU format");
     if(imu_baud!=9600 && imu_baud!=57600 && imu_baud!=115200) throw std::runtime_error("Unsupported IMU baud");
-#define INTEGER(n,d,lo,hi) if((std::string(#n).find("frames")!=std::string::npos || std::string(#n).find("width")!=std::string::npos && std::string(#n).find("ratio")==std::string::npos || std::string(#n).find("height")!=std::string::npos || std::string(#n)=="encoder_ppr" || std::string(#n)=="camera_index") && std::floor(n)!=n) throw std::runtime_error("Expected integer: " #n);
-    CAR_PARAMETERS(INTEGER)
-#undef INTEGER
+    for(double n : {confirm_frames,clear_frames,encoder_ppr,camera_index,camera_width,camera_height,process_width,process_height})
+        if(std::floor(n)!=n) throw std::runtime_error("Expected integer dimensions/count");
     for(double b : {motion_calibrated,require_imu,stop_every_cross})
         if(b!=0 && b!=1) throw std::runtime_error("Boolean parameter must be 0 or 1");
 }
@@ -44,7 +43,7 @@ Params Params::load(const std::string& filename) {
         if(key=="imu_format") { p.imu_format=value; continue; }
         size_t consumed=0; const double number=std::stod(value,&consumed);
         if(consumed!=value.size() || !std::isfinite(number)) throw std::runtime_error("Invalid number: "+key);
-        if(key=="imu_baud") { if(std::floor(number)!=number) throw std::runtime_error("IMU baud must be integer"); p.imu_baud=static_cast<int>(number); continue; }
+        if(key=="imu_baud") { if(std::floor(number)!=number || number<9600 || number>115200) throw std::runtime_error("Invalid IMU baud"); p.imu_baud=static_cast<int>(number); continue; }
         bool known=false;
 #define READ(n,d,lo,hi) if(key==#n) { p.n=number; known=true; }
         CAR_PARAMETERS(READ)
@@ -54,12 +53,13 @@ Params Params::load(const std::string& filename) {
     p.validate(); return p;
 }
 bool YawTracker::ingest(double wrappedYaw,double time) {
-    if(!std::isfinite(wrappedYaw)||!std::isfinite(time)) return false;
+    if(lost_) return false;
+    if(!std::isfinite(wrappedYaw)||!std::isfinite(time)) {lost_=true;return false;}
     if(!initialized_) { previous_=wrapDegrees(wrappedYaw); lastTime_=time; initialized_=true; return true; }
     const double dt=time-lastTime_, delta=wrapDegrees(wrappedYaw-previous_);
     if(dt<=0 || dt>0.35 || std::abs(delta)>std::max(5.0,300*dt)) {
-        // After a gap, re-anchor without claiming the unobserved turn.
-        if(dt>0.35) { previous_=wrapDegrees(wrappedYaw); lastTime_=time; }
+        // Continuity cannot be recovered safely mid-roundabout: restart required.
+        lost_=true;
         return false;
     }
     accumulated_+=delta; previous_=wrapDegrees(wrappedYaw); lastTime_=time; return true;

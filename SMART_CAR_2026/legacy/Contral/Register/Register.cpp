@@ -26,7 +26,7 @@ namespace Contral
             throw std::runtime_error("Cannot open /dev/mem");
         }
 
-        void *mapped_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, physical_address & ~(PAGE_SIZE - 1));
+        void *mapped_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd, physical_address & ~(ENCODER_MAP_BYTES - 1));
         if (mapped_addr == MAP_FAILED)
         {
             perror("Failed to map memory");
@@ -36,6 +36,6 @@ namespace Contral
 
         close(mem_fd);
 
-        return (void *)((uintptr_t)mapped_addr + (physical_address & (PAGE_SIZE - 1)));
+        return (void *)((uintptr_t)mapped_addr + (physical_address & (ENCODER_MAP_BYTES - 1)));
     }
 }

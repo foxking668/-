@@ -1,6 +1,5 @@
 #include "core.hpp"
 #include <limits>
-#include <queue>
 
 namespace car2026 {
 namespace {
@@ -53,17 +52,59 @@ void measurePath(Path& path) {
     path.curvature=far-2*middle+near;
 }
 
-void Vision::resetTracking() { previousBlack_=Path{}; }
+void Vision::resetTracking() {
+    previousBlack_=Path{};pendingBlack_=Path{};blackReacquireHits_=0;coneSideValid_=false;
+}
 
 Path Vision::trackBlack(int w,int h,Stage stage) {
+    if(!previousBlack_.x.empty() && previousBlack_.x.size()!=size_t(h)) resetTracking();
+    const int bottom=int(h*.95);
+    Path path=trackBlackFrom(w,h,stage,previousBlack_,pathX(previousBlack_,bottom,h,.5));
+    if(path.confidence>=params_.line_min_confidence) {
+        previousBlack_=path;pendingBlack_=Path{};blackReacquireHits_=0;
+        return path;
+    }
+
+    // A stale local prediction must not prevent reacquisition. Search near the
+    // car for one narrow black segment bordered by white road on BOTH sides.
+    // Multiple plausible branches remain unknown rather than choosing one.
+    std::vector<Run> seeds;
+    for(int y=bottom;y>=bottom-h/12;--y) {
+        for(const auto& run:runs(black_,w,y,int(w*.04),int(w*.96))) {
+            if(run.width()<std::max(1.,w*params_.line_width_min_ratio) ||
+               run.width()>w*params_.line_width_max_ratio) continue;
+            if(white_[y*w+run.a-1] && white_[y*w+run.b+1]) seeds.push_back(run);
+        }
+        if(!seeds.empty()) break;
+    }
+    if(seeds.size()==1) {
+        Path candidate=trackBlackFrom(w,h,stage,Path{},seeds.front().center()/w);
+        if(candidate.confidence>=params_.line_min_confidence) {
+            const bool consistent=pendingBlack_.valid() &&
+                std::abs(candidate.lateral-pendingBlack_.lateral)<=params_.line_search_ratio*.5 &&
+                std::abs(candidate.heading-pendingBlack_.heading)<=params_.line_search_ratio;
+            blackReacquireHits_=consistent ? blackReacquireHits_+1 : 1;
+            pendingBlack_=candidate;
+            if(blackReacquireHits_>=int(params_.confirm_frames)) {
+                previousBlack_=candidate;pendingBlack_=Path{};blackReacquireHits_=0;
+                return candidate;
+            }
+            return path;
+        }
+    }
+    pendingBlack_=Path{};blackReacquireHits_=0;
+    return path;
+}
+
+Path Vision::trackBlackFrom(int w,int h,Stage stage,const Path& priorPath,double startX) {
     Path path; path.x.assign(h,-1);
     const int bottom=int(h*.95), top=int(h*std::max(.35,params_.crop_top_ratio));
-    double predicted=pathX(previousBlack_,bottom,h,.5)*w, slope=0;
+    double predicted=startX*w, slope=0;
     int hits=0,lastY=bottom,misses=0;
     for(int y=bottom;y>=top;--y) {
         auto candidates=runs(black_,w,y,int(w*.04),int(w*.96));
         double bestScore=std::numeric_limits<double>::infinity(); int chosen=-1;
-        const double prior=pathX(previousBlack_,y,h,-1);
+        const double prior=pathX(priorPath,y,h,-1);
         for(size_t k=0;k<candidates.size();++k) {
             const auto& r=candidates[k];
             if(r.width()<std::max(1.,w*params_.line_width_min_ratio) || r.width()>w*params_.line_width_max_ratio) continue;
@@ -92,7 +133,6 @@ Path Vision::trackBlack(int w,int h,Stage stage) {
         previous=y;
     }
     measurePath(path);
-    if(path.confidence>=params_.line_min_confidence) previousBlack_=path;
     return path;
 }
 
@@ -119,7 +159,7 @@ Path Vision::trackRoad(int w,int h,Stage stage) {
             // Prefer corridor containing the previous point, then nearest centre.
             double score=std::abs(r.center()-predicted);
             if(predicted>=r.a && predicted<=r.b) score*=.3;
-            if(isRing(stage) && y<h*.7) score+=params_.ring_side*(r.center()-w*.5)*.12;
+            if(isRing(stage) && y<h*.7) score-=params_.ring_side*(r.center()-w*.5)*.12;
             if(score<best) { best=score; selected=int(i); }
         }
         if(selected<0) continue;
@@ -157,7 +197,7 @@ std::vector<Blob> Vision::blueBlobs(int w,int h) const {
 
 Observation Vision::analyze(const Image& image,Stage stage) {
     Observation o; const int w=image.width,h=image.height;
-    if(w<32||h<24||image.pixels.size()!=size_t(w)*h) return o;
+    if(w<32||h<24||image.pixels.size()!=size_t(w)*h) {resetTracking();return o;}
     black_.assign(w*h,0);white_.assign(w*h,0);blue_.assign(w*h,0);
     std::vector<uint8_t> barMask(w*h);
     int exposurePixels=0;
@@ -170,7 +210,7 @@ Observation Vision::analyze(const Image& image,Stage stage) {
         if(c.v>35) ++exposurePixels;
     }
     o.frameValid=exposurePixels>w*h*.08;
-    if(!o.frameValid) return o;
+    if(!o.frameValid) {resetTracking();return o;}
     o.blackPath=trackBlack(w,h,stage);
     o.roadPath=trackRoad(w,h,stage);
     auto blobs=blueBlobs(w,h);
@@ -179,21 +219,27 @@ Observation Vision::analyze(const Image& image,Stage stage) {
         bool interior=b.x>2 && b.x+b.w<w-2 && b.y>int(h*params_.crop_top_ratio)+1 && b.y+b.h<h-2;
         int whiteBelow=0,sy=std::min(h-1,b.y+b.h+2);
         for(int x=std::max(0,b.x-3);x<std::min(w,b.x+b.w+3);++x) whiteBelow+=white_[sy*w+x];
-        if(interior && area>=params_.cone_min_area_ratio && area<=params_.cone_max_area_ratio &&
-           aspect>=.25 && aspect<=1.6 && whiteBelow>=b.w*.5) o.cones.push_back(b);
         // An enclosed large blue island is different from blue background touching image edges.
         int surround=0,total=0;
         for(int x=std::max(0,b.x-4);x<std::min(w,b.x+b.w+4);++x) {
             surround+=white_[std::max(0,b.y-3)*w+x]+white_[sy*w+x]; total+=2;
         }
-        if(interior && aspect>.65 && aspect<2.0 && area>.025 && total && double(surround)/total>.55)
-            o.ringCandidate=true;
+        const bool ringIsland=interior && aspect>.65 && aspect<2.0 && area>.025 &&
+                              total && double(surround)/total>.55;
+        // Classify each component once. The overlapping cone area range must
+        // not keep Mission in Cones when the next roundabout is already visible.
+        // Other, separate cone components are still detected in the same frame.
+        if(ringIsland) {
+            o.ringCandidate=true;o.ringIslands.push_back(b);
+        }
+        else if(interior && area>=params_.cone_min_area_ratio && area<=params_.cone_max_area_ratio &&
+                aspect>=.25 && aspect<=1.6 && whiteBelow>=b.w*.5) o.cones.push_back(b);
     }
     std::sort(o.cones.begin(),o.cones.end(),[](const Blob& a,const Blob& b){return a.bottomY>b.bottomY;});
 
     // Multiple dark vertical strips produce several short black runs across road rows.
     // Reject border/background and the single guide line before declaring a crossing.
-    int stripeRows=0; double stripeYSum=0;
+    int stripeRows=0; double nearestStripeY=0;
     for(int y=int(h*.38);y<int(h*.93);y+=2) {
         auto dark=runs(black_,w,y,int(w*.12),int(w*.88));
         std::vector<Run> qualified;
@@ -202,10 +248,10 @@ Observation Vision::analyze(const Image& image,Stage stage) {
         int minGap=w,maxGap=0;
         for(size_t k=1;k<qualified.size();++k) { int gap=qualified[k].a-qualified[k-1].b; minGap=std::min(minGap,gap); maxGap=std::max(maxGap,gap); }
         if(minGap>=2 && maxGap<=minGap*3 && qualified.back().b-qualified.front().a>w*.18) {
-            ++stripeRows;stripeYSum+=double(y)/h;
+            ++stripeRows;nearestStripeY=double(y)/h;
         }
     }
-    o.stripe=stripeRows>=3; if(o.stripe) o.stripeY=stripeYSum/stripeRows;
+    o.stripe=stripeRows>=3; if(o.stripe) o.stripeY=nearestStripeY;
 
     // Raised/lowered crossbar must be calibrated from real footage. This uses colourful
     // non-blue occupancy over a broad horizontal span and neutral dark horizontal bars.
@@ -233,6 +279,8 @@ Observation Vision::analyze(const Image& image,Stage stage) {
     columns=runs(columnMask,w,0,int(w*.08),int(w*.92));
     for(size_t a=0;a<columns.size();++a) for(size_t b=a+1;b<columns.size();++b) {
         auto l=columns[a],r=columns[b];
+        // Columns clipped by the ROI are usually the outer blue floor, not bay walls.
+        if(l.a<=int(w*.08)+1 || r.b>=int(w*.92)-1) continue;
         if(l.width()>w*.18||r.width()>w*.18||r.a-l.b<w*.20||r.a-l.b>w*.65) continue;
         int whites=0,checks=0;
         for(int y=int(h*.60);y<int(h*.88);y+=3) for(int x=l.b+1;x<r.a;x+=3) { whites+=white_[y*w+x]; ++checks; }
@@ -244,17 +292,26 @@ Observation Vision::analyze(const Image& image,Stage stage) {
 Path Vision::avoidCones(const Observation& o,const Image& image) {
     Path path=o.roadPath;
     if(!path.valid()) return path;
-    // Keep the path inside white road margins; inflate cones by a tunable clearance.
-    // Select the nearest cone, not an average of opposite-side cones.
-    if(o.cones.empty()) return path;
-    const auto& cone=o.cones.front();
-    const double center=pathX(path,int(cone.bottomY*image.height),image.height,.5);
-    const double halfWidth=double(cone.w)/(2*image.width)+params_.cone_clearance_ratio;
-    const double left=cone.bottomX-halfWidth,right=cone.bottomX+halfWidth;
-    const bool passRight=cone.bottomX<center;
+    // Keep the path inside white road margins; inflate obstacles by a tunable clearance.
+    // Select the nearest obstacle, not an average of opposite-side cones.
+    // A ring island no longer counts as a cone, but still needs clearance while
+    // Mission is approaching it through the cone stages.
+    const Blob* nearest=o.cones.empty() ? nullptr : &o.cones.front();
+    for(const auto& island:o.ringIslands)
+        if(!nearest || island.bottomY>nearest->bottomY) nearest=&island;
+    if(!nearest) {coneSideValid_=false;return path;}
+    const auto& obstacle=*nearest;
+    const double center=pathX(path,int(obstacle.bottomY*image.height),image.height,.5);
+    const double halfWidth=double(obstacle.w)/(2*image.width)+params_.cone_clearance_ratio;
+    const double left=obstacle.bottomX-halfWidth,right=obstacle.bottomX+halfWidth;
+    // Keep the side for a spatially continuous obstacle; centroid noise must not flip steering.
+    if(!coneSideValid_ || std::abs(obstacle.bottomX-lastConeX_)>.10 || obstacle.bottomY<lastConeY_-.12)
+        passRight_=obstacle.bottomX<center;
+    coneSideValid_=true;lastConeX_=obstacle.bottomX;lastConeY_=obstacle.bottomY;
+    const bool passRight=passRight_;
     for(int y=int(image.height*.38);y<int(image.height*.95);++y) {
         if(path.x[y]<0) continue;
-        const double distance=std::abs(double(y)/image.height-cone.bottomY);
+        const double distance=std::abs(double(y)/image.height-obstacle.bottomY);
         const double influence=std::exp(-distance*distance/.09);
         const double target=passRight ? std::max(path.x[y],right) : std::min(path.x[y],left);
         const double candidate=path.x[y]+influence*(target-path.x[y]);

@@ -49,6 +49,7 @@ namespace Contral
 
         log.logOutputConsole("Initialize Motor", LOG_INFO);
 
+        try {
         this->pwm_left = new PwmController(pwm_left_chip, pwm_left_index);
         this->pwm_right = new PwmController(pwm_right_chip, pwm_right_index);
         this->dir_left = new GPIO(dir_left_index);
@@ -75,9 +76,11 @@ namespace Contral
             log.logOutputConsole("Left Motor Initialize Failed", LOG_ERROR);
         }
 
-        pwmControllerLeft->enable();
+        pwmControllerLeft->disable();
+        pwmControllerLeft->setDutyCycle(0);
         pwmControllerLeft->setPeriod(MOTOR_PWM_PERIOD);
         pwmControllerLeft->setDutyCycle(0);
+        pwmControllerLeft->enable();
 
         PwmController *pwmControllerRight = (PwmController *)this->pwm_right;
 
@@ -90,9 +93,11 @@ namespace Contral
             log.logOutputConsole("Right Motor Initialize Failed", LOG_ERROR);
         }
 
-        pwmControllerRight->enable();
+        pwmControllerRight->disable();
+        pwmControllerRight->setDutyCycle(0);
         pwmControllerRight->setPeriod(MOTOR_PWM_PERIOD);
         pwmControllerRight->setDutyCycle(0);
+        pwmControllerRight->enable();
 
         GPIO *gpio = (GPIO *)this->dir_left;
         gpio->setDirection("out");
@@ -113,6 +118,7 @@ namespace Contral
         this->pwm_right_value = 0;
         this->left_pid_attr = nullptr;
         this->right_pid_attr = nullptr;
+        } catch(...) {releaseResources();throw;}
     }
 
     /*
@@ -282,6 +288,12 @@ namespace Contral
 
     Motor::~Motor()
     {
+        releaseResources();
+    }
+
+    void Motor::releaseResources() noexcept
+    {
+        if(motor_enable_gpio) try {static_cast<GPIO*>(motor_enable_gpio)->setValue(false);} catch(...) {}
         if (this->pwm_left != nullptr)
         {
             PwmController *pwmController = (PwmController *)this->pwm_left;

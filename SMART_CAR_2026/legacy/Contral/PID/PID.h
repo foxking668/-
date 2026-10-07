@@ -30,6 +30,8 @@
  */
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
 
 // 此版本是有注释版本，注释由AI生成的，仅供参考。
 
@@ -48,21 +50,7 @@
 // #define false 0
 // #endif // !bool
 
-#ifndef NULL
-#define NULL ((void *)0)
-#endif // !NULL
-
-#ifndef uint8_t
-#define uint8_t unsigned char
-#endif // !uint8_t
-
-#ifndef uint16_t
-#define uint16_t unsigned short
-#endif // !uint8_t
-
-#ifndef size_t
-#define size_t unsigned long long
-#endif // !size_t
+// Standard integer/size types must not be macros: macros corrupt OpenCV/std headers.
 
 #ifndef PID_MEMORY_HEAP_SIZE
 #define PID_MEMORY_HEAP_SIZE 1024

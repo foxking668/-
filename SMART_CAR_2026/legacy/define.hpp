@@ -29,7 +29,7 @@
 #define CAMERA_PATH_OR_INDEX "/dev/video0"
 
 /*==================Register===================*/
-#define PAGE_SIZE 0x10000
+#define ENCODER_MAP_BYTES 0x10000
 
 #define REG_READ(addr) (*(volatile uint32_t *)(addr))
 #define REG_WRITE(addr, val) (*(volatile uint32_t *)(addr) = (val))

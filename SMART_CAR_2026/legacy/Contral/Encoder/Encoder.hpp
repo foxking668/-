@@ -47,10 +47,11 @@ namespace Contral
     private:
         uint32_t base_addr;
         double pulses_per_revolution = Encoder_PPR;
-        void *direction_gpio; // 这里直接使用GPIO类会报未找到类名的错误
-        void *low_buffer;
-        void *full_buffer;
-        void *control_buffer;
+        void *direction_gpio=nullptr;
+        void *low_buffer=nullptr;
+        void *full_buffer=nullptr;
+        void *control_buffer=nullptr;
+        void releaseResources() noexcept;
         /**
          * @brief 初始化 pwmInit 相关资源
          *

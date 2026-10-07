@@ -21,7 +21,7 @@ inline double wrapDegrees(double x) {
  X(wheel_circumference_m, 0.20, 0.05, 1.0) \
  X(wheelbase_m, 0.18, 0.08, 0.60) \
  X(steer_to_wheel_ratio, 1.0, 0.05, 3.0) \
- X(steer_offset_deg, -15.0, -30, 30) \
+ X(steer_offset_deg, 0.0, -30, 30) \
  X(steer_sign, 1, -1, 1) \
  X(encoder_left_sign, 1, -1, 1) \
  X(encoder_right_sign, 1, -1, 1) \
@@ -64,7 +64,6 @@ inline double wrapDegrees(double x) {
  X(cone_min_area_ratio, 0.0008, 0.0001, 0.02) \
  X(cone_max_area_ratio, 0.07, 0.005, 0.3) \
  X(cone_clearance_ratio, 0.12, 0.03, 0.3) \
- X(cone_pass_y_ratio, 0.88, 0.6, 0.98) \
  X(cone_min_travel_m, 0.5, 0.1, 5) \
  X(cone_timeout_s, 35, 5, 120) \
  X(ring_side, -1, -1, 1) \
@@ -137,6 +136,7 @@ struct Observation {
     double stripeY=0, garageError=0;
     Path blackPath, roadPath;
     std::vector<Blob> cones;
+    std::vector<Blob> ringIslands; // Excluded from cone count, retained as approach obstacles.
 };
 struct Telemetry {
     double time=0, distance=0, speed=0, yaw=0;
@@ -165,8 +165,13 @@ public:
 private:
     Params params_;
     Path previousBlack_;
+    Path pendingBlack_;
+    int blackReacquireHits_=0;
+    bool coneSideValid_=false, passRight_=false;
+    double lastConeX_=0,lastConeY_=0;
     std::vector<uint8_t> black_, white_, blue_;
     Path trackBlack(int w,int h, Stage stage);
+    Path trackBlackFrom(int w,int h, Stage stage,const Path& prior,double startX);
     Path trackRoad(int w,int h, Stage stage);
     std::vector<Blob> blueBlobs(int w,int h) const;
 };
@@ -186,7 +191,7 @@ private:
     int completedLaps_=0, hits_=0, clears_=0;
     bool initialized_=false, stopStarted_=false, spoke_=false;
     double stageTime_=0, stageDistance_=0, ringYaw_=0, stopTime_=0;
-    double parkingYaw_=0, lastPathTime_=-1e9, lastSteer_=0, lastTime_=0;
+    double parkingYaw_=0, lastPathTime_=-1e9, lastSteer_=0, lastTime_=0, lastDistance_=0;
     bool crossStopRequired_=false;
     Path heldPath_;
     std::string fault_;
@@ -200,10 +205,10 @@ private:
 class YawTracker {
 public:
     bool ingest(double wrappedYaw,double time);
-    bool fresh(double time) const { return initialized_ && time-lastTime_>=0 && time-lastTime_<0.35; }
+    bool fresh(double time) const { return initialized_ && !lost_ && time-lastTime_>=0 && time-lastTime_<0.35; }
     double value() const { return accumulated_; }
 private:
-    bool initialized_=false;
+    bool initialized_=false, lost_=false;
     double previous_=0, accumulated_=0, lastTime_=0;
 };
 } // namespace car2026

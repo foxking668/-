@@ -1,0 +1,9 @@
+build*/
+tools/zig*/
+tools/python_compiler/
+tools/validation_headers/opencv*/
+*.avi
+*.mp4
+replay.jsonl
+__pycache__/
+deploy/captures/

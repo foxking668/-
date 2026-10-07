@@ -15,11 +15,12 @@ namespace Contral
     class Motor
     {
     private:
-        void *pwm_left;
-        void *dir_left;
-        void *pwm_right;
-        void *dir_right;
-        void *motor_enable_gpio;
+        void *pwm_left=nullptr;
+        void *dir_left=nullptr;
+        void *pwm_right=nullptr;
+        void *dir_right=nullptr;
+        void *motor_enable_gpio=nullptr;
+        void releaseResources() noexcept;
 
         st_PID_Attr *left_pid_attr;
         st_PID_Attr *right_pid_attr;

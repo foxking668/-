@@ -94,7 +94,6 @@ namespace Contral
         int getFileDescriptor() const; // 获取 GPIO 文件描述符
 
     private:
-        int gpioNum;
         int fd; // 文件描述符
         std::string gpioPath;
 

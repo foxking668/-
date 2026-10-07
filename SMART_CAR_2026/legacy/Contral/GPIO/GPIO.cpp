@@ -24,17 +24,18 @@ namespace Contral
      *
      * @param gpioNum GPIO 编号，用于配置方向或电平读写引脚。
      */
-    GPIO::GPIO(int gpioNum) : gpioNum(gpioNum), fd(-1)
+    GPIO::GPIO(int gpioNum) : fd(-1)
     {
         gpioPath = "/sys/class/gpio/gpio" + std::to_string(gpioNum);
 
         // 导出 GPIO
-        if (!writeToFile("/sys/class/gpio/export", std::to_string(gpioNum)))
+        if (access(gpioPath.c_str(),F_OK)!=0 && !writeToFile("/sys/class/gpio/export", std::to_string(gpioNum)))
         {
             throw std::runtime_error("Failed to export GPIO " + std::to_string(gpioNum));
         }
 
         // 打开 value 文件，读写方式
+        for(int i=0;i<50 && access((gpioPath+"/value").c_str(),F_OK)!=0;++i) usleep(10000);
         fd = open((gpioPath + "/value").c_str(), O_RDWR);
         if (fd == -1)
         {
@@ -68,7 +69,8 @@ namespace Contral
      */
     bool GPIO::setDirection(const std::string &direction)
     {
-        return writeToFile(gpioPath + "/direction", direction);
+        if(!writeToFile(gpioPath+"/direction",direction)) throw std::runtime_error("GPIO direction failed: "+gpioPath);
+        return true;
     }
 
     /**
@@ -106,10 +108,10 @@ namespace Contral
 
         // 使用文件描述符写入 GPIO 值 ('1' 或 '0')
         const char *val_str = value ? "1" : "0";
-        if (write(fd, val_str, 1) != 1)
+        if (lseek(fd,0,SEEK_SET)<0 || write(fd, val_str, 1) != 1)
         {
             /* quiet: GPIO write failed */
-            return false;
+            throw std::runtime_error("GPIO write failed: "+gpioPath);
         }
         return true;
     }
@@ -135,7 +137,7 @@ namespace Contral
         if (read(fd, &value, 1) != 1)
         {
             /* quiet: GPIO read failed */
-            return false;
+            throw std::runtime_error("GPIO read failed: "+gpioPath);
         }
         return value == '1'; // 如果读取的值为 '1'，则返回 true，否则返回 false
     }
@@ -173,6 +175,7 @@ namespace Contral
             return false;
         }
         file << value;
+        file.flush();
         return file.good();
     }
 }

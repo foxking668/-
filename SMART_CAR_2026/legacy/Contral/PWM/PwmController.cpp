@@ -68,8 +68,11 @@ namespace Contral
      */
     bool PwmController::initialize()
     {
+        if (access((pwm_path + "period").c_str(), F_OK) == 0) return true;
         std::string exportPath = "/sys/class/pwm/pwmchip" + std::to_string(this->pwm_chip) + "/export";
-        return writeToFile(exportPath, std::to_string(this->pwm_number));
+        if (!writeToFile(exportPath, std::to_string(this->pwm_number))) throw std::runtime_error("PWM export failed: " + pwm_path);
+        for (int i=0;i<50 && access((pwm_path+"period").c_str(),F_OK)!=0;++i) usleep(10000);
+        return true;
     }
 
     // 启用PWM
@@ -83,7 +86,8 @@ namespace Contral
      */
     bool PwmController::enable()
     {
-        return writeToFile(this->pwm_path + "enable", std::to_string(1));
+        if (!writeToFile(pwm_path+"enable","1")) throw std::runtime_error("PWM enable failed: "+pwm_path);
+        return true;
     }
 
     // 禁用PWM
@@ -114,7 +118,8 @@ namespace Contral
     bool PwmController::setPeriod(unsigned int period_ns)
     {
         this->period = period_ns;
-        return writeToFile(this->pwm_path + "period", std::to_string(period_ns));
+        if (!writeToFile(pwm_path+"period",std::to_string(period_ns))) throw std::runtime_error("PWM period failed: "+pwm_path);
+        return true;
     }
 
     // 设置低电平时间（以纳秒为单位）
@@ -131,7 +136,8 @@ namespace Contral
     bool PwmController::setDutyCycle(unsigned int duty_cycle_ns)
     {
         this->duty_cycle = duty_cycle_ns;
-        return writeToFile(this->pwm_path + "duty_cycle", std::to_string(duty_cycle_ns));
+        if (!writeToFile(pwm_path+"duty_cycle",std::to_string(duty_cycle_ns))) throw std::runtime_error("PWM duty failed: "+pwm_path);
+        return true;
     }
 
     // 向文件写入值的辅助函数
@@ -154,7 +160,9 @@ namespace Contral
             return false;
         }
         file << value;
+        file.flush();
+        bool success=file.good();
         file.close();
-        return true;
+        return success && !file.fail();
     }
 }
