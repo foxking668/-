@@ -28,12 +28,12 @@ namespace fs=std::filesystem;
 using car2026::capture::Config;
 using car2026::capture::SensorSpec;
 namespace {
-constexpr const char* recorderVersion="2026-10-07.3";
+constexpr const char* recorderVersion="2026-10-07.4";
 constexpr const char* sensorHeader="cycle,channel,read_start_ns,read_end_ns,elapsed_s,value,unit,valid,status,read_return,raw_hex";
 constexpr const char* frameHeader="frame_index,read_start_ns,read_end_ns,elapsed_s";
 constexpr const char* markerHeader="monotonic_ns,elapsed_s,marker";
 constexpr const char* observerHeader="frame_index,frame_read_start_s,processed_time_s,frame_age_s,motion,reference_id,has_reference,state,line_confidence,line_ambiguous,line_discontinuous,lateral_error_image,heading_error_image,suggestion_valid,suggested_command,motor_writes,servo_writes";
-constexpr const char* probeHeader="frame_index,processed_time_s,encoder_fresh,stationary,encoder_age_s,key,probe_state,decision,requested_command,last_successful_command,servo_api_attempts,servo_api_successes,motor_writes";
+constexpr const char* probeHeader="frame_index,processed_time_s,encoder_fresh,stationary,encoder_age_s,key,probe_state,decision,requested_command,last_successful_command,servo_api_attempts,servo_api_successes,motor_writes,reason,encoder_reason,zero_duration_s,last_encoder_left_delta,last_encoder_right_delta,movement_epoch,auto_phase";
 constexpr const char* servoEventHeader="request,monotonic_ns,elapsed_s,command,duty,status";
 volatile std::sig_atomic_t interrupted=0;
 void signalHandler(int) {interrupted=1;}
@@ -183,10 +183,8 @@ void sensorLoop(const Config& config,const fs::path& directory,int64_t origin,
                 if(index<encoders.size()) encoders[index]=sample;
                 if(index==1) {
                     std::lock_guard<std::mutex> held(rest.mutex);
-                    const bool pairFresh=double(after-encoderPairStart)/1e9<=.25;
-                    rest.gate.sample(encoders[0].valid && pairFresh,encoders[0].value,
-                                     encoders[1].valid && pairFresh,encoders[1].value,
-                                     double(after-origin)/1e9);
+                    rest.gate.sample(encoders[0].valid,encoders[0].value,encoders[1].valid,encoders[1].value,
+                                     double(after-origin)/1e9,double(after-encoderPairStart)/1e9);
                 }
                 file<<cycle<<','<<sensor.name<<','<<before<<','<<after<<','<<double(after-origin)/1e9<<',';
                 if(sample.valid) file<<sample.value;
@@ -203,8 +201,8 @@ void sensorLoop(const Config& config,const fs::path& directory,int64_t origin,
     } catch(...) {failure=std::current_exception();stop.store(true);}
 }
 bool recordMarkers(std::ofstream& markers,int64_t origin,std::string& pending,bool& inputEnded,
-                   car2026::capture::ProbeInput* probeInput=nullptr) {
-    if(inputEnded) return !probeInput;
+                   car2026::capture::ProbeInput* probeInput=nullptr,bool allowEof=false) {
+    if(inputEnded) return !probeInput || allowEof;
     // Drain already queued canonical terminal lines in probe mode. Q anywhere
     // in this bounded batch cancels all pending commands before any PWM write.
     size_t drained=0;
@@ -218,7 +216,7 @@ bool recordMarkers(std::ofstream& markers,int64_t origin,std::string& pending,bo
         // Avoid iostream prefetch: queued lines must not wait for another keypress.
         char buffer[128];const ssize_t count=read(STDIN_FILENO,buffer,sizeof(buffer));
         if(count<0) {if(errno==EINTR) return true;throw std::runtime_error("Terminal read failed");}
-        if(count==0) {inputEnded=true;return !probeInput;}
+        if(count==0) {inputEnded=true;return !probeInput || allowEof;}
         drained+=size_t(count);
         pending.append(buffer,size_t(count));
         size_t end;
@@ -262,10 +260,11 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     const auto origin=monotonicNs();
     auto metadata=outputFile(directory/"session.txt");
     const auto observerMotion=options.observeSteering.value_or(car2026::ManualMotion::Reverse);
-    const bool hasObserver=options.observeSteering.has_value() || options.steeringProbe;
-    const std::string mode=options.steeringProbe ? "MANUAL_REVERSE_STEERING_PROBE_SERVO_ONLY" :
+    const bool hasObserver=options.observeSteering.has_value() || options.isProbe();
+    const std::string mode=options.autoProbe ? "AUTO_REVERSE_STEERING_PROBE_SERVO_ONLY" :
+        (options.isProbe() ? "MANUAL_REVERSE_STEERING_PROBE_SERVO_ONLY" :
         (options.observeSteering ? "VISUAL_STEERING_OBSERVER_NO_ACTUATOR_WRITES" :
-        (options.steerCommand ? "MANUAL_PUSH_SERVO_ONLY" : "MANUAL_CAPTURE_NO_ACTUATOR_WRITES"));
+        (options.steerCommand ? "MANUAL_PUSH_SERVO_ONLY" : "MANUAL_CAPTURE_NO_ACTUATOR_WRITES")));
     metadata<<"mode="<<mode<<"\nrecorder_version="<<recorderVersion<<"\nimu=not_installed\norigin_ns="<<origin
             <<"\nstart_utc="<<utcStamp()<<"\nencoder_mode="<<hardware.encoder_mode
             <<"\nencoder_values=raw signed counts; first delta read includes the untimed startup interval\n"
@@ -284,13 +283,18 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                 <<"\nobserver_target=first stable locally straight image reference; NOT a measured bay axis or heading\n"
                   "suggestions_are_applied=0\nmotor_writes=0\nservo_writes=0\n"
                   "observer_age=processing completion minus camera read start; exposure age is unknown\n";
-    if(options.steeringProbe)
-        metadata<<"observer_motion=reverse\nobserver_target=manual R while encoder-rest gate passes; local image only\n"
+    if(options.isProbe())
+        metadata<<"observer_motion=reverse\nobserver_target="<<(options.autoProbe ? "automatic stationary local image reference" : "manual R stationary local image reference")<<'\n'<<
                   "suggestions_are_applied=0\nsteering_angle_measured=0\nmotor_writes=0\n"
-                  "probe_commands=keyboard 0,+2,-2; only while encoder-rest gate passes\n"
-                  "probe_loss=latched hold; stop pulling; zero only after encoder-rest gate; R required to rearm\n"
                   "probe_rest=both delta counts exactly zero for >=0.8s, valid samples <=0.25s old; not physical rest proof\n"
                   "servo_exit=configured_zero_command; stop pulling before Q/Ctrl+C/duration expiry\n";
+    if(options.autoProbe)
+        metadata<<"probe_commands=automatic 0 then fixed +2 then 0; never uses image suggestions\n"
+                  "probe_loss=stop pulling, stationary zero and finish; no rearm or repeated nonzero trial\n"
+                  "auto_time_limits_s=initial rest 15, reference 15, start pulling 12, active pull 10\n";
+    else if(options.isProbe())
+        metadata<<"probe_commands=keyboard 0,+2,-2; only while encoder-rest gate passes\n"
+                  "probe_loss=latched hold; stop pulling; zero only after encoder-rest gate; R required to rearm\n";
     for(const auto& sensor:config.sensors)
         metadata<<sensor.name<<"="<<sensor.path<<" format="<<sensor.format<<" unit="<<sensor.unit<<'\n';
     metadata.flush();nonemptyFileSize(directory/"session.txt");
@@ -299,18 +303,24 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     frames.flush();markers.flush();
     nonemptyFileSize(directory/"frames.csv");nonemptyFileSize(directory/"markers.csv");
     std::cout<<"SESSION "<<directory.string()<<'\n';
-    if(options.steerCommand || options.steeringProbe)
+    if(options.autoProbe)
+        std::cout<<"SERVO ONLY; no motor/GPIO/IMU initialization or writes. Keep stopped until AUTO_PULL_READY.\n";
+    else if(options.steerCommand || options.isProbe())
         std::cout<<"SERVO ONLY; no motor/GPIO/IMU initialization or writes. Wait for STEER_READY before manual pushing.\n"
                    "Stop pushing before Q/Ctrl+C or duration expiry; exit attempts configured zero steering.\n";
     else std::cout<<"No motor/servo/IMU initialization.\n";
     if(options.observeSteering)
         std::cout<<"OBSERVE ONLY motion="<<car2026::manualMotionName(*options.observeSteering)
                  <<"; suggestions are NOT applied. Keep the initial image steady until REFERENCE_READY.\n";
-    if(options.steeringProbe)
+    if(options.autoProbe)
+        std::cout<<"AUTO PROBE: 保持小车静止，等待【开始后拉 / AUTO_PULL_READY】；无需输入 R、+、0 或 Q。\n"
+                   "看到开始提示后缓慢后拉约20~30cm，再停稳；程序自动回零、结束和保存。\n"
+                   "出现【停止后拉 / AUTO_STOP_PULLING】就停止，保持静止等待保存。\n";
+    else if(options.isProbe())
         std::cout<<"PROBE ONLY: no automatic image-error steering. Keep stopped; R+Enter centers and builds a reference.\n"
                    "Wait for PROBE_REFERENCE_READY. While stopped: + or - or 0 +Enter; wait for PROBE_STEER_READY.\n"
                    "Then gently pull backward. S+Enter latches hold; HOLD means STOP PULLING. Do not switch commands while moving.\n";
-    std::cout<<"Enter A..E to mark, Q or Ctrl+C to finish.\n";
+    if(!options.autoProbe) std::cout<<"Enter A..E to mark, Q or Ctrl+C to finish.\n";
     if(!missing.empty()) {
         std::cout<<"PARTIAL: unconfigured channels:";
         for(const auto& name:missing) std::cout<<' '<<name;
@@ -326,6 +336,10 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     std::optional<car2026::VisualSteeringObserver> observer;
     std::ofstream observerFile;car2026::SteeringObservation latestSuggestion;
     std::ofstream probeFile,servoEvents;car2026::capture::ManualSteeringProbe probe;
+    car2026::capture::AutomaticSteeringProbe autoProbe(options.autoProbe ? duration : 45);
+    car2026::capture::ProbeAction latestProbe;
+    car2026::capture::EncoderRestStatus latestRest;
+    std::string lastProbeReport;
     bool probeReferenceActive=false;
     uint64_t servoRequests=0,servoAttempts=0,servoSuccesses=0;std::optional<double> lastServoCommand;
     bool exitZeroWriteOk=false;
@@ -333,7 +347,7 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
         observerVision.emplace(*vehicleParams);observer.emplace(*vehicleParams,observerMotion);
         observerFile=outputFile(directory/"visual_observer.csv");observerFile<<observerHeader<<'\n';observerFile.flush();
     }
-    if(options.steeringProbe) {
+    if(options.isProbe()) {
         probeFile=outputFile(directory/"steering_probe.csv");probeFile<<probeHeader<<'\n';probeFile.flush();
         servoEvents=outputFile(directory/"servo_events.csv");servoEvents<<servoEventHeader<<'\n';servoEvents.flush();
     }
@@ -399,31 +413,46 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                 observation=observerVision->analyze(car2026::processCameraFrame(image,*vehicleParams),car2026::Stage::GarageReverse);
                 processedTime=double(monotonicNs()-origin)/1e9;
                 const bool previouslyReferenced=latestSuggestion.hasReference;
-                if(!options.steeringProbe || probeReferenceActive)
+                if(!options.isProbe() || probeReferenceActive)
                     latestSuggestion=observer->observe(observation,frameTime,processedTime);
                 else {latestSuggestion={};latestSuggestion.state="WAIT_MANUAL_REFERENCE";}
-                if(!options.steeringProbe && !previouslyReferenced && latestSuggestion.hasReference)
+                if(!options.isProbe() && !previouslyReferenced && latestSuggestion.hasReference)
                     std::cout<<"REFERENCE_READY id="<<latestSuggestion.referenceId<<"; image target only, no actuator output\n"<<std::flush;
             }
             car2026::capture::ProbeInput probeInput;
             const bool keepRunning=recordMarkers(markers,origin,pendingInput,inputEnded,
-                                                  options.steeringProbe ? &probeInput : nullptr);
+                                                  options.isProbe() ? &probeInput : nullptr,options.autoProbe);
             const bool canWrite=keepRunning && !interrupted && !stop.load() && double(monotonicNs()-origin)/1e9<duration;
-            if(options.steeringProbe) {
+            if(options.isProbe()) {
                 const double decisionTime=double(monotonicNs()-origin)/1e9;
                 const auto rest=restGate.status(decisionTime);
+                latestRest=rest;
                 if(probeReferenceActive && decisionTime-frameTime>vehicleParams->frame_timeout_s) {
                     latestSuggestion.hasSuggestion=false;latestSuggestion.state="STALE_FRAME";
                     latestSuggestion.frameAge=decisionTime-frameTime;
                 }
-                auto action=probe.update(canWrite ? probeInput.key : car2026::capture::ProbeKey::Stop,
-                                         rest,latestSuggestion,decisionTime);
+                if(options.autoProbe && probeInput.key==car2026::capture::ProbeKey::Stop) autoProbe.stop("USER_STOP");
+                auto action=options.autoProbe ? autoProbe.update(rest,latestSuggestion,decisionTime) :
+                    probe.update(canWrite ? probeInput.key : car2026::capture::ProbeKey::Stop,rest,latestSuggestion,decisionTime);
                 if(!canWrite) {
                     action.command.reset();action.resetReference=false;action.decision="EXIT_NO_NEW_COMMAND";
                 }
-                if(action.command && canWrite && !probeServoWrite(*action.command,frameTime))
-                    action=probe.update(car2026::capture::ProbeKey::Stop,{},latestSuggestion,
-                                        double(monotonicNs()-origin)/1e9);
+                if(action.command && canWrite) {
+                    const bool written=probeServoWrite(*action.command,frameTime);
+                    const double writtenTime=double(monotonicNs()-origin)/1e9;
+                    if(options.autoProbe) {
+                        if(autoProbe.acknowledge(written,restGate.status(writtenTime),writtenTime,
+                                                writtenTime-frameTime<=vehicleParams->frame_timeout_s &&
+                                                !interrupted && !stop.load() && writtenTime<duration))
+                            std::cout<<"【开始后拉】AUTO_PULL_READY command=+2; 缓慢后拉20~30cm，然后停稳，无需输入任何按键。\n"<<std::flush;
+                        if(!written) {action.command.reset();action.decision="SERVO_REQUEST_CANCELLED";action.reason=autoProbe.outcome();}
+                        if(std::string(autoProbe.phaseName())=="WAIT_STOP") {
+                            action.decision="AUTO_STOP_PENDING";action.reason=autoProbe.outcome();
+                        }
+                        if(autoProbe.finished()) {action.decision="AUTO_ZERO_AND_FINISH";action.reason=autoProbe.outcome();}
+                    } else if(!written)
+                        action=probe.update(car2026::capture::ProbeKey::Stop,{},latestSuggestion,writtenTime);
+                }
                 if(action.resetReference) {
                     observer->reset();observerVision.emplace(*vehicleParams);
                     probeReferenceActive=action.decision=="CENTER_THEN_BUILD_REFERENCE";
@@ -432,14 +461,26 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                          <<car2026::capture::probeKeyName(probeInput.key)<<','<<action.state<<','<<action.decision<<',';
                 if(action.command && canWrite) probeFile<<*action.command;
                 probeFile<<',';if(lastServoCommand) probeFile<<*lastServoCommand;
-                probeFile<<','<<servoAttempts<<','<<servoSuccesses<<",0\n";
-                if(action.decision!="RECORD_RESPONSE_ONLY" && action.decision!="WAIT_R_WHILE_STOPPED" &&
-                   action.decision!="WAIT_STATIONARY_STRAIGHT_REFERENCE")
-                {
+                probeFile<<','<<servoAttempts<<','<<servoSuccesses<<",0,"<<car2026::capture::csvString(action.reason)<<','
+                         <<rest.reason<<','<<rest.zeroDuration<<',';
+                if(std::isfinite(rest.leftDelta)) probeFile<<rest.leftDelta;
+                probeFile<<',';if(std::isfinite(rest.rightDelta)) probeFile<<rest.rightDelta;
+                probeFile<<','<<rest.movementEpoch<<','<<(options.autoProbe ? autoProbe.phaseName() : "MANUAL")<<'\n';
+                latestProbe=action;
+                const std::string report=action.state+":"+action.decision+":"+action.reason;
+                if(report!=lastProbeReport || probeInput.key!=car2026::capture::ProbeKey::None) {
+                    lastProbeReport=report;
                     std::cout<<action.decision<<" state="<<action.state;
+                    if(!action.reason.empty()) std::cout<<" reason="<<action.reason;
                     if(action.command && canWrite) std::cout<<" command="<<*action.command<<" (software write only)";
                     std::cout<<std::endl;
+                    if(options.autoProbe && std::string(autoProbe.phaseName())=="WAIT_STOP")
+                        std::cout<<"【停止后拉】AUTO_STOP_PULLING; 停稳后程序自动回零并保存。\n"<<std::flush;
                 }
+                if(options.autoProbe && probeInput.key!=car2026::capture::ProbeKey::None)
+                    std::cout<<"AUTO模式无需输入按键；请按【开始后拉】或【停止后拉】提示操作。\n";
+                else if(probeInput.key==car2026::capture::ProbeKey::Invalid)
+                    std::cout<<"INVALID_PROBE_INPUT: use one R,+,-,0,S,Q followed by Enter; repeated +++ is not a command.\n";
             }
             if(observer) {
                 observerFile<<count-1<<','<<frameTime<<','<<processedTime<<','<<latestSuggestion.frameAge<<','
@@ -454,6 +495,10 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                 observerFile<<",0,"<<servoSuccesses<<'\n';
             }
             if(!canWrite) break;
+            if(options.autoProbe && autoProbe.finished()) {
+                std::cout<<"AUTO_TRIAL_FINISHED result="<<autoProbe.outcome()<<"; 请保持停稳，正在保存。\n"<<std::flush;
+                break;
+            }
             if(options.steerCommand && !servo) {
                 if(interrupted || stop.load()) break;
                 servoIo=std::make_unique<car2026::LinuxDeviceIo>(hardware);
@@ -471,7 +516,7 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
             if(now-lastReport>=std::chrono::seconds(1)) {
                 frames.flush();lastReport=now;
                 if(observer) observerFile.flush();
-                if(options.steeringProbe) probeFile.flush();
+                if(options.isProbe()) probeFile.flush();
                 if(fs::space(directory).available<64u*1024u*1024u) throw std::runtime_error("Recording disk space below 64 MiB");
                 std::cout<<"frames="<<count<<" elapsed="<<std::fixed<<std::setprecision(1)<<double(after-origin)/1e9;
                 for(size_t i=0;i<stats.size();++i)
@@ -480,6 +525,11 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                     std::cout<<" observe="<<latestSuggestion.state<<" suggested=";
                     if(latestSuggestion.hasSuggestion) std::cout<<latestSuggestion.suggestedCommand;else std::cout<<"unavailable";
                     std::cout<<" (NOT applied)";
+                }
+                if(options.isProbe()) {
+                    std::cout<<" probe="<<latestProbe.state<<" reason="<<latestProbe.reason<<" encoder="<<latestRest.reason
+                             <<" zero_s="<<latestRest.zeroDuration;
+                    if(options.autoProbe) std::cout<<" auto="<<autoProbe.phaseName();
                 }
                 std::cout<<std::endl;
             }
@@ -491,19 +541,20 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     std::exception_ptr servoFailure;
     if(servo && servo->commandAttempted()) {
         try {
-            if(options.steeringProbe) probeServoWrite(0,0,true);
+            if(options.isProbe()) probeServoWrite(0,0,true);
             else {servo->close();exitZeroWriteOk=true;}
             std::cout<<"SERVO_ZERO write completed (software only)\n";
         } catch(...) {servoFailure=std::current_exception();}
     }
     sampler.join();video.release();camera.release();
-    if(options.steerCommand || options.steeringProbe) metadata<<"servo_command_attempted="<<bool(servo && servo->commandAttempted())<<'\n';
-    if(options.steeringProbe)
+    if(options.steerCommand || options.isProbe()) metadata<<"servo_command_attempted="<<bool(servo && servo->commandAttempted())<<'\n';
+    if(options.isProbe())
         metadata<<"servo_api_attempts="<<servoAttempts<<"\nservo_api_successes="<<servoSuccesses<<'\n';
+    if(options.autoProbe) metadata<<"auto_phase="<<autoProbe.phaseName()<<"\nauto_result="<<autoProbe.outcome()<<'\n';
     if(servo && servo->commandAttempted()) metadata<<"servo_return_zero_write_ok="<<exitZeroWriteOk<<'\n';
     closeText(frames,directory/"frames.csv");closeText(markers,directory/"markers.csv");
     if(observer) closeText(observerFile,directory/"visual_observer.csv");
-    if(options.steeringProbe) {
+    if(options.isProbe()) {
         closeText(probeFile,directory/"steering_probe.csv");closeText(servoEvents,directory/"servo_events.csv");
     }
     bool sensorsGood=missing.empty();
@@ -528,9 +579,9 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     if(frameRows!=count) throw std::runtime_error("Frame CSV row count does not match captured frames");
     if(observer && verifyTextFile(directory/"visual_observer.csv",observerHeader)!=count)
         throw std::runtime_error("Observer CSV row count does not match captured frames");
-    if(options.steeringProbe && verifyTextFile(directory/"steering_probe.csv",probeHeader)!=count)
+    if(options.isProbe() && verifyTextFile(directory/"steering_probe.csv",probeHeader)!=count)
         throw std::runtime_error("Steering probe CSV row count does not match captured frames");
-    if(options.steeringProbe) verifyTextFile(directory/"servo_events.csv",servoEventHeader);
+    if(options.isProbe()) verifyTextFile(directory/"servo_events.csv",servoEventHeader);
     uint64_t expectedSensorRows=0;
     for(const auto& stat:stats) expectedSensorRows+=stat.valid.load()+stat.invalid.load();
     const auto sensorRows=verifyTextFile(directory/"sensors.csv",sensorHeader);
@@ -560,6 +611,8 @@ int main(int argc,char** argv) {
                              " [--steer-command -15..15 --vehicle-config file --duration <=60]\n"
                              " [--observe-steering forward|reverse --vehicle-config file --duration <=60]\n"
                              " [--steering-probe reverse --vehicle-config file --duration <=60]\n"
+                             " [--auto-probe reverse --vehicle-config file --duration <=60]\n"
+                             "Auto probe: keep stopped, wait for AUTO_PULL_READY, pull backward then stop; automatic zero and save.\n"
                              "Probe: keyboard R reference, +/0/- commands +2/0/-2 while stopped; S hold; SERVO ONLY.\n"
                              "Probe NEVER applies image suggestions; conflicts with fixed steering and observation.\n"
                              "Observation: no actuator writes; image-reference suggestions only; conflicts with --steer-command.\n"
@@ -569,14 +622,14 @@ int main(int argc,char** argv) {
         if(options.checkOutput) return checkOutput(options.output);
         auto config=car2026::capture::loadConfig(options.configFile);
         const auto hardware=car2026::HardwareConfig::load(options.hardwareFile);
-        if(options.steeringProbe && hardware.encoder_mode!="delta")
+        if(options.isProbe() && hardware.encoder_mode!="delta")
             throw std::runtime_error("Steering probe requires the configured delta encoder contract");
         std::optional<car2026::Params> vehicleParams;
-        if(options.steerCommand || options.observeSteering || options.steeringProbe) {
+        if(options.steerCommand || options.observeSteering || options.isProbe()) {
             vehicleParams=car2026::Params::load(options.vehicleFile);
             if(options.steerCommand && std::abs(*options.steerCommand)>vehicleParams->max_steer_deg)
                 throw std::runtime_error("Steering command exceeds vehicle-config command limit");
-            if(options.steeringProbe && vehicleParams->max_steer_deg<2)
+            if(options.isProbe() && vehicleParams->max_steer_deg<2)
                 throw std::runtime_error("Steering probe needs a configured command limit of at least 2");
         }
         fillEncoderPaths(config,hardware);
