@@ -17,6 +17,8 @@ struct SteeringObservation {
 // Curves/merged junction shapes cannot establish or replace its reference.
 // No device interface or actuator writes.
 // Image lateral/heading features are NOT metres or measured vehicle angles.
+// suggestedCommand is an unvalidated diagnostic candidate. Near/far image
+// features mix lateral position and orientation; do not connect it to an actuator.
 class VisualSteeringObserver {
 public:
     VisualSteeringObserver(const Params& params,ManualMotion motion);

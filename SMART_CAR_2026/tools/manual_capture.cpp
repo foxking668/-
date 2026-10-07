@@ -3,6 +3,7 @@
 #include "device_read_buffer.hpp"
 #include "servo_output.hpp"
 #include "manual_capture_options.hpp"
+#include "manual_steering_probe.hpp"
 #include "opencv_image.hpp"
 #include <opencv2/core.hpp>
 #include <opencv2/videoio.hpp>
@@ -17,6 +18,7 @@
 #include <fcntl.h>
 #include <iostream>
 #include <limits>
+#include <mutex>
 #include <poll.h>
 #include <thread>
 #include <sys/stat.h>
@@ -26,11 +28,13 @@ namespace fs=std::filesystem;
 using car2026::capture::Config;
 using car2026::capture::SensorSpec;
 namespace {
-constexpr const char* recorderVersion="2026-10-07.2";
+constexpr const char* recorderVersion="2026-10-07.3";
 constexpr const char* sensorHeader="cycle,channel,read_start_ns,read_end_ns,elapsed_s,value,unit,valid,status,read_return,raw_hex";
 constexpr const char* frameHeader="frame_index,read_start_ns,read_end_ns,elapsed_s";
 constexpr const char* markerHeader="monotonic_ns,elapsed_s,marker";
 constexpr const char* observerHeader="frame_index,frame_read_start_s,processed_time_s,frame_age_s,motion,reference_id,has_reference,state,line_confidence,line_ambiguous,line_discontinuous,lateral_error_image,heading_error_image,suggestion_valid,suggested_command,motor_writes,servo_writes";
+constexpr const char* probeHeader="frame_index,processed_time_s,encoder_fresh,stationary,encoder_age_s,key,probe_state,decision,requested_command,last_successful_command,servo_api_attempts,servo_api_successes,motor_writes";
+constexpr const char* servoEventHeader="request,monotonic_ns,elapsed_s,command,duty,status";
 volatile std::sig_atomic_t interrupted=0;
 void signalHandler(int) {interrupted=1;}
 int64_t monotonicNs() {
@@ -147,6 +151,12 @@ car2026::capture::Sample readSensor(const SensorSpec& sensor,bool factoryEncoder
     return result;
 }
 struct Stats {std::atomic<uint64_t> valid{0},invalid{0};};
+struct SharedRestGate {
+    std::mutex mutex;car2026::capture::EncoderRestGate gate;
+    car2026::capture::EncoderRestStatus status(double now) {
+        std::lock_guard<std::mutex> held(mutex);return gate.status(now);
+    }
+};
 void fillEncoderPaths(Config& config,const car2026::HardwareConfig& hardware) {
     // Only these verified interfaces have defaults. No guessed GPIO pin numbers.
     if(config.sensors[0].path.empty()) config.sensors[0].path=hardware.encoder_left;
@@ -156,7 +166,7 @@ void fillEncoderPaths(Config& config,const car2026::HardwareConfig& hardware) {
         throw std::runtime_error("Factory status-zero reads are restricted to configured board encoder paths");
 }
 void sensorLoop(const Config& config,const fs::path& directory,int64_t origin,
-                std::atomic<bool>& stop,std::array<Stats,8>& stats,std::exception_ptr& failure) {
+                std::atomic<bool>& stop,std::array<Stats,8>& stats,std::exception_ptr& failure,SharedRestGate& rest) {
     try {
         auto file=outputFile(directory/"sensors.csv");
         file<<sensorHeader<<'\n';file.flush();nonemptyFileSize(directory/"sensors.csv");
@@ -164,9 +174,20 @@ void sensorLoop(const Config& config,const fs::path& directory,int64_t origin,
         const auto period=std::chrono::duration_cast<std::chrono::steady_clock::duration>(
             std::chrono::duration<double,std::milli>(config.sampleMs));
         while(!stop.load()) {
+            std::array<car2026::capture::Sample,2> encoders;
+            int64_t encoderPairStart=0;
             for(size_t index=0;index<config.sensors.size();++index) {
                 const auto& sensor=config.sensors[index];const auto before=monotonicNs();
+                if(index==0) encoderPairStart=before;
                 const auto sample=readSensor(sensor,config.factoryEncoderStatusZero);const auto after=monotonicNs();
+                if(index<encoders.size()) encoders[index]=sample;
+                if(index==1) {
+                    std::lock_guard<std::mutex> held(rest.mutex);
+                    const bool pairFresh=double(after-encoderPairStart)/1e9<=.25;
+                    rest.gate.sample(encoders[0].valid && pairFresh,encoders[0].value,
+                                     encoders[1].valid && pairFresh,encoders[1].value,
+                                     double(after-origin)/1e9);
+                }
                 file<<cycle<<','<<sensor.name<<','<<before<<','<<after<<','<<double(after-origin)/1e9<<',';
                 if(sample.valid) file<<sample.value;
                 file<<','<<car2026::capture::csvString(sensor.unit)<<','<<sample.valid<<','
@@ -181,31 +202,46 @@ void sensorLoop(const Config& config,const fs::path& directory,int64_t origin,
         closeText(file,directory/"sensors.csv");
     } catch(...) {failure=std::current_exception();stop.store(true);}
 }
-bool recordMarkers(std::ofstream& markers,int64_t origin,std::string& pending,bool& inputEnded) {
-    if(inputEnded) return true;
-    struct pollfd input{STDIN_FILENO,POLLIN,0};
-    const int ready=poll(&input,1,0);
-    if(ready<0) {if(errno==EINTR) return true;throw std::runtime_error("Terminal poll failed");}
-    if(ready<=0 || !(input.revents&POLLIN)) return true;
-    // Avoid iostream prefetch: queued lines must not wait for another keypress.
-    char buffer[128];const ssize_t count=read(STDIN_FILENO,buffer,sizeof(buffer));
-    if(count<0) {if(errno==EINTR) return true;throw std::runtime_error("Terminal read failed");}
-    if(count==0) {inputEnded=true;return true;}
-    pending.append(buffer,size_t(count));
-    size_t end;
-    while((end=pending.find('\n'))!=std::string::npos) {
-        const auto line=car2026::capture::trimmed(pending.substr(0,end));pending.erase(0,end+1);
-        if(line=="q" || line=="Q") return false;
-        if(line.size()==1) {
-            char marker=line[0];if(marker>='a' && marker<='e') marker=char(marker-'a'+'A');
-            if(marker>='A' && marker<='E') {
-                const auto now=monotonicNs();markers<<now<<','<<double(now-origin)/1e9<<','<<marker<<'\n';
-                markers.flush();std::cout<<"MARK "<<marker<<'\n';
+bool recordMarkers(std::ofstream& markers,int64_t origin,std::string& pending,bool& inputEnded,
+                   car2026::capture::ProbeInput* probeInput=nullptr) {
+    if(inputEnded) return !probeInput;
+    // Drain already queued canonical terminal lines in probe mode. Q anywhere
+    // in this bounded batch cancels all pending commands before any PWM write.
+    size_t drained=0;
+    do {
+        struct pollfd input{STDIN_FILENO,POLLIN,0};
+        const int ready=poll(&input,1,0);
+        if(ready<0) {if(errno==EINTR) return true;throw std::runtime_error("Terminal poll failed");}
+        if(ready<=0) break;
+        if(input.revents&(POLLERR|POLLNVAL)) throw std::runtime_error("Terminal input unavailable");
+        if(!(input.revents&(POLLIN|POLLHUP))) break;
+        // Avoid iostream prefetch: queued lines must not wait for another keypress.
+        char buffer[128];const ssize_t count=read(STDIN_FILENO,buffer,sizeof(buffer));
+        if(count<0) {if(errno==EINTR) return true;throw std::runtime_error("Terminal read failed");}
+        if(count==0) {inputEnded=true;return !probeInput;}
+        drained+=size_t(count);
+        pending.append(buffer,size_t(count));
+        size_t end;
+        while((end=pending.find('\n'))!=std::string::npos) {
+            const auto line=car2026::capture::trimmed(pending.substr(0,end));pending.erase(0,end+1);
+            if(probeInput) probeInput->add(line);
+            else if(line=="q" || line=="Q") return false;
+            if(line.size()==1) {
+                char marker=line[0];if(marker>='a' && marker<='e') marker=char(marker-'a'+'A');
+                if(marker>='A' && marker<='E') {
+                    const auto now=monotonicNs();markers<<now<<','<<double(now-origin)/1e9<<','<<marker<<'\n';
+                    markers.flush();std::cout<<"MARK "<<marker<<'\n';
+                }
             }
         }
-    }
-    if(pending.size()>128) pending.clear();
-    return true;
+        if(pending.size()>128) {
+            if(probeInput) throw std::runtime_error("Probe input line too long");
+            pending.clear();
+        }
+        if(probeInput && probeInput->quit) return false;
+        if(probeInput && drained>=4096) throw std::runtime_error("Probe terminal batch too long");
+    } while(probeInput);
+    return !probeInput || !probeInput->quit;
 }
 int capture(Config config,const car2026::HardwareConfig& hardware,const std::string& captureConfig,
             const std::string& hardwareConfig,const fs::path& base,double duration,bool allowPartial,
@@ -225,8 +261,11 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     nonemptyFileSize(directory/"capture_config.ini");nonemptyFileSize(directory/"hardware_config.ini");
     const auto origin=monotonicNs();
     auto metadata=outputFile(directory/"session.txt");
-    const std::string mode=options.observeSteering ? "VISUAL_STEERING_OBSERVER_NO_ACTUATOR_WRITES" :
-        (options.steerCommand ? "MANUAL_PUSH_SERVO_ONLY" : "MANUAL_CAPTURE_NO_ACTUATOR_WRITES");
+    const auto observerMotion=options.observeSteering.value_or(car2026::ManualMotion::Reverse);
+    const bool hasObserver=options.observeSteering.has_value() || options.steeringProbe;
+    const std::string mode=options.steeringProbe ? "MANUAL_REVERSE_STEERING_PROBE_SERVO_ONLY" :
+        (options.observeSteering ? "VISUAL_STEERING_OBSERVER_NO_ACTUATOR_WRITES" :
+        (options.steerCommand ? "MANUAL_PUSH_SERVO_ONLY" : "MANUAL_CAPTURE_NO_ACTUATOR_WRITES"));
     metadata<<"mode="<<mode<<"\nrecorder_version="<<recorderVersion<<"\nimu=not_installed\norigin_ns="<<origin
             <<"\nstart_utc="<<utcStamp()<<"\nencoder_mode="<<hardware.encoder_mode
             <<"\nencoder_values=raw signed counts; first delta read includes the untimed startup interval\n"
@@ -245,6 +284,13 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                 <<"\nobserver_target=first stable locally straight image reference; NOT a measured bay axis or heading\n"
                   "suggestions_are_applied=0\nmotor_writes=0\nservo_writes=0\n"
                   "observer_age=processing completion minus camera read start; exposure age is unknown\n";
+    if(options.steeringProbe)
+        metadata<<"observer_motion=reverse\nobserver_target=manual R while encoder-rest gate passes; local image only\n"
+                  "suggestions_are_applied=0\nsteering_angle_measured=0\nmotor_writes=0\n"
+                  "probe_commands=keyboard 0,+2,-2; only while encoder-rest gate passes\n"
+                  "probe_loss=latched hold; stop pulling; zero only after encoder-rest gate; R required to rearm\n"
+                  "probe_rest=both delta counts exactly zero for >=0.8s, valid samples <=0.25s old; not physical rest proof\n"
+                  "servo_exit=configured_zero_command; stop pulling before Q/Ctrl+C/duration expiry\n";
     for(const auto& sensor:config.sensors)
         metadata<<sensor.name<<"="<<sensor.path<<" format="<<sensor.format<<" unit="<<sensor.unit<<'\n';
     metadata.flush();nonemptyFileSize(directory/"session.txt");
@@ -253,13 +299,17 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     frames.flush();markers.flush();
     nonemptyFileSize(directory/"frames.csv");nonemptyFileSize(directory/"markers.csv");
     std::cout<<"SESSION "<<directory.string()<<'\n';
-    if(options.steerCommand)
+    if(options.steerCommand || options.steeringProbe)
         std::cout<<"SERVO ONLY; no motor/GPIO/IMU initialization or writes. Wait for STEER_READY before manual pushing.\n"
                    "Stop pushing before Q/Ctrl+C or duration expiry; exit attempts configured zero steering.\n";
     else std::cout<<"No motor/servo/IMU initialization.\n";
     if(options.observeSteering)
         std::cout<<"OBSERVE ONLY motion="<<car2026::manualMotionName(*options.observeSteering)
                  <<"; suggestions are NOT applied. Keep the initial image steady until REFERENCE_READY.\n";
+    if(options.steeringProbe)
+        std::cout<<"PROBE ONLY: no automatic image-error steering. Keep stopped; R+Enter centers and builds a reference.\n"
+                   "Wait for PROBE_REFERENCE_READY. While stopped: + or - or 0 +Enter; wait for PROBE_STEER_READY.\n"
+                   "Then gently pull backward. S+Enter latches hold; HOLD means STOP PULLING. Do not switch commands while moving.\n";
     std::cout<<"Enter A..E to mark, Q or Ctrl+C to finish.\n";
     if(!missing.empty()) {
         std::cout<<"PARTIAL: unconfigured channels:";
@@ -267,7 +317,7 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
         std::cout<<'\n';
     }
     std::cout<<"factory_encoder_status_zero="<<config.factoryEncoderStatusZero<<'\n';
-    std::atomic<bool> stop{false};std::array<Stats,8> stats;
+    std::atomic<bool> stop{false};std::array<Stats,8> stats;SharedRestGate restGate;
     std::exception_ptr sensorFailure,videoFailure;
     cv::VideoWriter video;uint64_t count=0;int width=0,height=0;
     std::unique_ptr<car2026::LinuxDeviceIo> servoIo;
@@ -275,12 +325,58 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     std::optional<car2026::Vision> observerVision;
     std::optional<car2026::VisualSteeringObserver> observer;
     std::ofstream observerFile;car2026::SteeringObservation latestSuggestion;
-    if(options.observeSteering) {
-        observerVision.emplace(*vehicleParams);observer.emplace(*vehicleParams,*options.observeSteering);
+    std::ofstream probeFile,servoEvents;car2026::capture::ManualSteeringProbe probe;
+    bool probeReferenceActive=false;
+    uint64_t servoRequests=0,servoAttempts=0,servoSuccesses=0;std::optional<double> lastServoCommand;
+    bool exitZeroWriteOk=false;
+    if(hasObserver) {
+        observerVision.emplace(*vehicleParams);observer.emplace(*vehicleParams,observerMotion);
         observerFile=outputFile(directory/"visual_observer.csv");observerFile<<observerHeader<<'\n';observerFile.flush();
     }
+    if(options.steeringProbe) {
+        probeFile=outputFile(directory/"steering_probe.csv");probeFile<<probeHeader<<'\n';probeFile.flush();
+        servoEvents=outputFile(directory/"servo_events.csv");servoEvents<<servoEventHeader<<'\n';servoEvents.flush();
+    }
+    auto probeServoWrite=[&](double command,double frameTime,bool closing=false) {
+        if(!servo) {
+            servoIo=std::make_unique<car2026::LinuxDeviceIo>(hardware);
+            servo=std::make_unique<car2026::ServoOutput>(*servoIo,hardware,*vehicleParams);
+        }
+        const auto before=monotonicNs();const auto request=++servoRequests;
+        // Normal requests are logged before writing. Shutdown must attempt zero
+        // even when the log disk is full; record that attempt afterwards.
+        if(!closing) {
+            servoEvents<<request<<','<<before<<','<<double(before-origin)/1e9<<','<<command<<",,PREPARE\n";
+            servoEvents.flush();
+            // Metadata reads and disk flushes may take time. Recheck immediately
+            // before writing, so a delayed request cannot move a pulling car.
+            const auto checked=monotonicNs();const double now=double(checked-origin)/1e9;
+            const auto rest=restGate.status(now);
+            if(interrupted || stop.load() || now>=duration || !rest.fresh || !rest.stationary ||
+               now<frameTime || now-frameTime>vehicleParams->frame_timeout_s) {
+                servoEvents<<request<<','<<checked<<','<<now<<','<<command<<",,CANCELLED_GATE_CHANGED\n";
+                servoEvents.flush();return false;
+            }
+        }
+        ++servoAttempts;
+        uint16_t duty=0;
+        try {
+            if(closing) {servo->close();exitZeroWriteOk=true;}else duty=servo->set(command);
+        } catch(...) {
+            const auto after=monotonicNs();
+            servoEvents<<request<<','<<after<<','<<double(after-origin)/1e9<<','<<command<<",,FAILED\n";
+            servoEvents.flush();throw;
+        }
+        ++servoSuccesses;lastServoCommand=command;
+        const auto after=monotonicNs();
+        if(closing) servoEvents<<request<<','<<before<<','<<double(before-origin)/1e9<<','<<command<<",,EXIT_ATTEMPT\n";
+        servoEvents<<request<<','<<after<<','<<double(after-origin)/1e9<<','<<command<<',';
+        if(!closing) servoEvents<<duty;
+        servoEvents<<",SOFTWARE_OK\n";servoEvents.flush();
+        return true;
+    };
     std::thread sampler(sensorLoop,std::cref(config),directory,origin,std::ref(stop),
-                        std::ref(stats),std::ref(sensorFailure));
+                        std::ref(stats),std::ref(sensorFailure),std::ref(restGate));
     try {
         auto lastReport=std::chrono::steady_clock::now();
         std::string pendingInput;bool inputEnded=false;
@@ -298,13 +394,56 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
             }
             if(image.cols!=width || image.rows!=height) throw std::runtime_error("Camera dimensions changed");
             video.write(image);frames<<count++<<','<<before<<','<<after<<','<<double(after-origin)/1e9<<'\n';
+            car2026::Observation observation;double frameTime=double(before-origin)/1e9,processedTime=0;
             if(observer) {
-                const auto observation=observerVision->analyze(car2026::processCameraFrame(image,*vehicleParams),car2026::Stage::GarageReverse);
-                const double frameTime=double(before-origin)/1e9,processedTime=double(monotonicNs()-origin)/1e9;
+                observation=observerVision->analyze(car2026::processCameraFrame(image,*vehicleParams),car2026::Stage::GarageReverse);
+                processedTime=double(monotonicNs()-origin)/1e9;
                 const bool previouslyReferenced=latestSuggestion.hasReference;
-                latestSuggestion=observer->observe(observation,frameTime,processedTime);
+                if(!options.steeringProbe || probeReferenceActive)
+                    latestSuggestion=observer->observe(observation,frameTime,processedTime);
+                else {latestSuggestion={};latestSuggestion.state="WAIT_MANUAL_REFERENCE";}
+                if(!options.steeringProbe && !previouslyReferenced && latestSuggestion.hasReference)
+                    std::cout<<"REFERENCE_READY id="<<latestSuggestion.referenceId<<"; image target only, no actuator output\n"<<std::flush;
+            }
+            car2026::capture::ProbeInput probeInput;
+            const bool keepRunning=recordMarkers(markers,origin,pendingInput,inputEnded,
+                                                  options.steeringProbe ? &probeInput : nullptr);
+            const bool canWrite=keepRunning && !interrupted && !stop.load() && double(monotonicNs()-origin)/1e9<duration;
+            if(options.steeringProbe) {
+                const double decisionTime=double(monotonicNs()-origin)/1e9;
+                const auto rest=restGate.status(decisionTime);
+                if(probeReferenceActive && decisionTime-frameTime>vehicleParams->frame_timeout_s) {
+                    latestSuggestion.hasSuggestion=false;latestSuggestion.state="STALE_FRAME";
+                    latestSuggestion.frameAge=decisionTime-frameTime;
+                }
+                auto action=probe.update(canWrite ? probeInput.key : car2026::capture::ProbeKey::Stop,
+                                         rest,latestSuggestion,decisionTime);
+                if(!canWrite) {
+                    action.command.reset();action.resetReference=false;action.decision="EXIT_NO_NEW_COMMAND";
+                }
+                if(action.command && canWrite && !probeServoWrite(*action.command,frameTime))
+                    action=probe.update(car2026::capture::ProbeKey::Stop,{},latestSuggestion,
+                                        double(monotonicNs()-origin)/1e9);
+                if(action.resetReference) {
+                    observer->reset();observerVision.emplace(*vehicleParams);
+                    probeReferenceActive=action.decision=="CENTER_THEN_BUILD_REFERENCE";
+                }
+                probeFile<<count-1<<','<<decisionTime<<','<<rest.fresh<<','<<rest.stationary<<','<<rest.age<<','
+                         <<car2026::capture::probeKeyName(probeInput.key)<<','<<action.state<<','<<action.decision<<',';
+                if(action.command && canWrite) probeFile<<*action.command;
+                probeFile<<',';if(lastServoCommand) probeFile<<*lastServoCommand;
+                probeFile<<','<<servoAttempts<<','<<servoSuccesses<<",0\n";
+                if(action.decision!="RECORD_RESPONSE_ONLY" && action.decision!="WAIT_R_WHILE_STOPPED" &&
+                   action.decision!="WAIT_STATIONARY_STRAIGHT_REFERENCE")
+                {
+                    std::cout<<action.decision<<" state="<<action.state;
+                    if(action.command && canWrite) std::cout<<" command="<<*action.command<<" (software write only)";
+                    std::cout<<std::endl;
+                }
+            }
+            if(observer) {
                 observerFile<<count-1<<','<<frameTime<<','<<processedTime<<','<<latestSuggestion.frameAge<<','
-                            <<car2026::manualMotionName(*options.observeSteering)<<','<<latestSuggestion.referenceId<<','
+                            <<car2026::manualMotionName(observerMotion)<<','<<latestSuggestion.referenceId<<','
                             <<latestSuggestion.hasReference<<','<<latestSuggestion.state<<','<<observation.blackPath.confidence<<','
                             <<observation.blackPath.ambiguous<<','<<observation.blackPath.discontinuous<<',';
                 if(latestSuggestion.hasSuggestion) observerFile<<latestSuggestion.lateralError;
@@ -312,11 +451,9 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                 if(latestSuggestion.hasSuggestion) observerFile<<latestSuggestion.headingFeatureError;
                 observerFile<<','<<latestSuggestion.hasSuggestion<<',';
                 if(latestSuggestion.hasSuggestion) observerFile<<latestSuggestion.suggestedCommand;
-                observerFile<<",0,0\n";
-                if(!previouslyReferenced && latestSuggestion.hasReference)
-                    std::cout<<"REFERENCE_READY id="<<latestSuggestion.referenceId<<"; image target only, no actuator output\n"<<std::flush;
+                observerFile<<",0,"<<servoSuccesses<<'\n';
             }
-            if(!recordMarkers(markers,origin,pendingInput,inputEnded)) break;
+            if(!canWrite) break;
             if(options.steerCommand && !servo) {
                 if(interrupted || stop.load()) break;
                 servoIo=std::make_unique<car2026::LinuxDeviceIo>(hardware);
@@ -334,6 +471,7 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
             if(now-lastReport>=std::chrono::seconds(1)) {
                 frames.flush();lastReport=now;
                 if(observer) observerFile.flush();
+                if(options.steeringProbe) probeFile.flush();
                 if(fs::space(directory).available<64u*1024u*1024u) throw std::runtime_error("Recording disk space below 64 MiB");
                 std::cout<<"frames="<<count<<" elapsed="<<std::fixed<<std::setprecision(1)<<double(after-origin)/1e9;
                 for(size_t i=0;i<stats.size();++i)
@@ -353,15 +491,21 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     std::exception_ptr servoFailure;
     if(servo && servo->commandAttempted()) {
         try {
-            servo->close();
+            if(options.steeringProbe) probeServoWrite(0,0,true);
+            else {servo->close();exitZeroWriteOk=true;}
             std::cout<<"SERVO_ZERO write completed (software only)\n";
         } catch(...) {servoFailure=std::current_exception();}
     }
     sampler.join();video.release();camera.release();
-    if(options.steerCommand) metadata<<"servo_command_attempted="<<bool(servo && servo->commandAttempted())<<'\n';
-    if(servo && servo->commandAttempted()) metadata<<"servo_return_zero_write_ok="<<!servoFailure<<'\n';
+    if(options.steerCommand || options.steeringProbe) metadata<<"servo_command_attempted="<<bool(servo && servo->commandAttempted())<<'\n';
+    if(options.steeringProbe)
+        metadata<<"servo_api_attempts="<<servoAttempts<<"\nservo_api_successes="<<servoSuccesses<<'\n';
+    if(servo && servo->commandAttempted()) metadata<<"servo_return_zero_write_ok="<<exitZeroWriteOk<<'\n';
     closeText(frames,directory/"frames.csv");closeText(markers,directory/"markers.csv");
     if(observer) closeText(observerFile,directory/"visual_observer.csv");
+    if(options.steeringProbe) {
+        closeText(probeFile,directory/"steering_probe.csv");closeText(servoEvents,directory/"servo_events.csv");
+    }
     bool sensorsGood=missing.empty();
     metadata<<"end_utc="<<utcStamp()<<"\nframe_rows="<<count<<"\nactual_width="<<width<<"\nactual_height="<<height<<'\n';
     for(size_t i=0;i<stats.size();++i) {
@@ -384,6 +528,9 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     if(frameRows!=count) throw std::runtime_error("Frame CSV row count does not match captured frames");
     if(observer && verifyTextFile(directory/"visual_observer.csv",observerHeader)!=count)
         throw std::runtime_error("Observer CSV row count does not match captured frames");
+    if(options.steeringProbe && verifyTextFile(directory/"steering_probe.csv",probeHeader)!=count)
+        throw std::runtime_error("Steering probe CSV row count does not match captured frames");
+    if(options.steeringProbe) verifyTextFile(directory/"servo_events.csv",servoEventHeader);
     uint64_t expectedSensorRows=0;
     for(const auto& stat:stats) expectedSensorRows+=stat.valid.load()+stat.invalid.load();
     const auto sensorRows=verifyTextFile(directory/"sensors.csv",sensorHeader);
@@ -412,6 +559,9 @@ int main(int argc,char** argv) {
                              " [--duration seconds] [--allow-partial] [--check-config] [--check-output]\n"
                              " [--steer-command -15..15 --vehicle-config file --duration <=60]\n"
                              " [--observe-steering forward|reverse --vehicle-config file --duration <=60]\n"
+                             " [--steering-probe reverse --vehicle-config file --duration <=60]\n"
+                             "Probe: keyboard R reference, +/0/- commands +2/0/-2 while stopped; S hold; SERVO ONLY.\n"
+                             "Probe NEVER applies image suggestions; conflicts with fixed steering and observation.\n"
                              "Observation: no actuator writes; image-reference suggestions only; conflicts with --steer-command.\n"
                              "Default: no actuator writes. Explicit steering: SERVO ONLY, return to configured zero on exit.\n"
                              "No motor/GPIO-output/IMU initialization. Check modes never access hardware.\n";return 0;
@@ -419,11 +569,15 @@ int main(int argc,char** argv) {
         if(options.checkOutput) return checkOutput(options.output);
         auto config=car2026::capture::loadConfig(options.configFile);
         const auto hardware=car2026::HardwareConfig::load(options.hardwareFile);
+        if(options.steeringProbe && hardware.encoder_mode!="delta")
+            throw std::runtime_error("Steering probe requires the configured delta encoder contract");
         std::optional<car2026::Params> vehicleParams;
-        if(options.steerCommand || options.observeSteering) {
+        if(options.steerCommand || options.observeSteering || options.steeringProbe) {
             vehicleParams=car2026::Params::load(options.vehicleFile);
             if(options.steerCommand && std::abs(*options.steerCommand)>vehicleParams->max_steer_deg)
                 throw std::runtime_error("Steering command exceeds vehicle-config command limit");
+            if(options.steeringProbe && vehicleParams->max_steer_deg<2)
+                throw std::runtime_error("Steering probe needs a configured command limit of at least 2");
         }
         fillEncoderPaths(config,hardware);
         if(options.check) {

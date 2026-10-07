@@ -15,7 +15,8 @@ SESSIONS = (
     ('manual_pull_steer_minus5', 'reverse', 123),
 )
 OBSERVER_SESSIONS = (('visual_observer_forward', 'forward', 73),
-                     ('visual_observer_reverse', 'reverse', 72))
+                     ('visual_observer_reverse', 'reverse', 72),
+                     ('visual_observer_reverse_straight', 'reverse', 73))
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()

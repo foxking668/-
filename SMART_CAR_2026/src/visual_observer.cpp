@@ -112,6 +112,8 @@ SteeringObservation VisualSteeringObserver::observe(const Observation& observati
     const double lateral=std::abs(result.lateralError)<imageDeadband ? 0 : result.lateralError;
     const double heading=std::abs(result.headingFeatureError)<imageDeadband ? 0 : result.headingFeatureError;
     const double sign=motion_==ManualMotion::Forward ? 1 : -1;
+    // Retained for recorded diagnostic compatibility, NOT a validated reverse
+    // feedback law. Image features are coupled; this sign is not actuation approval.
     const double target=clamp(sign*(lateralGain*lateral+headingFeatureGain*heading),-maximumCommand_,maximumCommand_);
     result.suggestedCommand=clamp(target,lastSuggestion_-commandRate*dt,lastSuggestion_+commandRate*dt);
     lastSuggestion_=result.suggestedCommand;

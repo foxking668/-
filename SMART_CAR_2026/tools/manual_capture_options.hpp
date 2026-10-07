@@ -11,6 +11,7 @@ struct Options {
     bool help=false,allowPartial=false,check=false,checkOutput=false;
     std::optional<double> steerCommand;
     std::optional<ManualMotion> observeSteering;
+    bool steeringProbe=false;
     static Options parse(const std::vector<std::string>& args) {
         Options result;std::set<std::string> seen;bool vehicleSpecified=false;
         for(size_t i=0;i<args.size();++i) {
@@ -29,15 +30,21 @@ struct Options {
             else if(arg=="--vehicle-config") {result.vehicleFile=value;vehicleSpecified=true;}
             else if(arg=="--steer-command") result.steerCommand=finiteNumber(value);
             else if(arg=="--observe-steering") result.observeSteering=parseManualMotion(value);
+            else if(arg=="--steering-probe") {
+                if(value!="reverse") throw std::runtime_error("Steering probe currently requires reverse");
+                result.steeringProbe=true;
+            }
             else throw std::runtime_error("Unknown option: "+arg);
         }
         if(result.duration<=0 || result.duration>3600)
             throw std::runtime_error("duration must be between 0 and 3600 seconds");
         if(result.check && result.checkOutput) throw std::runtime_error("Choose one check mode");
-        if(result.steerCommand && result.observeSteering)
-            throw std::runtime_error("Observation and fixed steering output are mutually exclusive");
-        if(vehicleSpecified && !result.steerCommand && !result.observeSteering)
-            throw std::runtime_error("--vehicle-config requires --steer-command or --observe-steering");
+        if(int(result.steerCommand.has_value())+int(result.observeSteering.has_value())+int(result.steeringProbe)>1)
+            throw std::runtime_error("Observation, fixed steering and steering probe are mutually exclusive");
+        if(vehicleSpecified && !result.steerCommand && !result.observeSteering && !result.steeringProbe)
+            throw std::runtime_error("--vehicle-config requires an explicit observation or steering mode");
+        if(result.steeringProbe && (result.duration>60 || result.checkOutput))
+            throw std::runtime_error("Steering probe requires --duration <=60 and forbids --check-output");
         if(result.observeSteering && (result.duration>60 || result.checkOutput))
             throw std::runtime_error("Observation requires --duration <=60 and forbids --check-output");
         if(result.steerCommand) {
