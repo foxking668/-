@@ -91,6 +91,67 @@ int main() {
         rejects([]{Options::parse({"--auto-probe","reverse","--duration","45","--check-output"});},"Output-only check cannot discard automatic output mode");
         check(Options::parse({"--auto-probe","reverse","--duration","45","--check-config"}).check,"Automatic config check remains hardware-free");
         {
+            capture::ServoRequestGate gate;gate.rest={true,true,0};gate.now=1;gate.frameTime=0;
+            check(gate.issue().empty(),"Stationary zero does not require a startup image within frame timeout");
+            gate.command=2;check(gate.issue()=="FRAME_TOO_OLD","The same old image still forbids nonzero steering");
+            gate.command=-2;check(gate.issue()=="FRAME_TOO_OLD","Negative nonzero steering retains frame-age gate");
+            gate.frameTime=.8;check(gate.issue().empty(),"Nonzero steering accepts a recent image at rest");
+            gate.rest.stationary=false;check(gate.issue()=="NOT_STATIONARY","A recent image never permits steering while moving");
+            gate.command=0;check(gate.issue()=="NOT_STATIONARY","Normal zero also waits for rest");
+            gate.rest.fresh=false;check(gate.issue()=="ENCODER_NOT_FRESH","Invalid encoder state has a precise cancellation reason");
+            gate.rest={true,true,0};gate.now=45;check(gate.issue()=="SESSION_DEADLINE","Zero cannot extend session deadline");
+            gate.now=1;gate.exitRequested=true;check(gate.issue()=="EXIT_REQUESTED","Exit intent cancels every normal write");
+            gate.exitRequested=false;gate.samplerStopped=true;check(gate.issue()=="SAMPLER_STOPPED","Sampler failure is distinguished from image age");
+            gate.samplerStopped=false;gate.command=2;gate.frameTime=2;
+            check(gate.issue()=="INVALID_FRAME_TIME","Future frame timestamps cannot authorize nonzero output");
+            gate.frameTime=.8;gate.frameTimeout=std::numeric_limits<double>::quiet_NaN();
+            check(gate.issue()=="INVALID_FRAME_TIMEOUT","Nonfinite image limit cannot bypass the nonzero gate");
+            gate.frameTimeout=.4;gate.now=std::numeric_limits<double>::quiet_NaN();
+            check(gate.issue()=="INVALID_WRITE_TIME","Invalid decision time cancels output");
+        }
+        {
+            const capture::EncoderRestStatus rest{true,true,0};capture::AutomaticSteeringProbe automatic;
+            ServoOnlyIo io;ServoOutput servo(io,HardwareConfig{},Params{});
+            const auto center=automatic.update(rest,{},0);
+            capture::ServoRequestGate delayed;delayed.rest=rest;delayed.now=.7;delayed.frameTime=0;
+            delayed.command=*center.command;
+            check(delayed.issue().empty(),"Slow first metadata/log preparation no longer cancels stationary zero");
+            servo.set(*center.command);
+            check(!automatic.acknowledge(true,rest,.71,false),"Successful zero with old startup frame cannot cue pulling");
+            check(std::string(automatic.phaseName())=="BUILD_REFERENCE","Reference is built only after successful zero");
+            automatic.update(rest,straightReference(),.9);
+            const auto steer=automatic.update(rest,straightReference(),1.1);
+            delayed.command=*steer.command;delayed.now=1.11;delayed.frameTime=1.1;
+            check(delayed.issue().empty(),"Fresh post-zero reference allows a separate nonzero request");
+            servo.set(*steer.command);
+            check(automatic.acknowledge(true,rest,1.12),"Fresh successful nonzero write finally permits pull cue");
+            servo.close();check(io.duties==std::vector<uint16_t>({4470,4370,4470}),"Delayed startup produces zero then +2 only, never motor output");
+        }
+        {
+            const capture::EncoderRestStatus rest{true,true,0};auto moving=rest;moving.stationary=false;
+            capture::AutomaticSteeringProbe automatic;
+            automatic.update(rest,{},0);
+            check(!automatic.acknowledge(false,moving,.1,true,"SERVO_CANCELLED_NOT_STATIONARY"),"Cancelled initial zero never cues pulling");
+            check(std::string(automatic.phaseName())=="WAIT_STILL" && !automatic.finished(),"Transient initial rest loss waits instead of ending in two frames");
+            check(!automatic.update(moving,{},.2).command,"Startup recovery does not output while moving");
+            const auto retry=automatic.update(rest,{},1);
+            check(retry.command==0 && retry.resetReference,"Startup recovery can request zero only after fresh rest");
+            automatic.acknowledge(true,rest,1.01);automatic.update(rest,straightReference(),1.2);
+            check(automatic.update(rest,straightReference(),1.4).command==2,"Recovered startup still needs a new reference before +2");
+            check(!automatic.acknowledge(false,rest,1.41,true,"SERVO_CANCELLED_FRAME_TOO_OLD"),"Cancelled nonzero output cannot cue pulling");
+            check(automatic.outcome()=="SERVO_CANCELLED_FRAME_TOO_OLD","Nonzero cancellation preserves exact reason");
+            check(automatic.update(rest,straightReference(),1.6).command==0,"Cancelled nonzero trial ends with zero, never another +2");
+            automatic.acknowledge(true,rest,1.61);check(automatic.finished(),"Nonzero cancellation remains terminal");
+            capture::AutomaticSteeringProbe repeated;
+            repeated.update(rest,{},0);repeated.acknowledge(false,{},.1,true,"SERVO_CANCELLED_ENCODER_NOT_FRESH");
+            repeated.update(rest,{},10);repeated.acknowledge(false,{},10.1,true,"SERVO_CANCELLED_ENCODER_NOT_FRESH");
+            check(!repeated.update({}, {},16).command && repeated.finished() && repeated.outcome()=="STARTUP_NOT_STATIONARY",
+                  "Repeated initial zero cancellation cannot restart the 15-second startup deadline");
+            capture::AutomaticSteeringProbe stopped;stopped.update(rest,{},0);stopped.stop("USER_STOP");
+            stopped.acknowledge(false,{},.1,true,"SERVO_CANCELLED_ENCODER_NOT_FRESH");
+            check(std::string(stopped.phaseName())=="WAIT_STOP" && stopped.outcome()=="USER_STOP","Startup recovery cannot erase explicit stop intent");
+        }
+        {
             using capture::EncoderRestGate;
             EncoderRestGate gate;
             check(!gate.status(0).fresh,"Missing encoders cannot pass rest gate");

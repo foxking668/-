@@ -11,6 +11,28 @@ struct EncoderRestStatus {
     double zeroDuration=0,leftDelta=0,rightDelta=0;
     uint64_t movementEpoch=0;
 };
+// Zero prepares/finishes the reference and needs fresh rest, not an image.
+// A nonzero command additionally requires a valid, recent frame.
+struct ServoRequestGate {
+    bool exitRequested=false,samplerStopped=false;
+    double now=0,deadline=45,command=0,frameTime=0,frameTimeout=.4;
+    EncoderRestStatus rest;
+    std::string issue() const {
+        if(exitRequested) return "EXIT_REQUESTED";
+        if(samplerStopped) return "SAMPLER_STOPPED";
+        if(!std::isfinite(now) || now<0 || !std::isfinite(deadline) || deadline<=0) return "INVALID_WRITE_TIME";
+        if(now>=deadline) return "SESSION_DEADLINE";
+        if(!std::isfinite(command)) return "INVALID_COMMAND";
+        if(!rest.fresh) return "ENCODER_NOT_FRESH";
+        if(!rest.stationary) return "NOT_STATIONARY";
+        if(command!=0) {
+            if(!std::isfinite(frameTime) || frameTime<0 || now<frameTime) return "INVALID_FRAME_TIME";
+            if(!std::isfinite(frameTimeout) || frameTimeout<=0) return "INVALID_FRAME_TIMEOUT";
+            if(now-frameTime>frameTimeout) return "FRAME_TOO_OLD";
+        }
+        return {};
+    }
+};
 class EncoderRestGate {
 public:
     void sample(bool leftValid,double left,bool rightValid,double right,double time,double readSpan=0) {
@@ -215,10 +237,21 @@ public:
         return action;
     }
     // true means the +2 software write succeeded; only then show the pull cue.
-    bool acknowledge(bool written,const EncoderRestStatus& rest,double now,bool imageFresh=true) {
+    bool acknowledge(bool written,const EncoderRestStatus& rest,double now,bool imageFresh=true,
+                     const std::string& cancellationReason={}) {
         const auto pending=pending_;pending_=Pending::None;
         if(pending==Pending::None) return false;
-        if(!written) {stop("SERVO_REQUEST_CANCELLED");return false;}
+        if(!written) {
+            // No output has occurred. A transient rest loss may wait within the
+            // original startup deadline; never retry a cancelled nonzero write.
+            if(pending==Pending::ReferenceZero && !everWritten_ && phase_==Phase::Reference &&
+               (cancellationReason=="SERVO_CANCELLED_ENCODER_NOT_FRESH" ||
+                cancellationReason=="SERVO_CANCELLED_NOT_STATIONARY")) {
+                probe_=ManualSteeringProbe{};phase_=Phase::WaitRest;phaseStart_=start_;
+                return false;
+            }
+            stop(cancellationReason.empty() ? "SERVO_REQUEST_CANCELLED" : cancellationReason);return false;
+        }
         everWritten_=true;
         if(phase_==Phase::Stop && pending!=Pending::FinishZero) return false;
         if(pending==Pending::ReferenceZero) phaseStart_=now;

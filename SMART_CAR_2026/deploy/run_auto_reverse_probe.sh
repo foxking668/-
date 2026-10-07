@@ -14,8 +14,8 @@ fi
 export LD_LIBRARY_PATH="/home/root/opencv-4.11-loongarch/install/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 probe_help=$("$probe_program" --help)
 case "$probe_help" in
-    *'version=2026-10-07.4'*) ;;
-    *) printf '%s\n' 'Wrong recorder version: require 2026-10-07.4.' >&2; exit 1 ;;
+    *'version=2026-10-07.5'*) ;;
+    *) printf '%s\n' 'Wrong recorder version: require 2026-10-07.5.' >&2; exit 1 ;;
 esac
 case "$probe_help" in
     *'--auto-probe reverse'*) ;;

@@ -1,6 +1,6 @@
 # 一条启动命令：自动舵机试验，人工后拉
 
-源码版本 `2026-10-07.4`。当前电机不能使用，没有 IMU。本模式仅做一次固定 `+2` 舵机命令的响应验证，自动准备、提示后拉、检测停稳、回零和保存，不执行图像建议，不是自动倒车入库。
+源码版本 `2026-10-07.5`。当前电机不能使用，没有 IMU。本模式仅做一次固定 `+2` 舵机命令的响应验证，自动准备、提示后拉、检测停稳、回零和保存，不执行图像建议，不是自动倒车入库。
 
 ## 首次编译上传
 
@@ -12,24 +12,27 @@ cmake -S . -B /home/gy/builds/SMART_CAR_2026-loongarch -DBUILD_VEHICLE=ON
 cmake --build /home/gy/builds/SMART_CAR_2026-loongarch --target manual_capture --parallel 2
 ```
 
-编译成功后再复制：
+编译成功后直接生成带校验的ZIP，避免分别上传时把程序/脚本弄混，或只看大小而遗漏文件损坏：
 
 ```sh
-cp /home/gy/builds/SMART_CAR_2026-loongarch/manual_capture /mnt/hgfs/share/SMART_CAR_2026/deploy/manual_capture_auto_probe_20261007
+python3 tools/package_auto_probe.py --program /home/gy/builds/SMART_CAR_2026-loongarch/manual_capture
 ```
 
-将共享目录 deploy 下的两个文件上传到小车 `/home/root/gy/deploy/`：
+打包程序只读取文件，不在x86虚拟机执行龙芯程序；检查ELF文件头、64位小端LoongArch标识、当前版本和启动脚本LF换行，验证ZIP CRC与内容一致后才保存压缩包。旧 `.4` 程序无法打成 `.5` 包。
 
-- `manual_capture_auto_probe_20261007`：上一步编译生成的新程序。
-- `run_auto_reverse_probe.sh`：已准备好的启动脚本，保持 LF 换行。
+将共享目录 deploy 下的 `auto_reverse_probe_20261007_5_verified.zip` 原样上传到小车 `/home/root/gy/deploy/`。包内是新 `manual_capture_auto_probe_20261007`、匹配 `.5` 的 `run_auto_reverse_probe.sh` 和 `AUTO_PROBE_SHA256SUMS`。
 
-板上首次赋予新程序执行权限：
+小车先保持静止，板上复制这一整块；仅在解压与内容校验成功后才启动：
 
 ```sh
-chmod +x /home/root/gy/deploy/manual_capture_auto_probe_20261007
+cd /home/root/gy/deploy && \
+unzip -o auto_reverse_probe_20261007_5_verified.zip && \
+sha256sum -c AUTO_PROBE_SHA256SUMS && \
+chmod +x manual_capture_auto_probe_20261007 && \
+sh ./run_auto_reverse_probe.sh
 ```
 
-保留原配置 `manual_capture.ini`、`config/calibration_hardware.ini` 和 `config/calibration_vehicle.ini`，无需重新输入库路径、参数、R/+等操作键。脚本会先检查程序版本 `.4` 和 `--auto-probe reverse` 能力；旧程序或缺少程序时直接报错，不开始试验。不在 x86 虚拟机执行龙芯程序。
+保留原配置 `manual_capture.ini`、`config/calibration_hardware.ini` 和 `config/calibration_vehicle.ini`，无需重新输入库路径、参数、R/+等操作键。脚本会先检查程序版本 `.5` 和 `--auto-probe reverse` 能力；旧程序或缺少程序时直接报错，不开始试验。之前的 `.4` ZIP是旧版本，不用于本次更新。
 
 ## 每次只执行这一条
 
@@ -55,6 +58,8 @@ sh /home/root/gy/deploy/run_auto_reverse_probe.sh
 
 编码器读取失效、旧帧、参考丢失/变化或图像偏差超过原门槛时锁定试验；图像恢复不自动恢复非零输出。`PULL_COMPLETED` 仅表示发生过编码器移动事件并已停稳、回零；不证明实际走了20～30cm、车尾向右、实际转角、入库精度或闭环收敛。失败原因保留在 `session.txt` 的 `auto_result` 和 `steering_probe.csv` 中。
 
+初始回零和停稳回零要求编码器新鲜、连续零增量、未退出和未超过总期限，不要求图像参考或帧年龄。非零+2仍要求完整视觉门槛，写入前、写入后的帧年龄、编码器静止及退出条件都要通过，才提示开始后拉。初始回零尚未真正写入时，遇到短暂编码器失效或静止变化，可在原15秒准备期限内继续等待；该等待不会重新计时，非零请求取消则终止试验，不重复+2。
+
 编码器的持续零增量只是软件门槛，不是物理静止证明；手推应保持轻缓。摄像头底层阻塞时没有独立舵机看门狗，信号、错误或45秒期限退出仍尝试回零，所以准备或后拉不要拖到总期限。程序没有控制人工推动或电机停车的能力。
 
 ## 本次日志与诊断改进
@@ -63,14 +68,18 @@ sh /home/root/gy/deploy/run_auto_reverse_probe.sh
 
 `.4` 自动处理原来的R/+和停稳回零步骤，同时补充：锁定原因、编码器原因、连续零增量时长、最近两轮原始增量、移动事件序号和自动阶段。事件序号来自唯一采样线程，保留两帧之间已经发生的计数变化，不再次读取会清零的编码器、不推算航向。手动模式中的无效输入（例如+++）会提示，不再静默忽略；重复HOLD输出压缩为状态变化提示及每秒状态。
 
+用户最新 `.4` 两次日志均为2帧、152条传感器记录，首次准备回零请求被取消，随后成功回零收尾保存；没有+2或开始后拉提示。这不是一次成功的后拉试验，缺少灰度通道的PARTIAL提示也不解释这次取消。终端仅有SERVO_REQUEST_CANCELLED，具体是帧年龄、编码器变化或其他条件需要事件数据才能区分。
+
+代码核查发现 `.4` 的初始回零错误地受帧年龄限制，打开舵机设备、写日志耗时可能让它在开始阶段就取消；这属于可复现的软件缺陷，但不能仅凭这两段终端日志认定就是唯一实车原因。另修正“调用前取时间、等锁后取状态”导致新样本被误判为未来时间的竞态：现在同一互斥锁内取得当前时间与编码器状态。`.5` 在终端和servo_events.csv记录具体取消原因，以及当时编码器原因、样本年龄、零增量时长和帧年龄。
+
 ## 五项审查和验证边界
 
-1. 重复代码：自动流程复用手动试验门槛、唯一传感器线程、视觉和ServoOutput；没有第二套车控/录像循环。
-2. 命名：区分auto阶段、图像特征、命令、软件写入确认和原始增量；移动事件不标成距离/航向。
-3. 结构：准备、参考、命令确认、等待后拉、移动、等待停稳和完成有独立状态；开始提示必须在实际软件写入成功后发出。
-4. 隐藏bug：覆盖未确认写入不重发、写入期间停止/门槛变化不发开始提示、移动发生在两帧之间、失败不重试非零输出、超时和剩余期限、EOF非交互启动、启动脚本版本与库路径检查。
-5. 优化：用户只启动一次并按提示后拉；失败自动收尾并留下具体原因，不放宽原识别/静止门槛，也不更改舵机零位或正式驾驶标定配置。
+1. 重复代码：正常舵机写入共用ServoRequestGate，事件输出共用recordServoEvent，继续复用唯一传感器线程和手动试验门槛。
+2. 命名：取消原因区分FRAME_TOO_OLD、ENCODER_NOT_FRESH、NOT_STATIONARY等；时间与编码器状态封装在同一Snapshot。
+3. 结构：先静止回零、再建图像参考、再非零试验；只有尚未写入的初始零请求允许有限等待恢复，非零取消仍终止。
+4. 隐藏bug：覆盖慢启动旧帧回零、非零旧帧拒绝、写入取消/停止意图、等待不延长期限、失败不重复+2；打包拒绝全零文件头、错误架构/旧版和输入输出路径冲突，失败不覆盖已有包。
+5. 优化：维持一条板上启动命令，更新通过ZIP+SHA256检查完整性；新增精确诊断，保持图像、静止、45秒总期限及原舵机零位配置。
 
-本次836项C++检查通过：手动/自动舵机181、核心148、视觉观察75、硬件模拟368、采集数据46、灰度地址范围18。启动脚本通过语法、缺少/旧版/不支持自动模式拒绝、完整参数、库路径保留、退出码传播和不重跑检查。最终修改的manual_capture.cpp与manual_steering_tests.cpp通过x86 Linux编译检查。
+本次870项C++检查通过：手动/自动舵机215、核心148、视觉观察75、硬件模拟368、采集数据46、灰度地址范围18。启动脚本检查通过；打包工具5项测试通过。最终修改的manual_capture.cpp与manual_steering_tests.cpp通过x86 Linux编译检查。打包测试使用合成文件，只检查格式门槛/ZIP/校验逻辑，不是龙芯链接或运行验证。
 
-Windows模拟、脚本替身测试和x86 Linux编译检查不能替代 `.4` 的龙芯交叉链接及实车试验；本机没有生成或执行新的龙芯二进制。
+Windows模拟、脚本替身测试和x86 Linux编译检查不能替代 `.5` 的龙芯交叉链接及实车试验；本机没有生成或执行新的 `.5` 龙芯二进制或可部署ZIP，需要先按上方虚拟机命令编译打包。

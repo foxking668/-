@@ -28,13 +28,13 @@ namespace fs=std::filesystem;
 using car2026::capture::Config;
 using car2026::capture::SensorSpec;
 namespace {
-constexpr const char* recorderVersion="2026-10-07.4";
+constexpr const char* recorderVersion="2026-10-07.5";
 constexpr const char* sensorHeader="cycle,channel,read_start_ns,read_end_ns,elapsed_s,value,unit,valid,status,read_return,raw_hex";
 constexpr const char* frameHeader="frame_index,read_start_ns,read_end_ns,elapsed_s";
 constexpr const char* markerHeader="monotonic_ns,elapsed_s,marker";
 constexpr const char* observerHeader="frame_index,frame_read_start_s,processed_time_s,frame_age_s,motion,reference_id,has_reference,state,line_confidence,line_ambiguous,line_discontinuous,lateral_error_image,heading_error_image,suggestion_valid,suggested_command,motor_writes,servo_writes";
 constexpr const char* probeHeader="frame_index,processed_time_s,encoder_fresh,stationary,encoder_age_s,key,probe_state,decision,requested_command,last_successful_command,servo_api_attempts,servo_api_successes,motor_writes,reason,encoder_reason,zero_duration_s,last_encoder_left_delta,last_encoder_right_delta,movement_epoch,auto_phase";
-constexpr const char* servoEventHeader="request,monotonic_ns,elapsed_s,command,duty,status";
+constexpr const char* servoEventHeader="request,monotonic_ns,elapsed_s,command,duty,status,reason,encoder_reason,encoder_age_s,zero_duration_s,frame_age_s";
 volatile std::sig_atomic_t interrupted=0;
 void signalHandler(int) {interrupted=1;}
 int64_t monotonicNs() {
@@ -153,8 +153,13 @@ car2026::capture::Sample readSensor(const SensorSpec& sensor,bool factoryEncoder
 struct Stats {std::atomic<uint64_t> valid{0},invalid{0};};
 struct SharedRestGate {
     std::mutex mutex;car2026::capture::EncoderRestGate gate;
-    car2026::capture::EncoderRestStatus status(double now) {
-        std::lock_guard<std::mutex> held(mutex);return gate.status(now);
+    struct Snapshot {int64_t timeNs;double elapsed;car2026::capture::EncoderRestStatus rest;};
+    Snapshot snapshot(int64_t origin) {
+        // Capture time under the same lock as status: a sampler update cannot
+        // appear to come from the future while a caller waits for this lock.
+        std::lock_guard<std::mutex> held(mutex);
+        const auto time=monotonicNs();const double elapsed=double(time-origin)/1e9;
+        return {time,elapsed,gate.status(elapsed)};
     }
 };
 void fillEncoderPaths(Config& config,const car2026::HardwareConfig& hardware) {
@@ -343,6 +348,7 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     bool probeReferenceActive=false;
     uint64_t servoRequests=0,servoAttempts=0,servoSuccesses=0;std::optional<double> lastServoCommand;
     bool exitZeroWriteOk=false;
+    std::string lastServoCancellation;
     if(hasObserver) {
         observerVision.emplace(*vehicleParams);observer.emplace(*vehicleParams,observerMotion);
         observerFile=outputFile(directory/"visual_observer.csv");observerFile<<observerHeader<<'\n';observerFile.flush();
@@ -351,25 +357,42 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
         probeFile=outputFile(directory/"steering_probe.csv");probeFile<<probeHeader<<'\n';probeFile.flush();
         servoEvents=outputFile(directory/"servo_events.csv");servoEvents<<servoEventHeader<<'\n';servoEvents.flush();
     }
+    auto recordServoEvent=[&](uint64_t request,const SharedRestGate::Snapshot& snapshot,double command,
+                             std::optional<uint16_t> duty,const char* status,const std::string& reason,double frameTime) {
+        const double elapsed=snapshot.elapsed;const auto& rest=snapshot.rest;
+        servoEvents<<request<<','<<snapshot.timeNs<<','<<elapsed<<','<<command<<',';
+        if(duty) servoEvents<<*duty;
+        servoEvents<<','<<status<<','<<car2026::capture::csvString(reason)<<','<<rest.reason<<','
+                   <<rest.age<<','<<rest.zeroDuration<<',';
+        if(std::isfinite(frameTime) && frameTime>=0 && elapsed>=frameTime) servoEvents<<elapsed-frameTime;
+        servoEvents<<'\n';servoEvents.flush();
+    };
     auto probeServoWrite=[&](double command,double frameTime,bool closing=false) {
+        lastServoCancellation.clear();
         if(!servo) {
             servoIo=std::make_unique<car2026::LinuxDeviceIo>(hardware);
             servo=std::make_unique<car2026::ServoOutput>(*servoIo,hardware,*vehicleParams);
         }
-        const auto before=monotonicNs();const auto request=++servoRequests;
+        const auto before=restGate.snapshot(origin);const auto request=++servoRequests;
         // Normal requests are logged before writing. Shutdown must attempt zero
         // even when the log disk is full; record that attempt afterwards.
         if(!closing) {
-            servoEvents<<request<<','<<before<<','<<double(before-origin)/1e9<<','<<command<<",,PREPARE\n";
-            servoEvents.flush();
+            recordServoEvent(request,before,command,{},"PREPARE",{},frameTime);
             // Metadata reads and disk flushes may take time. Recheck immediately
             // before writing, so a delayed request cannot move a pulling car.
-            const auto checked=monotonicNs();const double now=double(checked-origin)/1e9;
-            const auto rest=restGate.status(now);
-            if(interrupted || stop.load() || now>=duration || !rest.fresh || !rest.stationary ||
-               now<frameTime || now-frameTime>vehicleParams->frame_timeout_s) {
-                servoEvents<<request<<','<<checked<<','<<now<<','<<command<<",,CANCELLED_GATE_CHANGED\n";
-                servoEvents.flush();return false;
+            const auto checked=restGate.snapshot(origin);const double now=checked.elapsed;
+            const auto& rest=checked.rest;
+            car2026::capture::ServoRequestGate gate;
+            gate.exitRequested=interrupted;gate.samplerStopped=stop.load();gate.now=now;gate.deadline=duration;
+            gate.command=command;gate.frameTime=frameTime;gate.frameTimeout=vehicleParams->frame_timeout_s;gate.rest=rest;
+            const auto issue=gate.issue();
+            if(!issue.empty()) {
+                lastServoCancellation="SERVO_CANCELLED_"+issue;
+                recordServoEvent(request,checked,command,{},"CANCELLED_GATE_CHANGED",lastServoCancellation,frameTime);
+                std::cout<<"SERVO_REQUEST_CANCELLED reason="<<lastServoCancellation<<" command="<<command
+                         <<" encoder="<<rest.reason<<" encoder_age_s="<<rest.age
+                         <<" zero_s="<<rest.zeroDuration<<" frame_age_s="<<now-frameTime<<'\n'<<std::flush;
+                return false;
             }
         }
         ++servoAttempts;
@@ -377,16 +400,13 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
         try {
             if(closing) {servo->close();exitZeroWriteOk=true;}else duty=servo->set(command);
         } catch(...) {
-            const auto after=monotonicNs();
-            servoEvents<<request<<','<<after<<','<<double(after-origin)/1e9<<','<<command<<",,FAILED\n";
-            servoEvents.flush();throw;
+            const auto after=restGate.snapshot(origin);
+            recordServoEvent(request,after,command,{},"FAILED",{},frameTime);throw;
         }
         ++servoSuccesses;lastServoCommand=command;
-        const auto after=monotonicNs();
-        if(closing) servoEvents<<request<<','<<before<<','<<double(before-origin)/1e9<<','<<command<<",,EXIT_ATTEMPT\n";
-        servoEvents<<request<<','<<after<<','<<double(after-origin)/1e9<<','<<command<<',';
-        if(!closing) servoEvents<<duty;
-        servoEvents<<",SOFTWARE_OK\n";servoEvents.flush();
+        const auto after=restGate.snapshot(origin);
+        if(closing) recordServoEvent(request,before,command,{},"EXIT_ATTEMPT",{},frameTime);
+        recordServoEvent(request,after,command,closing ? std::optional<uint16_t>{} : duty,"SOFTWARE_OK",{},frameTime);
         return true;
     };
     std::thread sampler(sensorLoop,std::cref(config),directory,origin,std::ref(stop),
@@ -424,8 +444,9 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                                                   options.isProbe() ? &probeInput : nullptr,options.autoProbe);
             const bool canWrite=keepRunning && !interrupted && !stop.load() && double(monotonicNs()-origin)/1e9<duration;
             if(options.isProbe()) {
-                const double decisionTime=double(monotonicNs()-origin)/1e9;
-                const auto rest=restGate.status(decisionTime);
+                const auto decisionSnapshot=restGate.snapshot(origin);
+                const double decisionTime=decisionSnapshot.elapsed;
+                const auto& rest=decisionSnapshot.rest;
                 latestRest=rest;
                 if(probeReferenceActive && decisionTime-frameTime>vehicleParams->frame_timeout_s) {
                     latestSuggestion.hasSuggestion=false;latestSuggestion.state="STALE_FRAME";
@@ -439,19 +460,26 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                 }
                 if(action.command && canWrite) {
                     const bool written=probeServoWrite(*action.command,frameTime);
-                    const double writtenTime=double(monotonicNs()-origin)/1e9;
+                    const auto writtenSnapshot=restGate.snapshot(origin);const double writtenTime=writtenSnapshot.elapsed;
                     if(options.autoProbe) {
-                        if(autoProbe.acknowledge(written,restGate.status(writtenTime),writtenTime,
+                        if(autoProbe.acknowledge(written,writtenSnapshot.rest,writtenTime,
                                                 writtenTime-frameTime<=vehicleParams->frame_timeout_s &&
-                                                !interrupted && !stop.load() && writtenTime<duration))
+                                                !interrupted && !stop.load() && writtenTime<duration,lastServoCancellation))
                             std::cout<<"【开始后拉】AUTO_PULL_READY command=+2; 缓慢后拉20~30cm，然后停稳，无需输入任何按键。\n"<<std::flush;
-                        if(!written) {action.command.reset();action.decision="SERVO_REQUEST_CANCELLED";action.reason=autoProbe.outcome();}
+                        if(!written) {
+                            action.command.reset();action.decision="SERVO_REQUEST_CANCELLED";action.reason=lastServoCancellation;
+                            if(std::string(autoProbe.phaseName())=="WAIT_STILL") {
+                                action.decision="AUTO_WAIT_STILL";action.state="UNARMED";
+                            }
+                        }
                         if(std::string(autoProbe.phaseName())=="WAIT_STOP") {
                             action.decision="AUTO_STOP_PENDING";action.reason=autoProbe.outcome();
                         }
                         if(autoProbe.finished()) {action.decision="AUTO_ZERO_AND_FINISH";action.reason=autoProbe.outcome();}
-                    } else if(!written)
+                    } else if(!written) {
                         action=probe.update(car2026::capture::ProbeKey::Stop,{},latestSuggestion,writtenTime);
+                        action.reason=lastServoCancellation;
+                    }
                 }
                 if(action.resetReference) {
                     observer->reset();observerVision.emplace(*vehicleParams);
