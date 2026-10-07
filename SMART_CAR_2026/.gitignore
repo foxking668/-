@@ -14,3 +14,5 @@ deploy/*_analysis_*/*.png
 deploy/*_analysis_*/*.json
 deploy/visual_*/*.jsonl
 deploy/visual_*/*.json
+
+deploy/parking_rehearsal_*_verified.zip

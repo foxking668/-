@@ -1,4 +1,6 @@
 #include "capture_data.hpp"
+#include "capture_sensors.hpp"
+#include "capture_files.hpp"
 #include "hardware_linux.hpp"
 #include "device_read_buffer.hpp"
 #include "servo_output.hpp"
@@ -45,36 +47,7 @@ std::string utcStamp() {
     const auto current=std::time(nullptr);std::tm calendar{};gmtime_r(&current,&calendar);
     char buffer[32];std::strftime(buffer,sizeof(buffer),"%Y%m%dT%H%M%SZ",&calendar);return buffer;
 }
-std::ofstream outputFile(const fs::path& path) {
-    std::ofstream file(path.string());if(!file) throw std::runtime_error("Cannot create "+path.string());
-    file.exceptions(std::ios::failbit|std::ios::badbit);file<<std::setprecision(17);return file;
-}
-uint64_t nonemptyFileSize(const fs::path& path) {
-    struct stat info{};
-    if(stat(path.string().c_str(),&info)!=0)
-        throw std::runtime_error("Cannot stat "+path.string()+": "+std::strerror(errno));
-    if(info.st_size<=0) throw std::runtime_error("Output file is empty: "+path.string());
-    return uint64_t(info.st_size);
-}
-void syncFile(const fs::path& path) {
-    const int fd=open(path.string().c_str(),O_RDWR|O_CLOEXEC);
-    if(fd<0) throw std::runtime_error("Cannot sync-open "+path.string()+": "+std::strerror(errno));
-    int result;do {result=fsync(fd);} while(result<0 && errno==EINTR);
-    const int error=errno;const int closed=close(fd);
-    if(result<0) throw std::runtime_error("fsync "+path.string()+": "+std::strerror(error));
-    if(closed<0) throw std::runtime_error("Close after fsync failed: "+path.string());
-}
-void closeText(std::ofstream& file,const fs::path& path) {
-    file.flush();file.close(); // Exceptions are enabled, including delayed flush/close failures.
-    nonemptyFileSize(path);syncFile(path);
-}
-uint64_t verifyTextFile(const fs::path& path,const std::string& firstLine) {
-    nonemptyFileSize(path);
-    std::ifstream input(path.string(),std::ios::binary);
-    if(!input) throw std::runtime_error("Cannot reopen output: "+path.string());
-    try {return car2026::capture::verifyTextOutput(input,firstLine);}
-    catch(const std::exception& error) {throw std::runtime_error(path.string()+": "+error.what());}
-}
+using namespace car2026::capture;
 void verifyProbe(const fs::path& path,const std::string& expected) {
     nonemptyFileSize(path);
     const int fd=open(path.string().c_str(),O_RDONLY|O_CLOEXEC);
@@ -121,35 +94,6 @@ int checkOutput(const fs::path& base) {
     } catch(const std::exception& error) {++failures;std::cout<<"FAIL C++ stream: "<<error.what()<<'\n';}
     return failures ? 1 : 0;
 }
-car2026::capture::Sample readSensor(const SensorSpec& sensor,bool factoryEncoderStatusZero) {
-    using car2026::capture::Sample;
-    if(sensor.path.empty()) {Sample result;result.status="unconfigured";return result;}
-    // Only sensor inputs are opened, read-only. No GPIO export/direction writes.
-    const int fd=open(sensor.path.c_str(),O_RDONLY|O_NONBLOCK|O_CLOEXEC);
-    if(fd<0) {Sample result;result.status="open_failed:"+std::string(std::strerror(errno));return result;}
-    const size_t size=car2026::capture::readBufferSize(sensor);
-    std::vector<uint8_t> bytes(size,0xa5);ssize_t count;
-    const bool factoryEncoder=factoryEncoderStatusZero &&
-        (sensor.name=="encoder_left" || sensor.name=="encoder_right");
-    car2026::GuardedDeviceRead<car2026::EncoderCount> guardedEncoder(
-        std::numeric_limits<car2026::EncoderCount>::min());
-    void* destination=factoryEncoder ? guardedEncoder.data() : bytes.data();
-    // Never finish a short transfer with a second read: delta counters may clear.
-    do {count=read(fd,destination,bytes.size());} while(count<0 && errno==EINTR && !interrupted);
-    const int error=errno;close(fd);
-    if(factoryEncoder) {
-        std::memcpy(bytes.data(),guardedEncoder.data(),bytes.size());
-        if(guardedEncoder.guardDamaged()) throw std::runtime_error("Encoder payload guard damaged: "+sensor.path);
-    }
-    auto result=car2026::capture::decode(sensor,long(factoryEncoder && count==0 ? size : count),bytes);
-    result.returned=long(count); // Always preserve the actual syscall result.
-    if(factoryEncoder && (count==0 || count==ssize_t(sizeof(car2026::EncoderCount)))) {
-        result.value=car2026::decodeEncoderRead(guardedEncoder.value(sensor.path),count,sensor.path);
-        if(count==0) result.status="ok_factory_status_zero";
-    }
-    if(count<0) result.status="read_failed:"+std::string(std::strerror(error));
-    return result;
-}
 struct Stats {std::atomic<uint64_t> valid{0},invalid{0};};
 struct SharedRestGate {
     std::mutex mutex;car2026::capture::EncoderRestGate gate;
@@ -162,14 +106,6 @@ struct SharedRestGate {
         return {time,elapsed,gate.status(elapsed)};
     }
 };
-void fillEncoderPaths(Config& config,const car2026::HardwareConfig& hardware) {
-    // Only these verified interfaces have defaults. No guessed GPIO pin numbers.
-    if(config.sensors[0].path.empty()) config.sensors[0].path=hardware.encoder_left;
-    if(config.sensors[1].path.empty()) config.sensors[1].path=hardware.encoder_right;
-    if(config.factoryEncoderStatusZero &&
-       (config.sensors[0].path!=hardware.encoder_left || config.sensors[1].path!=hardware.encoder_right))
-        throw std::runtime_error("Factory status-zero reads are restricted to configured board encoder paths");
-}
 void sensorLoop(const Config& config,const fs::path& directory,int64_t origin,
                 std::atomic<bool>& stop,std::array<Stats,8>& stats,std::exception_ptr& failure,SharedRestGate& rest) {
     try {
@@ -184,7 +120,7 @@ void sensorLoop(const Config& config,const fs::path& directory,int64_t origin,
             for(size_t index=0;index<config.sensors.size();++index) {
                 const auto& sensor=config.sensors[index];const auto before=monotonicNs();
                 if(index==0) encoderPairStart=before;
-                const auto sample=readSensor(sensor,config.factoryEncoderStatusZero);const auto after=monotonicNs();
+                const auto sample=car2026::capture::readSensor(sensor,config.factoryEncoderStatusZero,interrupted);const auto after=monotonicNs();
                 if(index<encoders.size()) encoders[index]=sample;
                 if(index==1) {
                     std::lock_guard<std::mutex> held(rest.mutex);
@@ -665,7 +601,7 @@ int main(int argc,char** argv) {
             if(options.autoProbe && vehicleParams->max_steer_deg<car2026::capture::AutomaticSteeringProbe::trialCommand)
                 throw std::runtime_error("Automatic probe needs a configured command limit of at least 5");
         }
-        fillEncoderPaths(config,hardware);
+        car2026::capture::fillEncoderPaths(config,hardware);
         if(options.check) {
             const auto missing=car2026::capture::validateSensors(config,options.allowPartial);
             for(const auto& name:missing) std::cout<<"UNCONFIGURED "<<name<<'\n';

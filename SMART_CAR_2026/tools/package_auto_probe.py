@@ -20,8 +20,9 @@ def source_version():
     return found.group(1)
 
 
-def package_program(program_path, output_path):
-    version = source_version()
+def package_program(program_path, output_path, *, version=None, program_name=PROGRAM_NAME,
+                    script_name=SCRIPT_NAME, manifest_name=MANIFEST_NAME, required_marker=None, extra_payloads=None):
+    version = version or source_version()
     program = Path(program_path).read_bytes()
     if len(program) < 64 or program[:4] != b'\x7fELF':
         raise ValueError('Recorder is not an ELF program; zero-filled or wrong input')
@@ -29,13 +30,21 @@ def package_program(program_path, output_path):
         raise ValueError('Recorder must be a little-endian 64-bit LoongArch ELF program')
     if version.encode('ascii') not in program:
         raise ValueError('Recorder does not contain current source version ' + version + '; rebuild first')
-    script = (ROOT / 'deploy' / SCRIPT_NAME).read_bytes()
+    if required_marker and required_marker.encode('ascii') not in program:
+        raise ValueError('Recorder lacks required mode ' + required_marker)
+    script = (ROOT / 'deploy' / script_name).read_bytes()
     if not script.startswith(b'#!/bin/sh\n') or b'\r' in script:
         raise ValueError('Launcher must be LF shell text')
     if ('version=' + version).encode('ascii') not in script:
         raise ValueError('Launcher and recorder source versions disagree')
-    payloads = {PROGRAM_NAME: program, SCRIPT_NAME: script}
-    payloads[MANIFEST_NAME] = ''.join(
+    payloads = {program_name: program, script_name: script}
+    for name, data in (extra_payloads or {}).items():
+        if '/' in name or '\\' in name or name in payloads or name == manifest_name or name in ('', '.', '..'):
+            raise ValueError('Invalid or duplicate extra payload name: ' + name)
+        if not isinstance(data, bytes):
+            raise ValueError('Extra payload must contain bytes: ' + name)
+        payloads[name] = data
+    payloads[manifest_name] = ''.join(
         hashlib.sha256(data).hexdigest() + '  ' + name + '\n'
         for name, data in payloads.items()).encode('ascii')
     output = Path(output_path).resolve()
@@ -50,7 +59,7 @@ def package_program(program_path, output_path):
             for name, data in payloads.items():
                 info = zipfile.ZipInfo(name)
                 info.compress_type = zipfile.ZIP_DEFLATED
-                info.external_attr = (0o100644 if name == MANIFEST_NAME else 0o100755) << 16
+                info.external_attr = (0o100755 if name in (program_name, script_name) else 0o100644) << 16
                 archive.writestr(info, data)
         with zipfile.ZipFile(temporary) as archive:
             if archive.testzip() is not None or set(archive.namelist()) != set(payloads):
@@ -62,7 +71,7 @@ def package_program(program_path, output_path):
     finally:
         if temporary.exists():
             temporary.unlink()
-    return output, payloads[MANIFEST_NAME].decode('ascii')
+    return output, payloads[manifest_name].decode('ascii')
 
 
 def main():

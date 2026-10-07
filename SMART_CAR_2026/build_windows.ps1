@@ -31,7 +31,15 @@ try {
     if($LASTEXITCODE -ne 0) {throw 'Hardware tests compilation failed'}
     & $Compiler @prefix '-std=c++17' '-Wall' '-Wextra' '-Wpedantic' '-O0' '-g' '-Isrc' 'tests/capture_data_tests.cpp' '-o' 'build/capture_data_tests.exe'
     if($LASTEXITCODE -ne 0) {throw 'Capture-data tests compilation failed'}
+    & $Compiler @prefix '-std=c++17' '-Wall' '-Wextra' '-Wpedantic' '-O0' '-g' '-Isrc' 'tests/parking_rehearsal_tests.cpp' '-o' 'build/parking_rehearsal_tests.exe'
+    if($LASTEXITCODE -ne 0) {throw 'Parking rehearsal tests compilation failed'}
+    & $Compiler @prefix '-std=c++17' '-Wall' '-Wextra' '-Wpedantic' '-O0' '-g' '-Isrc' 'src/config.cpp' 'src/hardware.cpp' 'tests/rehearsal_servo_tests.cpp' '-o' 'build/rehearsal_servo_tests.exe'
+    if($LASTEXITCODE -ne 0) {throw 'Timed servo tests compilation failed'}
     if(!$SkipTests) {
+        & './build/rehearsal_servo_tests.exe'
+        if($LASTEXITCODE -ne 0) {throw 'Timed servo tests failed'}
+        & './build/parking_rehearsal_tests.exe'
+        if($LASTEXITCODE -ne 0) {throw 'Parking rehearsal tests failed'}
         & './build/core_tests.exe' 'config/competition.ini'
         if($LASTEXITCODE -ne 0) {throw 'Core regression tests failed'}
         & './build/visual_observer_tests.exe'
