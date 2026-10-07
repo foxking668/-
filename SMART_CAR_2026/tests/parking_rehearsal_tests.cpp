@@ -1,4 +1,6 @@
 #include "../tools/parking_rehearsal.hpp"
+#include "../tools/rehearsal_session.hpp"
+#include <chrono>
 #include <iostream>
 #include <limits>
 using namespace car2026::capture;
@@ -69,6 +71,14 @@ int main() {
     request=single.applySaved(other,20007);
     check(request && *request==12 && single.trial()==2,"duration edit repeats saved angle with new timer/trial");
     single.acknowledge(true,20007);
+    single.holdCompleted(1,1);check(!single.finished(),"stale stage completion ignored");
+    single.holdCompleted(3,1);check(!single.finished(),"previous trial completion ignored");
+    other.stages[0].command=4;
+    single.applySaved(other,20007.1);
+    single.update(20007.2,RehearsalKey::Pause);
+    single.holdCompleted(3,2);
+    check(single.outcome()=="TIMED_TRIAL_COMPLETED","paused saved trial ends even after unrelated config revision");
+    check(!single.applySaved(initial,20007.3),"finished timed trial cannot restart by save");
     SavedTuningWatcher watcher(initial,15);
     check(!watcher.observe(initial.source,0),"initial file does not auto execute");
     auto changed=config();changed.replace(changed.find("steer_command=-10"),17,"steer_command=-12");
@@ -87,9 +97,10 @@ int main() {
     watcher.observe(good,5);check(watcher.observe(good,5.4).has_value(),"valid save recovers after error");
     SavedTuningWatcher capped(initial,10);capped.observe(changed,0);
     rejects([&] {capped.observe(changed,.4);},"live save respects vehicle ceiling");
-    const auto revision=single.revision();auto invalid=other;invalid.stages[3].command=99;
-    rejects([&] {single.applySaved(invalid,20008);},"invalid saved model config rejected");
-    check(single.revision()==revision && single.command()==12,"invalid config leaves active model intact");
+    ParkingRehearsal validActive(initial);validActive.applySaved(other,0);validActive.acknowledge(true,0);
+    const auto revision=validActive.revision();auto invalid=other;invalid.stages[3].command=99;
+    rejects([&] {validActive.applySaved(invalid,1);},"invalid saved model config rejected");
+    check(validActive.revision()==revision && validActive.command()==12,"invalid config leaves active model intact");
     rejects([&] {watcher.observe(good,1);},"watcher rejects time reversal");
     ParkingRehearsal full(ParkingTuning::parse(config(false,1)));
     for(int i=0;i<6;++i) {
@@ -101,6 +112,16 @@ int main() {
     auto fullEdit=ParkingTuning::parse(config(false,1));fullEdit.stages[5].holdSeconds=8;
     check(full.applySaved(fullEdit,60).has_value() && full.stage()==5,"unchanged file selector preserves progressed full stage");
     full.acknowledge(true,60);
+    full.holdCompleted(5,full.trial());
+    check(full.outcome()=="TIMED_TRIAL_COMPLETED","saved trial ends in full mode too");
+    ParkingRehearsal manualFull(ParkingTuning::parse(config(false,1)));
+    start(manualFull,0);manualFull.holdCompleted(0,manualFull.trial());
+    check(!manualFull.finished(),"manual full mode remains available after centered segment");
+    ParkingRehearsal timedSingle(initial);start(timedSingle,0);
+    timedSingle.holdCompleted(1,timedSingle.trial());
+    check(timedSingle.finished(),"manual single trial ends after timer");
+    full=ParkingRehearsal(ParkingTuning::parse(config(false,6)));
+    start(full,60.1);
     fullEdit.stage=6;
     check(full.applySaved(fullEdit,61).has_value() && full.stage()==5,"explicit selector edit reruns selected current stage");
     full.acknowledge(true,61);
@@ -114,6 +135,33 @@ int main() {
     check(clock.outcome()=="INVALID_TIME","time reversal prevents write");
     ParkingRehearsal nonfinite(initial);nonfinite.update(std::numeric_limits<double>::quiet_NaN(),RehearsalKey::Enter);
     check(nonfinite.finished(),"nonfinite time prevents write");
+    for(const auto& answer:{"Y","y"," Y "}) check(parseSaveChoice({answer})==SaveChoice::Yes,"Y accepts explicit retention");
+    for(const auto& answer:{"N","n"," N "}) check(parseSaveChoice({answer})==SaveChoice::No,"N accepts explicit discard");
+    for(const auto& answer:{"","yes","no","P","YN"}) check(parseSaveChoice({answer})==SaveChoice::Invalid,"save prompt rejects trial keys and ambiguous text");
+    check(parseSaveChoice({})==SaveChoice::Invalid && parseSaveChoice({"Y","N"})==SaveChoice::Invalid,"no answer or queued answers never imply save choice");
+    namespace fs=std::filesystem;
+    const auto buildRoot=fs::canonical("build");
+    const auto root=buildRoot/("session_tests_"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    fs::create_directories(root);
+    if(fs::canonical(root).parent_path()!=buildRoot) throw std::runtime_error("Test cleanup path outside build directory");
+    try {
+        const auto current=root/"rehearsal_current",older=root/"rehearsal_older";
+        fs::create_directory(current);fs::create_directory(older);
+        std::ofstream(older/"keep.txt")<<"previous data";
+        SessionFiles files(current);std::ofstream(current/"01_advance.csv")<<"current data";
+        files.discard();
+        check(!fs::exists(current) && fs::exists(older/"keep.txt"),"N removes exclusively owned current session and preserves older data");
+        fs::create_directory(current);SessionFiles kept(current);kept.saved();
+        check(fs::exists(current) && !fs::exists(current/".pending_session"),"Y clears pending marker and preserves session");
+        rejects([&] {kept.discard();},"saved session cannot later be discarded by stale owner");
+        const auto tampered=root/"rehearsal_tampered";fs::create_directory(tampered);SessionFiles protectedFiles(tampered);
+        std::ofstream(tampered/".pending_session",std::ios::trunc)<<"wrong owner";
+        rejects([&] {protectedFiles.discard();},"changed ownership token blocks recursive discard");
+        check(fs::exists(tampered),"rejected deletion preserves directory");
+        const auto wrong=root/"config";fs::create_directory(wrong);
+        rejects([&] {SessionFiles forbidden(wrong);},"configuration path cannot be owned as session");
+        fs::remove_all(root);
+    } catch(...) {fs::remove_all(root);throw;}
     std::cout<<checks<<" parking rehearsal checks passed\n";return 0;
  } catch(const std::exception& error) {std::cerr<<"FAIL "<<error.what()<<'\n';return 1;}
 }

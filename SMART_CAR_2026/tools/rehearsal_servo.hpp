@@ -14,7 +14,7 @@ struct ServoHoldEvent {
     int stage;unsigned revision,trial;int64_t beginNs,endNs;
     std::string error;std::string event="AUTO_CENTER";
 };
-// The worker can only write zero. All nonzero commands require the main thread's explicit Enter.
+// The worker can only write zero. Commands require main-thread Enter or validated file-save authorization.
 // Serializes set/zero/close; camera or terminal delays cannot postpone the zero deadline indefinitely.
 class RehearsalServo {
 public:
@@ -36,7 +36,7 @@ public:
         if(closed_) throw std::runtime_error("Timed servo closed");
         if(!written_) throw std::runtime_error("Cannot arm hold before authorized write");
         ++generation_;deadline_.reset();std::optional<int64_t> start;
-        if(seconds>0 && *written_!=0) {
+        if(seconds>0) {
             context_={stage,revision,trial,0,0,""};
             const auto now=std::chrono::steady_clock::now();
             start=std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();

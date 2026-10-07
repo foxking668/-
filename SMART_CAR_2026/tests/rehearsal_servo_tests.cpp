@@ -65,6 +65,12 @@ int main() {
         check(idle.size()==0,"exit before authorization never writes");
     }
     {
+        ServoOnlyIo centered;RehearsalServo servo(centered,hardware,params);servo.set(0);
+        check(servo.beginHold(.02,0,1,1).has_value(),"zero command also starts configured positive timer");
+        const auto events=waitEvent(servo);
+        check(events.size()==1 && events.front().error.empty() && servo.written()==0,"timed straight trial emits completion while remaining centered");
+    }
+    {
         ServoOnlyIo cancelled;RehearsalServo servo(cancelled,hardware,params);servo.set(10);servo.beginHold(.08,1,1,1);servo.close();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         check(cancelled.size()==2,"exit cancels pending timer before cleanup zero");

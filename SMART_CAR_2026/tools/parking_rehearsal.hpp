@@ -2,7 +2,7 @@
 #include "capture_data.hpp"
 #include <optional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-07.2";
+constexpr const char* rehearsalVersion="2026-10-07.3";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct StageTuning {double command=0,settleSeconds=.5,holdSeconds=0;};
@@ -146,6 +146,10 @@ public:
         if(!execute) return {};
         stage_=nextStage_=target;++trials_[size_t(stage_)];automaticSavedTrial_=true;
         state_=State::WritePending;return command();
+    }
+    void holdCompleted(int stage,unsigned trial) {
+        if(!finished() && stage==stage_ && trial==trials_[size_t(stage_)] && (automaticSavedTrial_ || tuning_.single))
+            stop("TIMED_TRIAL_COMPLETED");
     }
     bool automaticSavedTrial() const {return automaticSavedTrial_;}
     void stop(const std::string& reason) {if(!finished()) outcome_=reason;}

@@ -3,6 +3,7 @@
 #include "capture_files.hpp"
 #include "hardware_linux.hpp"
 #include "rehearsal_servo.hpp"
+#include "rehearsal_session.hpp"
 #include <opencv2/core.hpp>
 #include <opencv2/videoio.hpp>
 #include <chrono>
@@ -45,25 +46,61 @@ struct Options {
         return result;
     }
 };
-RehearsalKey readKey() {
+std::vector<std::string> readTerminalLines(int timeoutMs=0) {
     std::vector<std::string> lines;pollfd input{STDIN_FILENO,POLLIN,0};
     for(unsigned count=0;count<32;++count) {
-        int ready;do {ready=poll(&input,1,0);} while(ready<0 && errno==EINTR && !interrupted);
+        int ready;do {ready=poll(&input,1,count==0 ? timeoutMs : 0);} while(ready<0 && errno==EINTR);
         if(ready<0) throw std::runtime_error("Terminal poll failed");
         if(!ready) break;
         if(input.revents&(POLLERR|POLLHUP|POLLNVAL)) throw std::runtime_error("Terminal disconnected");
         char buffer[4096];const auto size=read(STDIN_FILENO,buffer,sizeof(buffer));
         if(size<=0) throw std::runtime_error("Terminal read failed or EOF");
         std::string text(buffer,size_t(size));
-        if(text.back()!='\n') {tcflush(STDIN_FILENO,TCIFLUSH);return RehearsalKey::Invalid;}
+        if(text.back()!='\n') {tcflush(STDIN_FILENO,TCIFLUSH);return {"INVALID_BATCH"};}
         size_t start=0;
         for(size_t end=text.find('\n');end!=std::string::npos;end=text.find('\n',start)) {
             lines.push_back(text.substr(start,end-start));start=end+1;
         }
-        if(count==31) {tcflush(STDIN_FILENO,TCIFLUSH);return RehearsalKey::Invalid;}
+        if(count==31) {tcflush(STDIN_FILENO,TCIFLUSH);return {"INVALID_BATCH"};}
     }
-    return parseRehearsalInput(lines);
+    return lines;
 }
+RehearsalKey readKey() {return parseRehearsalInput(readTerminalLines());}
+
+SaveChoice askSave() {
+    // Discard typed-ahead trial controls. Y/N must be entered at this prompt.
+    if(tcflush(STDIN_FILENO,TCIFLUSH)!=0) throw std::runtime_error("Cannot prepare save confirmation terminal");
+    for(;;) {
+        std::cout<<"【试验结束，采集已停止】是否保存本次记录？输入 Y/N 后按回车；不会自动重启。"<<std::endl;
+        const auto lines=readTerminalLines(1000);const auto choice=parseSaveChoice(lines);
+        if(choice!=SaveChoice::Invalid) return choice;
+        if(!lines.empty()) std::cout<<"仅接受单行 Y 或 N，请重新输入。"<<std::endl;
+    }
+}
+class SessionRetention {
+public:
+    explicit SessionRetention(const fs::path& directory):files_(directory) {}
+    ~SessionRetention() noexcept {
+        if(asked_) return;
+        try {
+            const auto choice=decide();
+            if(choice==SaveChoice::Yes) std::cerr<<"KEPT_INCOMPLETE "<<files_.directory()<<"；本次异常退出，文件未完成验证。\n";
+        } catch(const std::exception& error) {std::cerr<<"SAVE_UNCONFIRMED "<<files_.directory()<<": "<<error.what()<<"；暂存记录保留，未认定已保存。\n";}
+    }
+    SaveChoice decide() {
+        asked_=true;
+        SaveChoice choice;
+        try {choice=askSave();}
+        catch(const std::exception& error) {
+            throw std::runtime_error("SAVE_UNCONFIRMED "+files_.directory().string()+": "+error.what()+"; pending records retained");
+        }
+        if(choice==SaveChoice::No) {files_.discard();std::cout<<"DISCARDED "<<files_.directory()<<std::endl;}
+        return choice;
+    }
+    void saved() {files_.saved();}
+private:
+    SessionFiles files_;bool asked_=false;
+};
 void saveSnapshot(const fs::path& directory,unsigned revision,const ParkingTuning& tuning) {
     auto output=outputFile(directory/("config_"+std::to_string(revision)+".ini"));
     output<<tuning.source;closeText(output,directory/("config_"+std::to_string(revision)+".ini"));
@@ -142,7 +179,7 @@ void showStatus(const ParkingRehearsal& model,std::optional<double> written) {
     else if(model.state()==ParkingRehearsal::State::AwaitStart)
         std::cout<<(model.stage()==5 ? " | Enter开始静态停止确认记录，保持车身静止" : " | Enter授权开始本段手动推/拉");
     else if(model.state()==ParkingRehearsal::State::Running)
-        std::cout<<" | 当前段进行中：停稳后Enter结束本段；记录仍继续，P暂停，Q结束";
+        std::cout<<" | 当前段进行中：定时回正后按模式收尾；停稳后Enter结束本段，P暂停记录，Q提前结束";
     std::cout<<std::endl;
 }
 int run(const Options& options,const Config& config,const car2026::HardwareConfig& hardware,
@@ -162,6 +199,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     const fs::path directory=fs::path(options.output)/("rehearsal_"+std::to_string(std::time(nullptr))+"_"+std::to_string(getpid())+"_"+std::to_string(origin));
     fs::create_directories(directory.parent_path());
     if(!fs::create_directory(directory)) throw std::runtime_error("Session already exists");
+    SessionRetention retention(directory);
     ParkingRehearsal model(tuning);Recording recording(directory);std::optional<double> written;
     saveSnapshot(directory,1,tuning);
     fs::copy_file(options.capture,directory/"capture_config.ini");
@@ -176,8 +214,9 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         auto events=servo->takeEvents();
         for(const auto& event:events) {
             deferredEvents.push_back(event);
+            if(event.error.empty()) model.holdCompleted(event.stage,event.trial);
             std::cout<<(event.error.empty()?"【时间到，舵机已自动回正】":"【定时回正失败，请停止推/拉】")
-                <<" 阶段="<<event.stage+1<<"；记录继续，阶段不自动切换。"<<std::endl;
+                <<" 阶段="<<event.stage+1<<"。"<<std::endl;
         }
         if(!model.paused() || final) {
             for(const auto& event:deferredEvents) recording.holdEvent(event,origin);
@@ -192,10 +231,11 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         return start.has_value();
     };
     std::cout<<"SESSION "<<directory<<"\nSERVO ONLY; no motor/GPIO-output/IMU initialization.\n"
-             <<"保存调参文件即授权执行；新角度写入成功后直接计时，无需R/C/再次回车。记录直到P暂停或Q结束。字母键后按Enter。\n";
+             <<"保存文件即授权执行；写入后计时，到时回正并结束试验，询问Y/N；下一次手动启动。P暂停记录，Q提前结束。字母键后按Enter。\n";
     try {
         while(!model.finished()) {
             collectHoldEvents();
+            if(model.finished()) break;
             auto key=interrupted ? RehearsalKey::Quit : readKey();
             if(key==RehearsalKey::Reload) std::cout<<"程序自动监测文件；直接保存即可，不需要R。\n";
             if(key==RehearsalKey::Invalid) std::cout<<"输入无效；仅Enter/P/C/R/Q，连续多行不授权。\n";
@@ -241,6 +281,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             const auto frameWritten=written;
             if(request) {
                 collectHoldEvents();
+                if(model.finished()) break;
                 if(interrupted) {model.stop("USER_QUIT");break;}
                 if(double(monotonicNs()-frameStart)/1e9>params.frame_timeout_s)
                     throw std::runtime_error("Camera frame stale before authorized servo write");
@@ -252,7 +293,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                 if(savedExecution) {
                     std::cout<<"【保存参数已执行】阶段="<<model.stage()+1<<" command="<<*request
                         <<" hold_time_s="<<model.tuning().stages[size_t(model.stage())].holdSeconds
-                        <<(timerArmed ? "；计时已从写入成功开始。" : "；命令已回正或保持时间为0，不启用定时回正。")
+                        <<(timerArmed ? "；计时已从写入成功开始。" : "；保持时间为0，不启用定时结束，需要Q结束。")
                         <<"记录暂停状态不变。"<<std::endl;
                 }
                 tcflush(STDIN_FILENO,TCIFLUSH); // No typed-ahead permission after hardware latency.
@@ -301,18 +342,22 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         try {
             servo->close();exitZeroSucceeded=exitZeroAttempted;
             std::cout<<(exitZeroAttempted ? "SERVO_ZERO software write completed\n" : "SERVO_ZERO not attempted; no authorized write occurred\n");
-        } catch(const std::exception& error) {exit.error=error.what();failure+="; ZERO_FAILED: "+exit.error;}
+        } catch(const std::exception& error) {
+            exit.error=error.what();failure+="; ZERO_FAILED: "+exit.error;
+            std::cerr<<"【退出回正失败，请停止推/拉】ZERO_FAILED "<<exit.error<<std::endl;
+        }
         exit.endNs=monotonicNs();
         if(exitZeroAttempted) recording.holdEvent(exit,origin);
     }
     try {collectHoldEvents(true);} catch(const std::exception& error) {failure+="; "+std::string(error.what());}
     recording.close();
+    if(retention.decide()==SaveChoice::No) return failure.empty() ? (partial?2:0) : 1;
     auto metadata=outputFile(directory/"session.txt");
     metadata<<"version="<<rehearsalVersion<<"\nresult="<<(failure.empty()?model.outcome():"ERROR")
         <<"\nerror="<<failure<<"\nmotor_writes=0\nimu_initialized=0\npartial="<<partial
         <<"\nservo_zero_on_exit="<<(exitZeroAttempted ? (exitZeroSucceeded ? "software_write_completed":"failed") : "not_attempted")
         <<"\nmanual_parking_success=not_inferred\nvideo_timing=use_csv_monotonic_timestamps_not_nominal_fps\n";
-    closeText(metadata,directory/"session.txt");
+    closeText(metadata,directory/"session.txt");retention.saved();
     std::cout<<"SAVED "<<directory<<" result="<<(failure.empty()?model.outcome():"ERROR")<<std::endl;
     return failure.empty() ? (partial?2:0) : 1;
 }
@@ -326,6 +371,7 @@ int main(int argc,char** argv) {
                 <<"--allow-partial --check-config (no hardware access)\n"
                 <<"Enter: initial/manual-stage permission; P: pause recording; C: resume recording; Q: finish.\n"
                 <<"auto_reload=save; saved settings execute immediately and restart hold_time_s after successful write. Timer continues while paused.\n"
+                <<"Saved timed trial ends after center; save_confirmation=Y/N; restart=manual.\n"
                 <<"SERVO ONLY. Six stage CSV files.\n";return 0;
         }
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);
