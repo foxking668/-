@@ -20,6 +20,11 @@ try {
     if($LASTEXITCODE -ne 0) {throw 'Replay compilation failed'}
     & $Compiler @prefix @common 'tests/visual_observer_tests.cpp' '-o' 'build/visual_observer_tests.exe'
     if($LASTEXITCODE -ne 0) {throw 'Visual observer tests compilation failed'}
+    $parking=@('-std=c++17','-Wall','-Wextra','-Wpedantic','-O0','-g','-Isrc','src/reverse_parking.cpp')
+    & $Compiler @prefix @parking 'tests/reverse_parking_tests.cpp' '-o' 'build/reverse_parking_tests.exe'
+    if($LASTEXITCODE -ne 0) {throw 'Reverse parking tests compilation failed'}
+    & $Compiler @prefix @parking 'tools/parking_geometry_check.cpp' '-o' 'build/parking_geometry_check.exe'
+    if($LASTEXITCODE -ne 0) {throw 'Parking geometry diagnostic compilation failed'}
     & $Compiler @prefix @common 'src/hardware.cpp' 'tests/manual_steering_tests.cpp' '-o' 'build/manual_steering_tests.exe'
     if($LASTEXITCODE -ne 0) {throw 'Manual steering tests compilation failed'}
     & $Compiler @prefix '-std=c++17' '-Wall' '-Wextra' '-Wpedantic' '-O0' '-g' '-Isrc' 'src/config.cpp' 'src/hardware.cpp' 'tests/hardware_tests.cpp' '-o' 'build/hardware_tests.exe'
@@ -31,6 +36,8 @@ try {
         if($LASTEXITCODE -ne 0) {throw 'Core regression tests failed'}
         & './build/visual_observer_tests.exe'
         if($LASTEXITCODE -ne 0) {throw 'Visual observer tests failed'}
+        & './build/reverse_parking_tests.exe'
+        if($LASTEXITCODE -ne 0) {throw 'Reverse parking regression tests failed'}
         & './build/manual_steering_tests.exe'
         if($LASTEXITCODE -ne 0) {throw 'Manual steering tests failed'}
         & './build/hardware_tests.exe' 'config/hardware.ini'
