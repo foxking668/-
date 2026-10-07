@@ -13,8 +13,8 @@ fi
 export LD_LIBRARY_PATH="/home/root/opencv-4.11-loongarch/install/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 program_help=$("$program" --help)
 case "$program_help" in
-    *'parking_rehearsal version=2026-10-07.4'*'--tuning-config'*) ;;
-    *) printf '%s\n' 'Wrong tuning program; require parking_rehearsal version=2026-10-07.4.' >&2; exit 1 ;;
+    *'parking_rehearsal version=2026-10-07.5'*'--tuning-config'*) ;;
+    *) printf '%s\n' 'Wrong tuning program; require parking_rehearsal version=2026-10-07.5.' >&2; exit 1 ;;
 esac
 # Install the template once. Never overwrite the user's tuning file.
 if [ ! -e config/parking_tuning.ini ]; then
@@ -25,7 +25,7 @@ if [ ! -e config/parking_tuning.ini ]; then
     mkdir -p config
     cp parking_tuning.example.ini config/parking_tuning.ini
 fi
-printf '%s\n' '保存调参文件直接执行新角度并计时，到时回正、停止采集、询问Y/N后退出。下一次手动启动。P暂停记录，C恢复，Q提前结束；P/C/Q后按Enter；保存确认直接按Y或N，无需回车，提示只显示一次。'
+printf '%s\n' '第二阶段可配置左打后自动右打修正，再回正；stage_2_step=right_correction只调右修正。保存参数直接执行，最后一步到时回正并收尾。P暂停记录但动作计时继续，C恢复，Q提前结束；P/C/Q后按Enter。结束只询问一次Y/N，直接按键，无需回车；下一次手动启动。'
 exec "$program" --config manual_capture.ini \
     --hardware-config config/calibration_hardware.ini \
     --vehicle-config config/calibration_vehicle.ini \

@@ -13,6 +13,7 @@ inline int64_t rehearsalMonotonicNs() {
 struct ServoHoldEvent {
     int stage;unsigned revision,trial;int64_t beginNs,endNs;
     std::string error;std::string event="AUTO_CENTER";
+    unsigned segment=0;
 };
 // The worker can only write zero. Commands require main-thread Enter or validated file-save authorization.
 // Serializes set/zero/close; camera or terminal delays cannot postpone the zero deadline indefinitely.
@@ -29,8 +30,8 @@ public:
         deadline_.reset();++generation_;wake_.notify_all();
         const auto duty=output_.set(command);written_=command;return duty;
     }
-    std::optional<int64_t> beginHold(double seconds,int stage,unsigned revision,unsigned trial) {
-        if(!std::isfinite(seconds) || seconds<0 || seconds>120 || stage<0 || stage>5)
+    std::optional<int64_t> beginHold(double seconds,int stage,unsigned revision,unsigned trial,unsigned segment=0) {
+        if(!std::isfinite(seconds) || seconds<0 || seconds>120 || stage<0 || stage>5 || segment>1)
             throw std::runtime_error("Invalid servo hold request");
         std::lock_guard<std::mutex> held(mutex_);
         if(closed_) throw std::runtime_error("Timed servo closed");
@@ -38,6 +39,7 @@ public:
         ++generation_;deadline_.reset();std::optional<int64_t> start;
         if(seconds>0) {
             context_={stage,revision,trial,0,0,""};
+            context_.segment=segment;
             const auto now=std::chrono::steady_clock::now();
             start=std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
             deadline_=now+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds));

@@ -1,4 +1,5 @@
 #include "../tools/rehearsal_servo.hpp"
+#include "../tools/parking_rehearsal.hpp"
 #include <iostream>
 #include <atomic>
 #include <mutex>
@@ -74,6 +75,35 @@ int main() {
         ServoOnlyIo cancelled;RehearsalServo servo(cancelled,hardware,params);servo.set(10);servo.beginHold(.08,1,1,1);servo.close();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         check(cancelled.size()==2,"exit cancels pending timer before cleanup zero");
+    }
+    {
+        ParkingTuning tuning;tuning.stage=2;tuning.stages[1]={-10,.5,.03};tuning.correction={5,.02};
+        ParkingRehearsal trial(tuning);ServoOnlyIo pairIo;RehearsalServo servo(pairIo,hardware,params);
+        const auto left=trial.update(0,RehearsalKey::Enter);servo.set(*left);trial.acknowledge(true,0);
+        trial.update(.5,RehearsalKey::None);trial.update(.51,RehearsalKey::Enter);
+        servo.beginHold(trial.holdSeconds(),trial.stage(),trial.revision(),trial.trial(),trial.segment());
+        auto events=waitEvent(servo);
+        check(events.front().error.empty() && events.front().segment==0 && pairIo.size()==2,"left deadline centers and retains first-segment tag");
+        trial.holdCompleted(events.front().stage,events.front().trial,events.front().segment);
+        const auto right=trial.update(1,RehearsalKey::None);
+        check(right==5 && !trial.finished(),"successful left deadline authorizes configured right correction");
+        servo.set(*right);trial.acknowledge(true,1);
+        servo.beginHold(trial.holdSeconds(),trial.stage(),trial.revision(),trial.trial(),trial.segment());
+        events=waitEvent(servo);
+        check(events.front().segment==1 && events.front().error.empty(),"right deadline has its own segment tag");
+        trial.holdCompleted(events.front().stage,events.front().trial,events.front().segment);
+        check(trial.finished() && servo.written()==0 && pairIo.size()==4,"real timer and model complete left/zero/right/zero order without motors");
+    }
+    {
+        ParkingTuning tuning;tuning.stage=2;tuning.stages[1]={-10,.5,.02};tuning.correction={5,.02};
+        ParkingRehearsal trial(tuning);ServoOnlyIo pairIo;RehearsalServo servo(pairIo,hardware,params);
+        const auto left=trial.update(0,RehearsalKey::Enter);servo.set(*left);trial.acknowledge(true,0);
+        trial.update(.5,RehearsalKey::None);trial.update(.51,RehearsalKey::Enter);
+        pairIo.failNext=true;servo.beginHold(trial.holdSeconds(),trial.stage(),trial.revision(),trial.trial(),trial.segment());
+        const auto events=waitEvent(servo);
+        check(!events.front().error.empty() && events.front().segment==0,"first transition zero failure is observable");
+        trial.stop("AUTO_CENTER_FAILED");
+        check(!trial.update(1,RehearsalKey::None) && !trial.pendingCorrection() && servo.written()==-10,"failed transition cannot trigger a right command");
     }
     std::cout<<checks<<" timed servo checks passed\n";return 0;
  } catch(const std::exception& error) {std::cerr<<"FAIL "<<error.what()<<'\n';return 1;}
