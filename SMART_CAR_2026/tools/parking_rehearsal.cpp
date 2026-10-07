@@ -4,6 +4,7 @@
 #include "hardware_linux.hpp"
 #include "rehearsal_servo.hpp"
 #include "rehearsal_session.hpp"
+#include "rehearsal_terminal.hpp"
 #include <opencv2/core.hpp>
 #include <opencv2/videoio.hpp>
 #include <chrono>
@@ -46,10 +47,10 @@ struct Options {
         return result;
     }
 };
-std::vector<std::string> readTerminalLines(int timeoutMs=0) {
+std::vector<std::string> readTerminalLines() {
     std::vector<std::string> lines;pollfd input{STDIN_FILENO,POLLIN,0};
     for(unsigned count=0;count<32;++count) {
-        int ready;do {ready=poll(&input,1,count==0 ? timeoutMs : 0);} while(ready<0 && errno==EINTR);
+        int ready;do {ready=poll(&input,1,0);} while(ready<0 && errno==EINTR);
         if(ready<0) throw std::runtime_error("Terminal poll failed");
         if(!ready) break;
         if(input.revents&(POLLERR|POLLHUP|POLLNVAL)) throw std::runtime_error("Terminal disconnected");
@@ -68,14 +69,9 @@ std::vector<std::string> readTerminalLines(int timeoutMs=0) {
 RehearsalKey readKey() {return parseRehearsalInput(readTerminalLines());}
 
 SaveChoice askSave() {
-    // Discard typed-ahead trial controls. Y/N must be entered at this prompt.
-    if(tcflush(STDIN_FILENO,TCIFLUSH)!=0) throw std::runtime_error("Cannot prepare save confirmation terminal");
-    for(;;) {
-        std::cout<<"【试验结束，采集已停止】是否保存本次记录？输入 Y/N 后按回车；不会自动重启。"<<std::endl;
-        const auto lines=readTerminalLines(1000);const auto choice=parseSaveChoice(lines);
-        if(choice!=SaveChoice::Invalid) return choice;
-        if(!lines.empty()) std::cout<<"仅接受单行 Y 或 N，请重新输入。"<<std::endl;
-    }
+    SaveConfirmationTerminal terminal(STDIN_FILENO);
+    const auto choice=readSaveConfirmation([&] {return terminal.readKey();},std::cout);
+    terminal.restore();return choice;
 }
 class SessionRetention {
 public:
@@ -371,7 +367,7 @@ int main(int argc,char** argv) {
                 <<"--allow-partial --check-config (no hardware access)\n"
                 <<"Enter: initial/manual-stage permission; P: pause recording; C: resume recording; Q: finish.\n"
                 <<"auto_reload=save; saved settings execute immediately and restart hold_time_s after successful write. Timer continues while paused.\n"
-                <<"Saved timed trial ends after center; save_confirmation=Y/N; restart=manual.\n"
+                <<"Saved timed trial ends after center; save_confirmation=single-key Y/N (no Enter, one prompt); restart=manual.\n"
                 <<"SERVO ONLY. Six stage CSV files.\n";return 0;
         }
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);

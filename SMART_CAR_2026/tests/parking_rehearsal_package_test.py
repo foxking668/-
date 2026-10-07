@@ -21,7 +21,7 @@ class PackageTests(unittest.TestCase):
         self.archive = self.directory / 'test.zip'
     def tearDown(self):
         shutil.rmtree(self.directory)
-    def elf(self, machine=258, marker=b'--tuning-config', version=b'2026-10-07.3'):
+    def elf(self, machine=258, marker=b'--tuning-config', version=b'2026-10-07.4'):
         data = bytearray(64)
         data[:6] = b'\x7fELF\x02\x01'
         data[18:20] = machine.to_bytes(2, 'little')
@@ -44,7 +44,7 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'required mode'): packager.package(self.program, self.archive)
     def test_old_version_preserves_destination(self):
         self.archive.write_bytes(b'previous')
-        self.elf(version=b'2026-10-07.0')
+        self.elf(version=b'2026-10-07.3')
         with self.assertRaisesRegex(ValueError, 'rebuild first'): packager.package(self.program, self.archive)
         self.assertEqual(self.archive.read_bytes(), b'previous')
     def test_launcher_keeps_existing_tuning(self):
@@ -54,7 +54,7 @@ class PackageTests(unittest.TestCase):
         launcher = self.directory / 'run_parking_rehearsal.sh'
         launcher.write_bytes((ROOT / 'deploy/run_parking_rehearsal.sh').read_bytes())
         fake = self.directory / 'parking_rehearsal_20261007'
-        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-07.3 --tuning-config"; else printf "%s\\n" "$@" > received_args; fi\n', newline='\n')
+        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-07.4 --tuning-config"; else printf "%s\\n" "$@" > received_args; fi\n', newline='\n')
         fake.chmod(0o755)
         (self.directory / 'parking_tuning.example.ini').write_bytes(b'template')
         folder = self.directory / 'config'

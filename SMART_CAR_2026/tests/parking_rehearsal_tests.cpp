@@ -135,10 +135,20 @@ int main() {
     check(clock.outcome()=="INVALID_TIME","time reversal prevents write");
     ParkingRehearsal nonfinite(initial);nonfinite.update(std::numeric_limits<double>::quiet_NaN(),RehearsalKey::Enter);
     check(nonfinite.finished(),"nonfinite time prevents write");
-    for(const auto& answer:{"Y","y"," Y "}) check(parseSaveChoice({answer})==SaveChoice::Yes,"Y accepts explicit retention");
-    for(const auto& answer:{"N","n"," N "}) check(parseSaveChoice({answer})==SaveChoice::No,"N accepts explicit discard");
-    for(const auto& answer:{"","yes","no","P","YN"}) check(parseSaveChoice({answer})==SaveChoice::Invalid,"save prompt rejects trial keys and ambiguous text");
-    check(parseSaveChoice({})==SaveChoice::Invalid && parseSaveChoice({"Y","N"})==SaveChoice::Invalid,"no answer or queued answers never imply save choice");
+    for(char answer:{'Y','y'}) check(parseSaveChoice(answer)==SaveChoice::Yes,"Y accepts explicit retention");
+    for(char answer:{'N','n'}) check(parseSaveChoice(answer)==SaveChoice::No,"N accepts explicit discard");
+    for(char answer:{'\n','\r',' ','P','Q','0'}) check(parseSaveChoice(answer)==SaveChoice::Invalid,"save prompt ignores Enter and trial controls");
+    for(char answer:{'Y','y','N','n'}) {
+        std::ostringstream prompt;unsigned reads=0;
+        const auto choice=readSaveConfirmation([&] {++reads;if(reads!=1) throw std::runtime_error("Waited for Enter");return answer;},prompt);
+        check(choice==parseSaveChoice(answer) && reads==1,"single valid key completes immediately without Enter");
+    }
+    std::ostringstream prompt;const std::string input="\n PQ0\rN";size_t next=0;
+    check(readSaveConfirmation([&] {return input.at(next++);},prompt)==SaveChoice::No,"invalid keys ignored until single N");
+    const std::string label="【试验结束，采集已停止】";const auto shown=prompt.str();
+    check(shown.find(label)==0 && shown.find(label,label.size())==std::string::npos,"save question appears once after multiple invalid keys");
+    std::ostringstream failedPrompt;
+    rejects([&] {readSaveConfirmation([]()->char {throw std::runtime_error("EOF");},failedPrompt);},"terminal failure cannot silently choose save or discard");
     namespace fs=std::filesystem;
     const auto buildRoot=fs::canonical("build");
     const auto root=buildRoot/("session_tests_"+std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));

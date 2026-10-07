@@ -3,12 +3,19 @@
 #include <filesystem>
 namespace car2026 { namespace capture {
 enum class SaveChoice {Yes,No,Invalid};
-inline SaveChoice parseSaveChoice(const std::vector<std::string>& lines) {
-    if(lines.size()!=1) return SaveChoice::Invalid;
-    const auto value=trimmed(lines.front());
-    if(value=="Y" || value=="y") return SaveChoice::Yes;
-    if(value=="N" || value=="n") return SaveChoice::No;
+inline SaveChoice parseSaveChoice(char key) {
+    if(key=='Y' || key=='y') return SaveChoice::Yes;
+    if(key=='N' || key=='n') return SaveChoice::No;
     return SaveChoice::Invalid;
+}
+// Print once. Invalid keys are ignored; a valid key completes without a newline.
+template<class ReadKey>
+SaveChoice readSaveConfirmation(ReadKey readKey,std::ostream& output) {
+    output<<"【试验结束，采集已停止】是否保存本次记录？按 Y 保存 / N 丢弃，无需回车："<<std::flush;
+    for(;;) {
+        const char key=readKey();const auto choice=parseSaveChoice(key);
+        if(choice!=SaveChoice::Invalid) {output<<key<<'\n'<<std::flush;return choice;}
+    }
 }
 // N can remove only the exclusively created session, verified by parent and ownership token.
 class SessionFiles {
