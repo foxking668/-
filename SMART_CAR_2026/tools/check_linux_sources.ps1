@@ -11,10 +11,11 @@ try {
         if(!(Test-Path -LiteralPath $path)) {throw 'Run tools/fetch_validation_headers.py first'}
         $includeArgs+=@('-isystem',$path)
     }
-    $sources=@('src/config.cpp','src/vision.cpp','src/mission.cpp','src/imu.cpp',
+    $sources=@('src/config.cpp','src/vision.cpp','src/mission.cpp','src/imu.cpp','src/visual_observer.cpp',
       'src/hardware.cpp','src/hardware_linux.cpp','src/linux_main.cpp',
-      'tools/hardware_servo_test.cpp','tools/hardware_pwm_probe.cpp','tools/manual_capture.cpp',
-      'tests/hardware_tests.cpp','tests/capture_data_tests.cpp')
+      'tools/hardware_servo_test.cpp','tools/hardware_pwm_probe.cpp','tools/hardware_bench_test.cpp',
+      'tools/manual_capture.cpp','tests/hardware_tests.cpp','tests/capture_data_tests.cpp',
+      'tests/visual_observer_tests.cpp','tests/manual_steering_tests.cpp')
     foreach($source in $sources) {
         $output='build/linux-objects/'+[IO.Path]::GetFileNameWithoutExtension($source)+'.o'
         & $Compiler c++ -target x86_64-linux-gnu -std=c++17 -Wall -Wextra -Wpedantic @includeArgs -c $source -o $output

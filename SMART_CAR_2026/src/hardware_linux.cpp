@@ -1,8 +1,12 @@
 #include "hardware_linux.hpp"
+#include "device_read_buffer.hpp"
 #include <cerrno>
+#include <algorithm>
 #include <cstring>
+#include <dirent.h>
 #include <fcntl.h>
 #include <iostream>
+#include <limits>
 #include <linux/i2c-dev.h>
 #include <linux/i2c.h>
 #include <sys/file.h>
@@ -15,7 +19,7 @@ namespace {
 class FileDescriptor {
 public:
     FileDescriptor(const std::string& path,int flags) : fd_(open(path.c_str(),flags|O_CLOEXEC)) {
-        if(fd_<0) throw std::runtime_error("Open "+path+": "+std::strerror(errno));
+        if(fd_<0) throw std::runtime_error("Open '"+path+"': "+std::strerror(errno));
     }
     ~FileDescriptor() {close(fd_);}
     int get() const {return fd_;}
@@ -23,21 +27,99 @@ public:
     FileDescriptor& operator=(const FileDescriptor&)=delete;
 private:int fd_;
 };
-void exactTransfer(const std::string& path,void* data,size_t bytes,bool writing) {
+ssize_t transferOnce(const std::string& path,void* data,size_t bytes,bool writing) {
+    if(path.empty()) throw std::runtime_error("Empty device path before "+std::string(writing?"write":"read"));
     FileDescriptor fd(path,writing?O_WRONLY:O_RDONLY);ssize_t count;
     do {count=writing ? write(fd.get(),data,bytes) : read(fd.get(),data,bytes);} while(count<0 && errno==EINTR);
     if(count<0) throw std::runtime_error("I/O "+path+": "+std::strerror(errno));
+    return count;
+}
+void exactTransfer(const std::string& path,void* data,size_t bytes,bool writing) {
+    const auto count=transferOnce(path,data,bytes,writing);
     // Do not complete a short transfer with another read: encoder reads may clear counters.
     if(size_t(count)!=bytes) throw std::runtime_error("Short device transfer "+path+": expected "+std::to_string(bytes)+", got "+std::to_string(count));
 }
 }
+LinuxDeviceIo::LinuxDeviceIo(const HardwareConfig& config) : config_(config) {config_.validate();}
 void LinuxDeviceIo::readBinary(const std::string& path,void* data,size_t bytes) {exactTransfer(path,data,bytes,false);}
 void LinuxDeviceIo::writeBinary(const std::string& path,const void* data,size_t bytes) {exactTransfer(path,const_cast<void*>(data),bytes,true);}
+void LinuxDeviceIo::writePwmDuty(const std::string& path,uint16_t duty) {
+    if(!config_.factory_write_readback) {DeviceIo::writePwmDuty(path,duty);return;}
+    if(path!=config_.motor_left_pwm && path!=config_.motor_right_pwm && path!=config_.servo_pwm)
+        throw std::runtime_error("PWM readback compatibility refused unconfigured output: "+path);
+    const auto returned=transferOnce(path,&duty,sizeof(duty),true);
+    verifyFactoryPwmWrite(*this,path,duty,returned); // One write, no retries on short/status-zero results.
+    if(returned==0 && reportedZeroOutputWrites_.insert(path).second)
+        std::cerr<<"[2026 INFO] Verified status-zero PWM write: "<<path<<" duty="<<duty<<" readback matched (software only)\n";
+}
+void LinuxDeviceIo::writeGpioLevel(const std::string& path,uint8_t level) {
+    if(level>1) throw std::runtime_error("Invalid GPIO output level: "+path);
+    if(!config_.factory_write_readback) {DeviceIo::writeGpioLevel(path,level);return;}
+    if(path!=config_.motor_left_dir && path!=config_.motor_right_dir &&
+       !(config_.beep_enabled && path==config_.beep_device))
+        throw std::runtime_error("GPIO readback compatibility refused unconfigured output: "+path);
+    uint8_t ascii=uint8_t('0'+level);
+    const auto returned=transferOnce(path,&ascii,sizeof(ascii),true);
+    verifyFactoryGpioWrite(*this,path,level,returned);
+    if(returned==0 && reportedZeroOutputWrites_.insert(path).second)
+        std::cerr<<"[2026 INFO] Verified status-zero GPIO write: "<<path<<" level="<<unsigned(level)<<" readback matched (software only)\n";
+}
+PwmInfo LinuxDeviceIo::readPwmMetadata(const std::string& path) {
+    GuardedDeviceRead<PwmInfo> buffer(pwmMetadataReadBuffer());
+    const auto count=transferOnce(path,buffer.data(),sizeof(PwmInfo),false);
+    const auto info=buffer.value(path);
+    validatePwmMetadataRead(info,count,path);
+    if(count==0 && reportedZeroPwmReads_.insert(path).second)
+        std::cerr<<"[2026 INFO] Validated zero-return PWM metadata: "<<path<<'\n';
+    return info;
+}
+EncoderCount LinuxDeviceIo::readEncoderCount(const std::string& path) {
+    // Not initialized to zero: an untouched buffer must not be fabricated as
+    // standstill. This seed is NOT reserved: INT32_MIN is valid in cumulative32.
+    // v3 board evidence identified four changed bytes on BOTH encoders.
+    GuardedDeviceRead<EncoderCount> buffer(std::numeric_limits<EncoderCount>::min());
+    const auto returned=transferOnce(path,buffer.data(),sizeof(EncoderCount),false);
+    const auto count=buffer.value(path);
+    // Exactly one read. Do not add a second sentinel check: delta reads may clear
+    // the counter and would lose motion data. The factory zero-status contract
+    // has been observed on both devices; transfer failures must be reported by
+    // the driver. User space cannot prove copying for all possible int32 values.
+    return decodeEncoderRead(count,returned,path);
+}
+uint8_t LinuxDeviceIo::readGpioLevel(const std::string& path) {
+    GuardedDeviceRead<uint8_t> buffer(uint8_t(0xff)); // Outside GPIO domains.
+    const auto returned=transferOnce(path,buffer.data(),sizeof(uint8_t),false);
+    const auto level=buffer.value(path);
+    return decodeGpioRead(level,returned,path);
+}
 std::string LinuxDeviceIo::readText(const std::string& path) {
     FileDescriptor fd(path,O_RDONLY);char text[256];ssize_t count;
     do {count=read(fd.get(),text,sizeof(text));} while(count<0 && errno==EINTR);
     if(count<=0 || count==ssize_t(sizeof(text))) throw std::runtime_error("Empty/oversized/unreadable device text: "+path);
     return std::string(text,size_t(count));
+}
+std::vector<std::string> LinuxDeviceIo::listIioDevicePaths() {
+    const std::string root="/sys/bus/iio/devices";
+    DIR* opened=opendir(root.c_str());
+    if(!opened) {
+        if(errno==ENOENT) return {};
+        throw std::runtime_error("Cannot enumerate '"+root+"': "+std::strerror(errno));
+    }
+    std::unique_ptr<DIR,decltype(&closedir)> directory(opened,&closedir);
+    std::vector<std::string> paths;
+    const std::string prefix="iio:device";
+    for(;;) {
+        errno=0;const auto* entry=readdir(directory.get());
+        if(!entry) {
+            if(errno) throw std::runtime_error("Cannot finish IIO inventory: "+std::string(std::strerror(errno)));
+            break;
+        }
+        const std::string name=entry->d_name;
+        if(name.compare(0,prefix.size(),prefix)==0 && name.size()>prefix.size() &&
+           name.find_first_not_of("0123456789",prefix.size())==std::string::npos)
+            paths.push_back(root+"/"+name);
+    }
+    std::sort(paths.begin(),paths.end());return paths;
 }
 HardwareLock::HardwareLock() {
     fd_=open("/tmp/smart_car_2026.lock",O_CREAT|O_RDWR|O_CLOEXEC|O_NOFOLLOW,0600);
@@ -88,21 +170,5 @@ bool VoiceOutput::speakZebra() {
     union i2c_smbus_data data{};data.block[0]=2;data.block[1]=0xff;data.block[2]=0x11;
     struct i2c_smbus_ioctl_data args{};args.read_write=I2C_SMBUS_WRITE;args.command=0x6e;
     args.size=I2C_SMBUS_I2C_BLOCK_DATA;args.data=&data;return ioctl(fd_,I2C_SMBUS,&args)==0;
-}
-void inspectHardware(DeviceIo& io,const HardwareConfig& config,std::ostream& out) {
-    // No motor/servo/GPIO writes. Encoder reads consume counts on delta-mode drivers.
-    for(const auto& path : {config.motor_left_pwm,config.motor_right_pwm,config.servo_pwm}) {
-        const auto info=readPwmInfo(io,path);out<<path<<" freq="<<info.freq<<" duty="<<info.duty<<" max="<<info.duty_max<<'\n';
-    }
-    for(const auto& path : {config.encoder_left,config.encoder_right}) {int16_t count=0;io.readBinary(path,&count,sizeof(count));out<<path<<" count="<<count<<'\n';}
-    for(const auto& path : {config.motor_left_dir,config.motor_right_dir}) out<<path<<" level="<<int(readGpio(io,path))<<'\n';
-    if(config.board_inputs_enabled) {
-        for(int i=0;i<4;++i) {const auto path=config.key_prefix+std::to_string(i);out<<path<<" level="<<int(readGpio(io,path))<<'\n';}
-        for(int i=0;i<2;++i) {const auto path=config.switch_prefix+std::to_string(i);out<<path<<" level="<<int(readGpio(io,path))<<'\n';}
-    }
-    if(config.beep_enabled) out<<config.beep_device<<" level="<<int(readGpio(io,config.beep_device))<<'\n';
-    if(config.imu_backend=="iio") {IioYaw imu(io,config,1);out<<"IIO model="<<imu.model()<<" axis="<<config.imu_gyro_axis<<" raw="<<readDeviceNumber(io,config.imu_iio_device+"/in_anglvel_"+config.imu_gyro_axis+"_raw")<<'\n';}
-    out<<"Camera: "<<config.camera_device<<" (use --preview to acquire frames)\n";
-    out<<"Voice: "<<config.voice_device<<" address="<<config.voice_address<<" enabled="<<config.voice_enabled<<" (not written)\n";
 }
 } // namespace car2026

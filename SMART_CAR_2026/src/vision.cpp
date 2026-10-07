@@ -16,6 +16,14 @@ HSV hsv(Pixel p) {
     return {h,hi>0 ? d/hi*255 : 0,hi*255};
 }
 struct Run { int a,b; double center() const { return (a+b)*0.5; } int width() const { return b-a+1; } };
+bool isParking(Stage stage) {
+    return stage==Stage::GarageAlign || stage==Stage::GarageAdvance || stage==Stage::GarageReverse;
+}
+double guideWidthLimit(int w,int h,int y,Stage stage,const Params& params) {
+    const double nearWeight=isParking(stage) ? clamp((double(y)/h-.35)/.60,0.,1.) : 0;
+    return w*(params.line_width_max_ratio+nearWeight*
+        std::max(0.,params.parking_line_near_width_ratio-params.line_width_max_ratio));
+}
 std::vector<Run> runs(const std::vector<uint8_t>& mask,int w,int y,int a,int b) {
     std::vector<Run> result; int start=-1;
     for(int x=a;x<=b;++x) {
@@ -27,10 +35,42 @@ std::vector<Run> runs(const std::vector<uint8_t>& mask,int w,int y,int a,int b) 
     }
     return result;
 }
+std::vector<Run> guideRuns(const std::vector<uint8_t>& guide,
+                          const std::vector<uint8_t>& brightness,
+                          const std::vector<uint8_t>& blue,int w,int h,int y,Stage stage,const Params& params) {
+    const int a=int(w*.04),b=int(w*.96);
+    std::vector<Run> qualified;
+    for(const auto& run:runs(guide,w,y,a,b)) {
+        if(run.a<=a || run.b>=b || run.width()<std::max(2.,w*params.line_width_min_ratio) ||
+           run.width()>guideWidthLimit(w,h,y,stage,params)) continue;
+        const int flank=std::max(2,std::min(5,run.width()/2));
+        if(run.a-flank<a || run.b+flank>b) continue;
+        double center=0,left=0,right=0;bool coloredBoundary=false;
+        for(int x=run.a;x<=run.b;++x) center+=brightness[y*w+x];
+        for(int k=1;k<=flank;++k) {
+            left+=brightness[y*w+run.a-k];right+=brightness[y*w+run.b+k];
+            coloredBoundary=coloredBoundary || blue[y*w+run.a-k] || blue[y*w+run.b+k];
+        }
+        center/=run.width();left/=flank;right/=flank;
+        // A guide must be darker than BOTH nearby sides, even in dim footage.
+        // A dark road edge with only one bright side is not a guide line.
+        if(!coloredBoundary && std::min(left,right)-center>=params.line_local_contrast_min)
+            qualified.push_back(run);
+    }
+    return qualified;
+}
 double pathX(const Path& path,int y,int h,double fallback) {
     if(path.x.empty()) return fallback;
     int i=std::min(int(path.x.size())-1,std::max(0,int(double(y)/h*path.x.size())));
     return path.x[i]>=0 ? path.x[i] : fallback;
+}
+double nearReferenceX(const Path& path,int bottom,int h,double fallback) {
+    // A clipped/too-wide very bottom row must not reset a still-visible
+    // reference to the image center. Use its nearest observed lower row.
+    if(path.x.size()!=size_t(h)) return fallback;
+    for(int y=bottom;y>=std::max(0,bottom-h/8);--y)
+        if(path.x[y]>=0) return path.x[y];
+    return fallback;
 }
 bool isRing(Stage s) { return s==Stage::RingEntry||s==Stage::RingLap||s==Stage::RingExit; }
 }
@@ -59,22 +99,23 @@ void Vision::resetTracking() {
 Path Vision::trackBlack(int w,int h,Stage stage) {
     if(!previousBlack_.x.empty() && previousBlack_.x.size()!=size_t(h)) resetTracking();
     const int bottom=int(h*.95);
-    Path path=trackBlackFrom(w,h,stage,previousBlack_,pathX(previousBlack_,bottom,h,.5));
+    Path path=trackBlackFrom(w,h,stage,previousBlack_,nearReferenceX(previousBlack_,bottom,h,.5));
     if(path.confidence>=params_.line_min_confidence) {
         previousBlack_=path;pendingBlack_=Path{};blackReacquireHits_=0;
         return path;
     }
 
-    // A stale local prediction must not prevent reacquisition. Search near the
-    // car for one narrow black segment bordered by white road on BOTH sides.
+    // A parking reference cannot silently change identity after local loss.
+    // Explicit resetTracking starts a new reference search.
+    if(isParking(stage) && previousBlack_.valid()) {
+        pendingBlack_=Path{};blackReacquireHits_=0;return path;
+    }
+    // A stale local prediction must not prevent general road reacquisition.
+    // Require a narrow guide with locally brighter road on BOTH sides.
     // Multiple plausible branches remain unknown rather than choosing one.
     std::vector<Run> seeds;
     for(int y=bottom;y>=bottom-h/12;--y) {
-        for(const auto& run:runs(black_,w,y,int(w*.04),int(w*.96))) {
-            if(run.width()<std::max(1.,w*params_.line_width_min_ratio) ||
-               run.width()>w*params_.line_width_max_ratio) continue;
-            if(white_[y*w+run.a-1] && white_[y*w+run.b+1]) seeds.push_back(run);
-        }
+        seeds=guideRuns(guide_,brightness_,blue_,w,h,y,stage,params_);
         if(!seeds.empty()) break;
     }
     if(seeds.size()==1) {
@@ -99,28 +140,39 @@ Path Vision::trackBlack(int w,int h,Stage stage) {
 Path Vision::trackBlackFrom(int w,int h,Stage stage,const Path& priorPath,double startX) {
     Path path; path.x.assign(h,-1);
     const int bottom=int(h*.95), top=int(h*std::max(.35,params_.crop_top_ratio));
-    double predicted=startX*w, slope=0;
+    double predicted=startX*w, slope=0,lastObservedX=predicted;
     int hits=0,lastY=bottom,misses=0;
     for(int y=bottom;y>=top;--y) {
-        auto candidates=runs(black_,w,y,int(w*.04),int(w*.96));
-        double bestScore=std::numeric_limits<double>::infinity(); int chosen=-1;
+        auto candidates=guideRuns(guide_,brightness_,blue_,w,h,y,stage,params_);
+        double bestScore=std::numeric_limits<double>::infinity(),secondScore=bestScore; int chosen=-1;
         const double prior=pathX(priorPath,y,h,-1);
         for(size_t k=0;k<candidates.size();++k) {
             const auto& r=candidates[k];
-            if(r.width()<std::max(1.,w*params_.line_width_min_ratio) || r.width()>w*params_.line_width_max_ratio) continue;
             const double dx=r.center()-predicted;
             if(std::abs(dx)>w*params_.line_search_ratio) continue;
+            if(isParking(stage) && prior>=0 && std::abs(r.center()-prior*w)>w*.06) continue;
             double score=std::abs(dx)+(prior>=0 ? .25*std::abs(r.center()-prior*w):0);
             // On departure and subsequent laps the selected line should continue upwards.
             // At the merge, slope continuity outranks line width/area.
             if(stage==Stage::Depart) score+=.1*std::abs(r.center()-w*.5);
-            if(score<bestScore) { bestScore=score; chosen=int(k); }
+            if(score<bestScore) {secondScore=bestScore;bestScore=score;chosen=int(k);}
+            else secondScore=std::min(secondScore,score);
+        }
+        if(chosen>=0 && secondScore-bestScore<=std::max(2.,w*.01)) {
+            path.ambiguous=true;chosen=-1;
+        }
+        if(chosen>=0 && hits && isParking(stage) &&
+           std::abs(candidates[chosen].center()-lastObservedX)>
+               std::max(2.,w*.01)+3*std::max(1,lastY-y)) {
+            // Row-count confidence must not bless fragments joined by a sudden
+            // lateral jump. Allow gradual oblique lines and short missing gaps.
+            path.discontinuous=true;chosen=-1;
         }
         if(chosen>=0) {
             const double x=candidates[chosen].center();
             const double newSlope=(x-predicted)/std::max(1,lastY-y);
             slope=.7*slope+.3*clamp(newSlope,-3,3);
-            predicted=x+slope; path.x[y]=x/w; ++hits; lastY=y; misses=0;
+            predicted=x+slope; path.x[y]=x/w; ++hits; lastY=y;lastObservedX=x; misses=0;
         } else { predicted=clamp(predicted+slope,0,w-1); ++misses; }
         if(misses>h/8) break;
     }
@@ -133,6 +185,7 @@ Path Vision::trackBlackFrom(int w,int h,Stage stage,const Path& priorPath,double
         previous=y;
     }
     measurePath(path);
+    if(path.ambiguous || path.discontinuous) path.confidence=0;
     return path;
 }
 
@@ -197,12 +250,22 @@ std::vector<Blob> Vision::blueBlobs(int w,int h) const {
 
 Observation Vision::analyze(const Image& image,Stage stage) {
     Observation o; const int w=image.width,h=image.height;
-    if(w<32||h<24||image.pixels.size()!=size_t(w)*h) {resetTracking();return o;}
+    auto rejectFrame=[&]() {
+        // A blackout must not erase the parking identity and enable a silent
+        // full-frame replacement on the next image. Clear confirmation only.
+        pendingBlack_=Path{};blackReacquireHits_=0;
+        if(!isParking(stage)) resetTracking();
+        return o;
+    };
+    if(w<32||h<24||image.pixels.size()!=size_t(w)*h) return rejectFrame();
     black_.assign(w*h,0);white_.assign(w*h,0);blue_.assign(w*h,0);
+    brightness_.resize(w*h);guide_.assign(w*h,0);
     std::vector<uint8_t> barMask(w*h);
     int exposurePixels=0;
     for(int y=0;y<h;++y) for(int x=0;x<w;++x) {
         auto c=hsv(image.at(x,y)); int i=y*w+x;
+        const auto pixel=image.at(x,y);
+        brightness_[i]=std::max({pixel.r,pixel.g,pixel.b});
         black_[i]=(c.v<=params_.black_v_max && c.s<=params_.black_s_max);
         white_[i]=(c.v>=params_.white_v_min && c.s<=params_.white_s_max);
         blue_[i]=(c.h>=params_.blue_h_min && c.h<=params_.blue_h_max && c.s>=params_.blue_s_min && c.v>=params_.blue_v_min);
@@ -210,7 +273,20 @@ Observation Vision::analyze(const Image& image,Stage stage) {
         if(c.v>35) ++exposurePixels;
     }
     o.frameValid=exposurePixels>w*h*.08;
-    if(!o.frameValid) {resetTracking();return o;}
+    if(!o.frameValid) return rejectFrame();
+    // Row-local contrast separates dark tape from a floor that is itself below
+    // black_v_max. Preserve the original masks for road, stripe and color tasks.
+    std::vector<int> prefix(w+1);
+    for(int y=0;y<h;++y) {
+        const int radius=std::max(3,int(std::ceil(guideWidthLimit(w,h,y,stage,params_))));
+        prefix[0]=0;
+        for(int x=0;x<w;++x) prefix[x+1]=prefix[x]+brightness_[y*w+x];
+        for(int x=0;x<w;++x) {
+            const int a=std::max(0,x-radius),b=std::min(w,x+radius+1);
+            const double mean=double(prefix[b]-prefix[a])/(b-a);
+            guide_[y*w+x]=black_[y*w+x] && brightness_[y*w+x]+params_.line_local_contrast_min<=mean;
+        }
+    }
     o.blackPath=trackBlack(w,h,stage);
     o.roadPath=trackRoad(w,h,stage);
     auto blobs=blueBlobs(w,h);

@@ -56,8 +56,10 @@ inline double wrapDegrees(double x) {
  X(crop_top_ratio, 0.28, 0, 0.65) \
  X(line_width_min_ratio, 0.004, 0.001, 0.05) \
  X(line_width_max_ratio, 0.085, 0.01, 0.20) \
+ X(parking_line_near_width_ratio, 0.15, 0.02, 0.25) \
  X(line_search_ratio, 0.16, 0.03, 0.4) \
  X(line_min_confidence, 0.35, 0.1, 0.9) \
+ X(line_local_contrast_min, 15, 5, 80) \
  X(line_hold_s, 0.30, 0, 1.0) \
  X(confirm_frames, 3, 1, 20) \
  X(clear_frames, 5, 2, 30) \
@@ -127,6 +129,8 @@ struct Image {
 struct Path {
     std::vector<double> x; // Normalized x for each full-frame row; -1 means missing.
     double confidence=0, lateral=0, heading=0, curvature=0;
+    bool ambiguous=false; // Competing guide segments; not a measured pose.
+    bool discontinuous=false; // Abrupt cross-row jump; cannot be trusted for parking.
     bool valid() const { return confidence > 0 && !x.empty(); }
 };
 struct Blob { int x=0,y=0,w=0,h=0,area=0; double bottomX=0,bottomY=0; };
@@ -169,7 +173,7 @@ private:
     int blackReacquireHits_=0;
     bool coneSideValid_=false, passRight_=false;
     double lastConeX_=0,lastConeY_=0;
-    std::vector<uint8_t> black_, white_, blue_;
+    std::vector<uint8_t> black_, white_, blue_, guide_, brightness_;
     Path trackBlack(int w,int h, Stage stage);
     Path trackBlackFrom(int w,int h, Stage stage,const Path& prior,double startX);
     Path trackRoad(int w,int h, Stage stage);

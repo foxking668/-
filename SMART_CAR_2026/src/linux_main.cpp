@@ -1,6 +1,7 @@
 #include "core.hpp"
 #include "imu.hpp"
 #include "hardware_linux.hpp"
+#include "opencv_image.hpp"
 #include "Contral/PID/PID.h"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -12,6 +13,7 @@
 #include <iomanip>
 #include <memory>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <thread>
 
@@ -32,7 +34,7 @@ struct Bus {
 class Drive {
 public:
     explicit Drive(const Params& p,const HardwareConfig& config)
-        : p_(p),board_(io_,config,p),imu_(io_,config,p),voice_(config) {
+        : p_(p),io_(config),board_(io_,config,p),imu_(io_,config,p),voice_(config) {
         for(auto* pid : {&leftPid_,&rightPid_}) {
             if(PID_Initialize(pid)!=PID_RESULT_SUCCESS ||
                PID_Incremental_Set_Kpid(pid,p.pid_kp,p.pid_ki,p.pid_kd)!=PID_RESULT_SUCCESS ||
@@ -111,23 +113,39 @@ private:
     st_PID_Attr leftPid_{},rightPid_{};
 };
 
-Image convert(const cv::Mat& bgr,const Params& p) {
-    cv::Mat small;cv::resize(bgr,small,cv::Size(int(p.process_width),int(p.process_height)),0,0,cv::INTER_AREA);
-    Image image(small.cols,small.rows);
-    for(int y=0;y<small.rows;++y) {
-        auto row=small.ptr<cv::Vec3b>(y);
-        for(int x=0;x<small.cols;++x) image.at(x,y)={row[x][2],row[x][1],row[x][0]};
-    }
-    return image;
-}
 void drawPath(cv::Mat& frame,const Path& path,cv::Scalar color) {
     for(size_t y=0;y<path.x.size();++y) if(path.x[y]>=0)
         cv::circle(frame,cv::Point(int(path.x[y]*frame.cols),int(double(y)/path.x.size()*frame.rows)),1,color,-1);
 }
+void checkCamera(cv::VideoCapture& capture,const cv::Mat& startup) {
+    if(startup.type()!=CV_8UC3) throw std::runtime_error("Camera check requires decoded 8-bit BGR frames");
+    const double codec=capture.get(cv::CAP_PROP_FOURCC);std::string fourcc="unknown";
+    if(std::isfinite(codec) && codec>0 && codec<=double(std::numeric_limits<int>::max())) {
+        const int value=int(codec);fourcc.clear();
+        for(int i=0;i<4;++i) {const int ch=(value>>(i*8))&0xff;fourcc+=ch>=32 && ch<=126?char(ch):'.';}
+    }
+    cv::Mat gray;cv::cvtColor(startup,gray,cv::COLOR_BGR2GRAY);
+    cv::Scalar mean,stddev;cv::meanStdDev(gray,mean,stddev);double minimum=0,maximum=0;
+    cv::minMaxLoc(gray,&minimum,&maximum);
+    std::cout<<"Camera decoded="<<startup.cols<<"x"<<startup.rows<<" channels="<<startup.channels()
+             <<" reported_fps="<<capture.get(cv::CAP_PROP_FPS)<<" fourcc="<<fourcc<<'\n'
+             <<"Gray first-frame mean="<<mean[0]<<" stddev="<<stddev[0]<<" min="<<minimum<<" max="<<maximum<<'\n';
+    const double start=seconds();int frames=0;
+    while(!interrupted && seconds()-start<2 && frames<120) {
+        cv::Mat sample;
+        if(!capture.read(sample) || sample.empty()) throw std::runtime_error("Camera check: missing frame");
+        if(sample.type()!=CV_8UC3 || sample.size()!=startup.size()) throw std::runtime_error("Camera check: frame type/resolution changed");
+        ++frames;
+    }
+    const double elapsed=seconds()-start;
+    std::cout<<"Camera sampled_frames="<<frames<<" elapsed_s="<<elapsed<<" read_decode_fps="<<(elapsed>0?frames/elapsed:0)
+             <<"\nNo GUI/recording or motion hardware. Rate is measured read/decode throughput, not proof of sensor timestamps or 60 FPS.\n";
+    if(!interrupted && frames==0) throw std::runtime_error("Camera check collected no frames");
+}
 }
 
 int main(int argc,char** argv) {
-    bool drive=false,preview=false,hardwareCheck=false;
+    bool drive=false,preview=false,hardwareCheck=false,imuCheck=false,cameraCheck=false;
     std::string config="config/competition.ini",hardwareConfig="config/hardware.ini",video,record,telemetryFile;
     std::unique_ptr<Drive> hardware;std::atomic<bool> running{true};std::thread worker;
     Bus bus;
@@ -139,18 +157,25 @@ int main(int argc,char** argv) {
             else if(arg=="--config" && i+1<argc) config=argv[++i];
             else if(arg=="--hardware-config" && i+1<argc) hardwareConfig=argv[++i];
             else if(arg=="--hardware-check") hardwareCheck=true;
+            else if(arg=="--imu-check") imuCheck=true;
+            else if(arg=="--camera-check") cameraCheck=true;
             else if(arg=="--video" && i+1<argc) video=argv[++i];
             else if(arg=="--record" && i+1<argc) record=argv[++i];
             else if(arg=="--telemetry" && i+1<argc) telemetryFile=argv[++i];
-            else if(arg=="--help") {std::cout<<"SMART_CAR_2026 [--drive] [--config file] [--hardware-config file] [--hardware-check] [--preview] [--video file] [--record file.avi] [--telemetry file.csv]\nDefault: camera perception only, no motion hardware initialized.\nHardware check reads devices without writing outputs; delta encoder reads consume counts.\n";return 0;}
+            else if(arg=="--help") {std::cout<<"SMART_CAR_2026 [--drive] [--config file] [--hardware-config file] [--hardware-check | --imu-check | --camera-check] [--preview] [--video file] [--record file.avi] [--telemetry file.csv]\nDefault: camera perception only, no motion hardware initialized.\nHardware check reads devices without writing outputs; delta encoder reads consume counts.\nIMU check reads only IIO names/scale/raw, without consuming encoder counts or calibrating yaw.\nCamera check acquires frames and reports resolution/FourCC/rate/gray range, without GUI or motion hardware.\n";return 0;}
             else throw std::runtime_error("Unknown/incomplete argument: "+arg);
         }
-        Params params=Params::load(config);
         const HardwareConfig boardConfig=HardwareConfig::load(hardwareConfig);
-        if(hardwareCheck) {
-            if(drive || !video.empty()) throw std::runtime_error("--hardware-check cannot combine with drive/video");
-            HardwareLock lock;LinuxDeviceIo io;inspectHardware(io,boardConfig,std::cout);return 0;
+        if(cameraCheck && (hardwareCheck || imuCheck || drive || preview || !video.empty() || !record.empty() || !telemetryFile.empty()))
+            throw std::runtime_error("--camera-check is a standalone live camera check");
+        if(hardwareCheck || imuCheck) {
+            if((hardwareCheck && imuCheck) || drive || preview || !video.empty() || !record.empty() || !telemetryFile.empty())
+                throw std::runtime_error("Choose one read-only check; cannot combine with drive/preview/video/record/telemetry");
+            HardwareLock lock;LinuxDeviceIo io(boardConfig);
+            if(imuCheck) inspectIioImu(io,boardConfig,std::cout);else inspectHardware(io,boardConfig,std::cout);
+            return 0;
         }
+        Params params=Params::load(config);
         if(drive && !video.empty()) throw std::runtime_error("Recorded video cannot drive hardware");
         if(drive && !params.motion_calibrated) throw std::runtime_error("Set motion_calibrated=1 only after wheel, steering, encoder and parking calibration");
         if(drive && params.require_imu && boardConfig.imu_backend=="none") throw std::runtime_error("require_imu=1 requires IIO or serial IMU");
@@ -165,6 +190,7 @@ int main(int argc,char** argv) {
         std::cout<<"Camera actual resolution "<<capture.get(cv::CAP_PROP_FRAME_WIDTH)<<"x"<<capture.get(cv::CAP_PROP_FRAME_HEIGHT)<<'\n';
         cv::Mat frame;
         if(!capture.read(frame)||frame.empty()) throw std::runtime_error("Camera startup frame missing");
+        if(cameraCheck) {checkCamera(capture,frame);return interrupted?2:0;}
         cv::VideoWriter recorder;
         if(!record.empty()) {
             recorder.open(record,cv::VideoWriter::fourcc('M','J','P','G'),20,frame.size());
@@ -202,7 +228,7 @@ int main(int argc,char** argv) {
         int exitCode=0;double lastPrint=0;Stage previous=Stage::Depart;
         do {
             const double now=seconds();
-            auto image=convert(frame,params);
+            auto image=processCameraFrame(frame,params);
             auto observation=vision.analyze(image,mission.stage());
             auto avoidance=vision.avoidCones(observation,image);
             Command command;

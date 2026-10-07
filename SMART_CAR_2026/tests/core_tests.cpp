@@ -17,6 +17,86 @@ Image guideLine(int x=156) {
     Image image=road();rectangle(image,x,20,x+8,240,{0,0,0});return image;
 }
 Path good() {Path p;p.x.assign(240,.5);p.confidence=1;return p;}
+void checkGuideContrastAndIdentity(const Params& params) {
+    // The dim floor is below black_v_max, just like the real front-camera clips.
+    Image dim(320,240,{72,72,72});rectangle(dim,172,20,192,240,{18,18,18});
+    Vision contrastVision(params);
+    auto observation=contrastVision.analyze(dim,Stage::GarageReverse);
+    check(observation.blackPath.confidence>.9,"dim floor does not merge with darker guide tape");
+    check(std::abs(observation.blackPath.x[200]-181.5/320)<.01,"dim guide center is retained");
+    Image weak(320,240,{72,72,72});rectangle(weak,172,20,192,240,{65,65,65});
+    observation=contrastVision.analyze(weak,Stage::GarageReverse);
+    check(observation.blackPath.confidence==0,"weak shading is not a confident dark guide");
+
+    Vision forkVision(params);
+    Image fork=road();rectangle(fork,144,20,152,240,{0,0,0});
+    rectangle(fork,169,20,177,240,{0,0,0});
+    observation=forkVision.analyze(fork,Stage::GarageReverse);
+    check(observation.blackPath.ambiguous && observation.blackPath.confidence==0,
+          "equally plausible nearby branches are explicitly uncertain");
+
+    Vision parkingVision(params);
+    parkingVision.analyze(guideLine(116),Stage::GarageReverse);
+    parkingVision.analyze(road(),Stage::GarageReverse);
+    for(int frame=0;frame<int(params.confirm_frames)+1;++frame) {
+        observation=parkingVision.analyze(guideLine(236),Stage::GarageReverse);
+        check(observation.blackPath.confidence==0,"parking cannot silently replace a lost reference");
+    }
+    observation=parkingVision.analyze(guideLine(120),Stage::GarageReverse);
+    check(observation.blackPath.confidence>.9,"same nearby parking reference may recover locally");
+    observation=parkingVision.analyze(Image(320,240),Stage::GarageReverse);
+    check(!observation.frameValid,"camera blackout is explicitly invalid during parking");
+    parkingVision.analyze(Image{},Stage::GarageReverse);
+    for(int frame=0;frame<int(params.confirm_frames)+1;++frame) {
+        observation=parkingVision.analyze(guideLine(236),Stage::GarageReverse);
+        check(observation.blackPath.confidence==0,"invalid camera frames do not erase parking identity");
+    }
+    observation=parkingVision.analyze(guideLine(120),Stage::GarageReverse);
+    check(observation.blackPath.confidence>.9,"same reference recovers after camera blackout");
+    parkingVision.resetTracking();
+    for(int frame=0;frame<int(params.confirm_frames);++frame)
+        observation=parkingVision.analyze(guideLine(236),Stage::GarageReverse);
+    check(observation.blackPath.confidence>.9,"explicit reset permits a new parking reference");
+
+    Vision clippedVision(params);
+    Image clipped=guideLine(200);rectangle(clipped,48,220,272,240,{240,240,240});
+    observation=clippedVision.analyze(clipped,Stage::GarageReverse);
+    check(observation.blackPath.confidence>.8 && observation.blackPath.x[228]<0,
+          "reference can be observed above missing bottom rows");
+    clipped=guideLine(212);rectangle(clipped,48,220,272,240,{240,240,240});
+    observation=clippedVision.analyze(clipped,Stage::GarageReverse);
+    check(observation.blackPath.confidence>.8 && observation.blackPath.x[200]>.66,
+          "missing bottom rows preserve the prior nearby reference instead of center reset");
+
+    Vision jumpVision(params);
+    Image jump=guideLine(156);
+    rectangle(jump,48,20,272,160,{240,240,240});
+    rectangle(jump,180,20,188,160,{0,0,0});
+    observation=jumpVision.analyze(jump,Stage::GarageReverse);
+    check(observation.blackPath.discontinuous && observation.blackPath.confidence==0,
+          "parking rejects high-coverage fragments with an abrupt cross-row jump");
+    Vision obliqueVision(params);
+    Image oblique=road();
+    for(int y=20;y<240;++y) {
+        const int x=100+y/4;
+        rectangle(oblique,x,y,x+8,y+1,{0,0,0});
+    }
+    observation=obliqueVision.analyze(oblique,Stage::GarageReverse);
+    check(observation.blackPath.confidence>.9 && !observation.blackPath.discontinuous,
+          "gradual oblique guide remains usable after continuity checks");
+
+    Vision perspectiveVision(params);
+    Image perspective=road();
+    for(int y=20;y<240;++y) {
+        const int width=12+y/8;
+        rectangle(perspective,160-width/2,y,160+(width+1)/2,y+1,{0,0,0});
+    }
+    observation=perspectiveVision.analyze(perspective,Stage::GarageReverse);
+    check(observation.blackPath.confidence>.9,"parking accepts gradually wider near-field tape");
+    Image broad=road();rectangle(broad,120,20,200,240,{0,0,0});
+    observation=perspectiveVision.analyze(broad,Stage::GarageReverse);
+    check(observation.blackPath.confidence==0,"perspective allowance does not accept a broad dark region");
+}
 void checkBlackReacquisition(const Params& params) {
     Vision vision(params);
     auto observation=vision.analyze(guideLine(116),Stage::ToCross);
@@ -158,6 +238,7 @@ int main(int argc,char** argv) {
         angles=binary.feed(packet+5,6);check(angles.size()==1&&angles[0]==90,"binary yaw/checksum");
         packet[10]^=1;check(binary.feed(packet,11).empty(),"invalid checksum");
         Vision vision(p);auto image=road();rectangle(image,156,20,164,240,{0,0,0});
+        checkGuideContrastAndIdentity(p);
         auto o=vision.analyze(image,Stage::Depart);
         check(o.frameValid&&o.blackPath.confidence>.9,"single black centerline");
         check(std::abs(o.blackPath.lateral)<.01,"centerline error");check(!o.stripe,"single line is not zebra");

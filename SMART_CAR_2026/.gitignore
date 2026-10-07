@@ -7,3 +7,10 @@ tools/validation_headers/opencv*/
 replay.jsonl
 __pycache__/
 deploy/captures/
+# Local observations and extracted media are not deployable source code.
+tools/capture_analysis_deps/
+deploy/*_analysis_*/original_frames/
+deploy/*_analysis_*/*.png
+deploy/*_analysis_*/*.json
+deploy/visual_*/*.jsonl
+deploy/visual_*/*.json

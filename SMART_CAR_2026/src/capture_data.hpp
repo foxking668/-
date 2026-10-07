@@ -25,8 +25,9 @@ inline double finiteNumber(const std::string& text) {
 struct SensorSpec {std::string name,path,format,unit;};
 struct Config {
     int width=1280,height=720;double fps=20,sampleMs=20;
+    bool factoryEncoderStatusZero=false;
     std::array<SensorSpec,8> sensors{{
-        {"encoder_left","","i16le","raw_count"}, {"encoder_right","","i16le","raw_count"},
+        {"encoder_left","","i32le","raw_count"}, {"encoder_right","","i32le","raw_count"},
         {"gray_1","","u8","raw_byte"}, {"gray_2","","u8","raw_byte"},
         {"gray_3","","u8","raw_byte"}, {"gray_4","","u8","raw_byte"},
         {"ultrasonic_front","","text",""}, {"ultrasonic_rear","","text",""}}};
@@ -48,6 +49,11 @@ inline Config loadConfig(const std::string& filename) {
             if(key=="camera_width") config.width=int(number);else config.height=int(number);
         } else if(key=="camera_fps") config.fps=finiteNumber(value);
         else if(key=="sample_period_ms") config.sampleMs=finiteNumber(value);
+        else if(key=="factory_encoder_status_zero") {
+            const auto number=finiteNumber(value);
+            if(number!=0 && number!=1) throw std::runtime_error("factory_encoder_status_zero must be 0 or 1");
+            config.factoryEncoderStatusZero=number==1;
+        }
         else {
             known=false;
             for(auto& sensor:config.sensors) {
@@ -64,11 +70,16 @@ inline Config loadConfig(const std::string& filename) {
 }
 inline std::vector<std::string> validateSensors(const Config& config,bool allowPartial) {
     std::vector<std::string> missing;std::set<std::string> paths;
+    if(config.factoryEncoderStatusZero) {
+        for(size_t index=0;index<2;++index)
+            if(config.sensors[index].format!="i32le")
+                throw std::runtime_error("Factory encoder status-zero mode requires i32le payloads");
+    }
     for(const auto& sensor:config.sensors) {
         if(sensor.path.empty()) {missing.push_back(sensor.name);continue;}
         if(sensor.path.rfind("/dev/",0)!=0 && sensor.path.rfind("/sys/",0)!=0)
             throw std::runtime_error("Use a verified /dev or /sys sensor path: "+sensor.name);
-        if(sensor.format!="i16le" && sensor.format!="u8" && sensor.format!="text")
+        if(sensor.format!="i16le" && sensor.format!="i32le" && sensor.format!="u8" && sensor.format!="text")
             throw std::runtime_error("Unsupported sensor format: "+sensor.name);
         if(sensor.unit.empty()) throw std::runtime_error("Declare actual sensor units: "+sensor.name);
         if(!paths.insert(sensor.path).second) throw std::runtime_error("Duplicate sensor path would consume data twice: "+sensor.path);
@@ -81,13 +92,23 @@ inline std::vector<std::string> validateSensors(const Config& config,bool allowP
     return missing;
 }
 struct Sample {bool valid=false;double value=0;long returned=-1;std::string status,raw;};
+inline size_t readBufferSize(const SensorSpec& sensor) {
+    if(sensor.format=="i32le") return 4;
+    if(sensor.format=="i16le") return 2;
+    if(sensor.format=="u8") return 1;
+    if(sensor.format=="text") return 256;
+    throw std::runtime_error("Unsupported sensor format: "+sensor.name);
+}
 inline Sample decode(const SensorSpec& sensor,long returned,const std::vector<uint8_t>& bytes) {
     Sample result;result.returned=returned;
     std::ostringstream hex;hex<<std::hex<<std::setfill('0');
     for(auto value:bytes) hex<<std::setw(2)<<unsigned(value);
     result.raw=hex.str();
     if(returned<0) {result.status="read_failed";return result;}
-    const size_t expected=sensor.format=="i16le" ? 2 : sensor.format=="u8" ? 1 : bytes.size();
+    if(sensor.format!="i16le" && sensor.format!="i32le" && sensor.format!="u8" && sensor.format!="text") {
+        result.status="unsupported_format";return result;
+    }
+    const size_t expected=readBufferSize(sensor);
     if(returned==0 || size_t(returned)>bytes.size() ||
        (sensor.format!="text" && size_t(returned)!=expected)) {
         result.status="invalid_transfer_count";return result;
@@ -99,6 +120,10 @@ inline Sample decode(const SensorSpec& sensor,long returned,const std::vector<ui
         } else if(sensor.format=="i16le") {
             const unsigned raw=unsigned(bytes[0])|(unsigned(bytes[1])<<8);
             result.value=raw>=32768 ? int(raw)-65536 : int(raw);
+        } else if(sensor.format=="i32le") {
+            const uint32_t raw=uint32_t(bytes[0])|(uint32_t(bytes[1])<<8)|
+                (uint32_t(bytes[2])<<16)|(uint32_t(bytes[3])<<24);
+            result.value=raw>=0x80000000u ? int64_t(raw)-4294967296LL : int64_t(raw);
         } else if(sensor.format=="u8") result.value=bytes[0];
         else {result.status="unsupported_format";return result;}
         result.valid=true;result.status="ok";
@@ -109,5 +134,15 @@ inline std::string csvString(const std::string& text) {
     std::string result="\"";
     for(char value:text) {if(value=='"') result+='"';result+=value;}
     return result+'"';
+}
+// A successful capture loop alone cannot prove that its files contain data.
+inline uint64_t verifyTextOutput(std::istream& input,const std::string& firstLine) {
+    std::string line;
+    if(!std::getline(input,line) || line!=firstLine)
+        throw std::runtime_error("Output file is empty or has an unexpected first line");
+    uint64_t rows=0;
+    while(std::getline(input,line)) {if(!line.empty()) ++rows;}
+    if(input.bad() || !input.eof()) throw std::runtime_error("Output file readback failed");
+    return rows;
 }
 }} // namespace car2026::capture

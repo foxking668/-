@@ -52,3 +52,45 @@ for base_time in (1234567.0, 1000000000.0):
     assert all(math.isclose(precision_rows[i]['time']-precision_rows[i-1]['time'],.05,abs_tol=2e-7)
                for i in range(1,len(precision_rows))), 'Replay frame intervals changed'
 print('PASS image/video perception replay, synchronized telemetry and large timestamp precision')
+
+# Real recorder timing must not enable Mission or invent measured heading.
+recorded_times=[.741234567, .943210987, 1.144567891, 1.342198765, 1.543210987]
+frame_csv=temporary/'frames.csv'
+def write_frame_times(values):
+    with frame_csv.open('w',encoding='utf-8',newline='') as stream:
+        writer=csv.writer(stream); writer.writerow(('frame_index','elapsed_s'))
+        writer.writerows(enumerate(values))
+write_frame_times(recorded_times)
+frame_output=temporary/'recorded-times.jsonl'
+frame_command=[sys.executable,'tools/replay.py',str(video),'--frame-times',str(frame_csv),
+               '--stage','GarageReverse','--output',str(frame_output)]
+subprocess.run(frame_command,cwd=root,check=True)
+rows=[json.loads(line) for line in frame_output.read_text().splitlines()]
+assert [r['time'] for r in rows]==recorded_times
+assert all(r['reason']=='PERCEPTION_ONLY' and r['speed']==0 and r['steer']==0 for r in rows)
+for values in ([.7,.9,.8,1.1,1.3],[.7,.9,float('nan'),1.1,1.3],recorded_times[:4],recorded_times+[1.7]):
+    write_frame_times(values)
+    result=subprocess.run(frame_command,cwd=root,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    assert result.returncode!=0,'Invalid recorder clock/count was accepted'
+write_frame_times(recorded_times)
+result=subprocess.run(frame_command+['--telemetry',str(telemetry_csv)],cwd=root,
+                      stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+assert result.returncode!=0,'Frame times and vehicle telemetry must be mutually exclusive'
+print('PASS real recorder timing, perception-only output, invalid clocks/counts and conflicting inputs')
+
+# Observer suggestions are diagnostic fields; executed mission commands remain zero.
+for motion in ('forward','reverse'):
+    subprocess.run(frame_command+['--observe-steering',motion],cwd=root,check=True)
+    observed=[json.loads(line) for line in frame_output.read_text().splitlines()]
+    assert all(r['speed']==r['steer']==r['actuator_writes']==0 for r in observed)
+    assert [r['time'] for r in observed]==recorded_times
+    assert all(r['suggested_command'] is None for r in observed[:2])
+    assert all(r['suggestion_valid'] and r['reference_id']==1 and abs(r['suggested_command'])<1e-9
+               for r in observed[2:])
+result=subprocess.run(frame_command+['--observe-steering','reverse','--telemetry',str(telemetry_csv)],
+                      cwd=root,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+assert result.returncode!=0
+result=subprocess.run(frame_command+['--observe-steering','forward','--stage','Depart'],
+                      cwd=root,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+assert result.returncode!=0
+print('PASS shared observer replay, preserved timestamps, initial reference confirmation and zero executed commands')

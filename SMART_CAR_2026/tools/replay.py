@@ -2,25 +2,48 @@
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
+
+def load_frame_times(path):
+    """Use the recorder's elapsed clock without inventing vehicle telemetry."""
+    with path.open(encoding='utf-8-sig', newline='') as stream:
+        rows = list(csv.DictReader(stream))
+    if not rows or not {'frame_index', 'elapsed_s'}.issubset(rows[0]):
+        raise ValueError('Frame times require nonempty frame_index,elapsed_s columns')
+    if [int(row['frame_index']) for row in rows] != list(range(len(rows))):
+        raise ValueError('Frame time indices must be contiguous from zero')
+    times = [float(row['elapsed_s']) for row in rows]
+    if any(not math.isfinite(t) or t < 0 for t in times):
+        raise ValueError('Frame times must be finite and nonnegative')
+    if any(b <= a for a, b in zip(times, times[1:])):
+        raise ValueError('Frame times must strictly increase')
+    return times
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('input', type=Path, help='video, single image, or image directory')
     parser.add_argument('--exe', type=Path, default=Path('build/vision_stream.exe' if sys.platform=='win32' else 'build-linux/vision_stream'))
     parser.add_argument('--config', type=Path, default=Path('config/competition.ini'))
-    parser.add_argument('--telemetry', type=Path, help='CSV: time,distance,speed,yaw,yaw_valid,yaw_measured; one row per frame')
+    clocks = parser.add_mutually_exclusive_group()
+    clocks.add_argument('--telemetry', type=Path, help='CSV: time,distance,speed,yaw,yaw_valid,yaw_measured; one row per frame')
+    clocks.add_argument('--frame-times', type=Path, help='Recorder frames.csv; perception-only, no invented distance, speed or yaw')
     parser.add_argument('--stage', default='Depart', help='perception-only stage when no telemetry supplied')
+    parser.add_argument('--observe-steering', choices=('forward','reverse'),
+                        help='Diagnostic image-reference suggestions only; parking stage, no telemetry or actuator writes')
     parser.add_argument('--output', type=Path, default=Path('replay.jsonl'))
     parser.add_argument('--preview', action='store_true')
     args = parser.parse_args()
+    if args.observe_steering and (args.telemetry or args.stage not in ('GarageAlign','GarageAdvance','GarageReverse')):
+        parser.error('--observe-steering requires a parking --stage and forbids --telemetry')
     try:
         import cv2
         import numpy as np
     except ImportError:
         parser.error('Install replay dependency first: python -m pip install opencv-python')
+    frame_times = load_frame_times(args.frame_times) if args.frame_times else None
     def read_picture(path):
         # OpenCV imread on Windows may reject Chinese absolute paths.
         return cv2.imdecode(np.fromfile(path,dtype=np.uint8),cv2.IMREAD_COLOR)
@@ -51,6 +74,7 @@ def main():
             parser.error('Telemetry CSV missing required columns')
     command=[str(args.exe.resolve()),str(args.config.resolve())]
     if telemetry is None: command.append(args.stage)
+    if args.observe_steering: command.extend(('--observe-steering',args.observe_steering))
     # Freeze processing dimensions for the run, as the C++ config is loaded once.
     width,height=320,240
     for line in args.config.read_text(encoding='utf-8-sig').splitlines():
@@ -67,6 +91,9 @@ def main():
                     if index>=len(telemetry): raise ValueError('Telemetry shorter than image sequence')
                     row=telemetry[index]
                     values=[float(row[k]) for k in ('time','distance','speed','yaw','yaw_valid','yaw_measured')]
+                elif frame_times is not None:
+                    if index >= len(frame_times): raise ValueError('Frame times shorter than image sequence')
+                    values=[frame_times[index],0,0,0,0,0]
                 else: values=[index/fps,0,0,0,0,0]
                 # Replay uses the same configured processing dimensions as the vehicle.
                 small=cv2.resize(frame,(width,height),interpolation=cv2.INTER_AREA)
@@ -88,6 +115,8 @@ def main():
                     if cv2.waitKey(1)==27: break
             if telemetry is not None and not args.preview and count!=len(telemetry):
                 raise ValueError('Telemetry longer than image sequence')
+            if frame_times is not None and not args.preview and count!=len(frame_times):
+                raise ValueError('Frame times longer than image sequence')
         process.stdin.close()
         if process.wait(timeout=10)!=0: raise RuntimeError('C++ replay failed')
         print(f'Replayed {count} frames -> {args.output}')

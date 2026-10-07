@@ -1,4 +1,5 @@
 #include "hardware_linux.hpp"
+#include "servo_output.hpp"
 #include <csignal>
 #include <iostream>
 #include <poll.h>
@@ -15,15 +16,12 @@ double number(const std::string& value) {
 class ServoTest {
 public:
     ServoTest(DeviceIo& io,const HardwareConfig& config,const Params& p)
-        : io_(io),config_(config),params_(p),info_(readPwmInfo(io,config.servo_pwm)) {set(0);}
-    ~ServoTest() {try {set(0);}catch(const std::exception& e) {std::cerr<<"Servo shutdown: "<<e.what()<<'\n';}}
+        : output_(io,config,p) {set(0);}
     void set(double angle) {
-        if(!std::isfinite(angle) || std::abs(angle)>params_.max_steer_deg) throw std::runtime_error("Angle outside configured mechanical limit");
-        const auto duty=servoDuty(params_.steer_sign*angle+params_.steer_offset_deg,config_,info_);
-        io_.writeBinary(config_.servo_pwm,&duty,sizeof(duty));
-        std::cout<<"steer="<<angle<<" deg, duty="<<duty<<'/'<<info_.duty_max<<", frequency="<<info_.freq<<" Hz\n";
+        const auto duty=output_.set(angle);const auto& info=output_.info();
+        std::cout<<"steer="<<angle<<" deg, duty="<<duty<<'/'<<info.duty_max<<", frequency="<<info.freq<<" Hz\n";
     }
-private:DeviceIo& io_;HardwareConfig config_;Params params_;PwmInfo info_;
+private:ServoOutput output_;
 };
 }
 int main(int argc,char** argv) {
@@ -45,7 +43,7 @@ int main(int argc,char** argv) {
             if(arg=="--sign") params.steer_sign=number(argv[i+1]);
             if(arg=="--max") params.max_steer_deg=number(argv[i+1]);
         }
-        params.validate();HardwareLock lock;LinuxDeviceIo io;
+        params.validate();HardwareLock lock;LinuxDeviceIo io(config);
         std::signal(SIGINT,signalHandler);std::signal(SIGTERM,signalHandler);
         ServoTest servo(io,config,params);
         std::cout<<"Enter vehicle angle, c for center, q to quit. Ctrl+C centers the servo.\nsteer> "<<std::flush;

@@ -2,13 +2,15 @@
 #include "core.hpp"
 #include <array>
 #include <cstddef>
+#include <iosfwd>
 
 namespace car2026 {
 // Device paths and physical output calibration belong here, not in vision/mission.
 #define BOARD_NUMERIC_SETTINGS(X) \
+ X(factory_write_readback,0) \
  X(motor_command_range,50000) \
- X(motor_left_forward_level,1) \
- X(motor_right_forward_level,1) \
+ X(motor_left_forward_level,0) \
+ X(motor_right_forward_level,0) \
  X(encoder_left_sign,-1) \
  X(encoder_right_sign,1) \
  X(servo_center_us,1490) \
@@ -41,7 +43,7 @@ namespace car2026 {
  X(beep_device,"/dev/zf_driver_gpio_beep") \
  X(voice_device,"/dev/i2c-2") \
  X(imu_backend,"iio") \
- X(imu_iio_device,"/sys/bus/iio/devices/iio:device1") \
+ X(imu_iio_device,"auto") \
  X(imu_gyro_axis,"z") \
  X(imu_serial_device,"/dev/ttyS2")
 
@@ -59,16 +61,55 @@ struct HardwareConfig {
 // Exactly the six uint32 fields read by the supplied zf_driver_pwm library.
 struct PwmInfo { uint32_t freq=0,duty=0,duty_max=0,duty_ns=0,period_ns=0,clk_freq=0; };
 static_assert(sizeof(PwmInfo)==24,"Factory PWM ABI must be 24 bytes");
+PwmInfo pwmMetadataReadBuffer();
+void validatePwmMetadataRead(const PwmInfo& info,std::ptrdiff_t returnedBytes,const std::string& path);
+// Board probe: both encoder nodes copy four bytes, even for a two-byte request.
+// Keep the entire signed value through the controller; never narrow to int16.
+using EncoderCount=int32_t;
+static_assert(sizeof(EncoderCount)==4,"Board encoder payload must be four bytes");
+EncoderCount decodeEncoderRead(EncoderCount rawCount,std::ptrdiff_t returnedBytes,const std::string& path);
+int64_t encoderCountDelta(EncoderCount now,EncoderCount before,const std::string& mode);
+uint8_t decodeGpioRead(uint8_t rawLevel,std::ptrdiff_t returnedBytes,const std::string& path);
 class DeviceIo {
 public:
     virtual ~DeviceIo()=default;
     virtual void readBinary(const std::string& path,void* data,size_t bytes)=0;
     virtual void writeBinary(const std::string& path,const void* data,size_t bytes)=0;
+    // Typed outputs permit board-specific status handling without weakening raw I/O.
+    virtual void writePwmDuty(const std::string& path,uint16_t duty) {
+        writeBinary(path,&duty,sizeof(duty));
+    }
+    virtual void writeGpioLevel(const std::string& path,uint8_t level) {
+        if(level>1) throw std::runtime_error("Invalid GPIO output level: "+path);
+        const uint8_t ascii=uint8_t('0'+level);writeBinary(path,&ascii,sizeof(ascii));
+    }
     virtual std::string readText(const std::string& path)=0;
+    // Inventory only: no raw sensor/encoder reads or output writes.
+    virtual std::vector<std::string> listIioDevicePaths() {
+        throw std::runtime_error("IIO discovery is not implemented by this DeviceIo");
+    }
+    // Typed factory operations keep zero-status compatibility out of generic I/O.
+    virtual PwmInfo readPwmMetadata(const std::string& path) {
+        PwmInfo info{};readBinary(path,&info,sizeof(info));
+        validatePwmMetadataRead(info,sizeof(info),path);return info;
+    }
+    virtual EncoderCount readEncoderCount(const std::string& path) {
+        EncoderCount count=0;readBinary(path,&count,sizeof(count));
+        return decodeEncoderRead(count,sizeof(count),path);
+    }
+    virtual uint8_t readGpioLevel(const std::string& path) {
+        uint8_t level=0xff;readBinary(path,&level,sizeof(level));
+        return decodeGpioRead(level,sizeof(level),path);
+    }
 };
+// Software readback verification only; this does not measure the physical waveform.
+void verifyFactoryPwmWrite(DeviceIo&,const std::string&,uint16_t,std::ptrdiff_t);
+void verifyFactoryGpioWrite(DeviceIo&,const std::string&,uint8_t,std::ptrdiff_t);
 PwmInfo readPwmInfo(DeviceIo& io,const std::string& path);
 double readDeviceNumber(DeviceIo& io,const std::string& path);
 uint8_t readGpio(DeviceIo& io,const std::string& path);
+void inspectHardware(DeviceIo&,const HardwareConfig&,std::ostream&);
+void inspectIioImu(DeviceIo&,const HardwareConfig&,std::ostream&);
 uint16_t motorDuty(double command,double commandRange,const PwmInfo& info);
 uint16_t servoDuty(double angleDeg,const HardwareConfig& config,const PwmInfo& info);
 
@@ -93,7 +134,7 @@ private:
     bool leftReady_=false,rightReady_=false,servoReady_=false;
     bool initialized_=false,beepReady_=false,beepState_=false;
     int leftDirection_=-1,rightDirection_=-1;
-    int16_t previousLeft_=0,previousRight_=0;
+    EncoderCount previousLeft_=0,previousRight_=0;
     double previousTime_=0;
     bool timed_=false;
     void setMotor(const std::string& pwm,const std::string& dir,const PwmInfo& info,
@@ -109,6 +150,8 @@ public:
     bool fresh(double now) const {return calibrated_ && !lost_ && now-lastTime_>=0 && now-lastTime_<0.15;}
     double value() const {return yaw_;}
     const std::string& model() const {return model_;}
+    const std::string& devicePath() const {return config_.imu_iio_device;}
+    double scaleDegPerRaw() const {return scale_;}
 private:
     DeviceIo& io_;HardwareConfig config_;std::string model_,rawPath_;
     double scale_=0,sign_=1,bias_=0,yaw_=0,lastTime_=0,previousRate_=0;
