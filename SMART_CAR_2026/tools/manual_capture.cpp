@@ -26,7 +26,7 @@ namespace fs=std::filesystem;
 using car2026::capture::Config;
 using car2026::capture::SensorSpec;
 namespace {
-constexpr const char* recorderVersion="2026-10-07.1";
+constexpr const char* recorderVersion="2026-10-07.2";
 constexpr const char* sensorHeader="cycle,channel,read_start_ns,read_end_ns,elapsed_s,value,unit,valid,status,read_return,raw_hex";
 constexpr const char* frameHeader="frame_index,read_start_ns,read_end_ns,elapsed_s";
 constexpr const char* markerHeader="monotonic_ns,elapsed_s,marker";
@@ -242,7 +242,7 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                   "motor_writes=0\nservo_exit=configured_zero_command; NOT guaranteed physically straight\n";
     if(options.observeSteering)
         metadata<<"observer_motion="<<car2026::manualMotionName(*options.observeSteering)
-                <<"\nobserver_target=first stable image reference; NOT a measured bay axis or heading\n"
+                <<"\nobserver_target=first stable locally straight image reference; NOT a measured bay axis or heading\n"
                   "suggestions_are_applied=0\nmotor_writes=0\nservo_writes=0\n"
                   "observer_age=processing completion minus camera read start; exposure age is unknown\n";
     for(const auto& sensor:config.sensors)

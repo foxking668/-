@@ -92,6 +92,62 @@ int main() {
               "manual movement direction is explicit rather than guessed from encoders");
         bool threw=false;try {parseManualMotion("automatic");}catch(...) {threw=true;}
         check(threw,"ambiguous motion selection is rejected");
+
+        auto curve=line();
+        for(int y=0;y<240;++y) {
+            const double row=double(y)/240;
+            curve.blackPath.x[y]=.5+.6*(row-.65)*(row-.65);
+        }
+        measurePath(curve.blackPath);
+        VisualSteeringObserver straightOnly(params,ManualMotion::Reverse);
+        for(int n=0;n<6;++n) {
+            f=straightOnly.observe(curve,n*.2,n*.2);
+            check(f.state=="UNSUITABLE_REFERENCE" && !f.hasSuggestion && !f.hasReference,
+                  "a stable curved line must not become a frozen heading target");
+        }
+        for(int n=0;n<3;++n) {
+            f=straightOnly.observe(line(.55),1.2+n*.2,1.2+n*.2);
+            check(f.hasSuggestion==(n==2),"straight geometry after a curve requires its own stable confirmation");
+        }
+        check(std::abs(f.suggestedCommand)<1e-12 && f.referenceId==1,
+              "curve-to-straight transition does not leave a false corrective bias");
+        auto merge=line(.55);
+        for(int y=155;y<=175;++y) merge.blackPath.x[y]-=.025*(1-std::abs(y-165)/11.);
+        measurePath(merge.blackPath);
+        f=straightOnly.observe(merge,1.8,1.8);
+        check(f.state=="UNSUITABLE_REFERENCE" && !f.hasSuggestion && f.referenceId==1,
+              "a smooth merged-junction elbow is rejected even without a discontinuity flag");
+        for(int n=0;n<3;++n) f=straightOnly.observe(line(.56),2.+n*.2,2.+n*.2);
+        check(f.hasSuggestion && f.referenceId==1 && f.lateralError>.009,
+              "junction recovery preserves the existing straight target rather than absorbing displacement");
+        auto oblique=line();
+        for(int y=0;y<240;++y) oblique.blackPath.x[y]=.4+.2*double(y)/240;
+        measurePath(oblique.blackPath);
+        VisualSteeringObserver obliqueReference(params,ManualMotion::Forward);
+        for(int n=0;n<3;++n) f=obliqueReference.observe(oblique,n*.2,n*.2);
+        check(f.hasSuggestion && std::abs(f.suggestedCommand)<1e-12,
+              "a straight oblique segment is permitted and is not forced to the image center");
+        auto rotated=oblique;
+        for(int y=0;y<240;++y) rotated.blackPath.x[y]+=.04*(double(y)/240-.84);
+        measurePath(rotated.blackPath);
+        f=obliqueReference.observe(rotated,.6,.6);
+        check(f.hasSuggestion && std::abs(f.lateralError)<1e-12 && std::abs(f.headingFeatureError+.0156)<1e-10,
+              "fitted straight direction changes are reported as image features, without near-band averaging bias");
+        auto corrupt=oblique;corrupt.blackPath.x[139]=std::numeric_limits<double>::quiet_NaN();
+        f=obliqueReference.observe(corrupt,.8,.8);
+        check(f.state=="UNSUITABLE_REFERENCE" && !f.hasSuggestion,
+              "nonfinite points between the old feature bands cannot pass straight fitting");
+        auto sparse=oblique;for(int y=120;y<148;++y) sparse.blackPath.x[y]=-1;
+        f=obliqueReference.observe(sparse,1.,1.);
+        check(f.state=="UNSUITABLE_REFERENCE" && !f.hasSuggestion,
+              "three visible feature bands do not excuse insufficient support across the fitted interval");
+        f=obliqueReference.observe(curve,1.2,1.2);
+        check(f.state=="UNSUITABLE_REFERENCE" && f.hasReference && f.referenceId==1,
+              "a curve encountered after establishing a straight reference preserves identity without advice");
+        auto small=line();small.blackPath.x.assign(24,.5);measurePath(small.blackPath);
+        VisualSteeringObserver smallReference(params,ManualMotion::Forward);
+        for(int n=0;n<3;++n) f=smallReference.observe(small,n*.2,n*.2);
+        check(f.hasSuggestion,"straight fit remains in bounds at the supported minimum path height");
         std::cout<<"PASS "<<checks<<" visual observer checks (no hardware library or actuator interface)\n";
         return 0;
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}

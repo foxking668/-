@@ -13,7 +13,9 @@ struct SteeringObservation {
     double frameAge=0,lateralError=0,headingFeatureError=0,suggestedCommand=0;
 };
 
-// Diagnostic image-reference hold only. No device interface or actuator writes.
+// Diagnostic hold for a verified local straight image segment only.
+// Curves/merged junction shapes cannot establish or replace its reference.
+// No device interface or actuator writes.
 // Image lateral/heading features are NOT metres or measured vehicle angles.
 class VisualSteeringObserver {
 public:

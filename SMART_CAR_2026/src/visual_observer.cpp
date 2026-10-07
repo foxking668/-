@@ -4,6 +4,32 @@ namespace car2026 {
 namespace {
 constexpr double lateralGain=8,headingFeatureGain=12,commandRate=3;
 constexpr double stableFeatureTolerance=.015,maximumFeatureStep=.06,imageDeadband=.005;
+// A fixed image target is meaningful here only for a local straight segment.
+// Limits are normalized image units, not physical curvature or vehicle yaw.
+constexpr double fitTop=.40,fitBottom=.90,maximumFitResidual=.008;
+struct StraightImageFeatures { double lateral=0,heading=0; };
+bool fitStraightImageFeatures(const Path& path,StraightImageFeatures& features) {
+    const int h=int(path.x.size());
+    double sumY=0,sumX=0,sumYY=0,sumYX=0;int count=0,total=0;
+    for(int y=int(h*fitTop);y<=int(h*fitBottom);++y) {
+        ++total;const double x=path.x[y];
+        if(!std::isfinite(x) || x>1 || x< -1) return false;
+        if(x<0) continue;
+        const double row=double(y)/h;
+        sumY+=row;sumX+=x;sumYY+=row*row;sumYX+=row*x;++count;
+    }
+    if(count*5<total*4) return false;
+    const double denominator=count*sumYY-sumY*sumY;
+    if(denominator<=1e-12) return false;
+    const double slope=(count*sumYX-sumY*sumX)/denominator;
+    const double intercept=(sumX-slope*sumY)/count;
+    for(int y=int(h*fitTop);y<=int(h*fitBottom);++y)
+        if(path.x[y]>=0 && std::abs(path.x[y]-(intercept+slope*double(y)/h))>maximumFitResidual)
+            return false;
+    features.lateral=intercept+slope*.84-.5;
+    features.heading=slope*(.45-.84);
+    return std::isfinite(features.lateral) && std::isfinite(features.heading);
+}
 bool bandAvailable(const Path& path,double ratio) {
     const int h=int(path.x.size()),center=int(h*ratio),radius=std::max(2,h/30);
     int available=0,total=0;
@@ -58,16 +84,18 @@ SteeringObservation VisualSteeringObserver::observe(const Observation& observati
        !std::isfinite(path.heading) || std::abs(path.heading)>1) return reject("LOW_QUALITY",age);
     if(path.x.size()<24 || !bandAvailable(path,.84) || !bandAvailable(path,.65) || !bandAvailable(path,.45))
         return reject("PARTIAL_REFERENCE",age);
-    if(hasLastFeature_ && (std::abs(path.lateral-lastLateral_)>maximumFeatureStep ||
-                          std::abs(path.heading-lastHeading_)>maximumFeatureStep))
+    StraightImageFeatures features;
+    if(!fitStraightImageFeatures(path,features)) return reject("UNSUITABLE_REFERENCE",age);
+    if(hasLastFeature_ && (std::abs(features.lateral-lastLateral_)>maximumFeatureStep ||
+                          std::abs(features.heading-lastHeading_)>maximumFeatureStep))
         return reject("FEATURE_JUMP",age);
-    lastLateral_=path.lateral;lastHeading_=path.heading;hasLastFeature_=true;
+    lastLateral_=features.lateral;lastHeading_=features.heading;hasLastFeature_=true;
     if(!hasReference_) {
-        if(stableFrames_ && (std::abs(path.lateral-candidateLateral_)>stableFeatureTolerance ||
-                            std::abs(path.heading-candidateHeading_)>stableFeatureTolerance)) stableFrames_=0;
+        if(stableFrames_ && (std::abs(features.lateral-candidateLateral_)>stableFeatureTolerance ||
+                            std::abs(features.heading-candidateHeading_)>stableFeatureTolerance)) stableFrames_=0;
         ++stableFrames_;
-        candidateLateral_+=(path.lateral-candidateLateral_)/stableFrames_;
-        candidateHeading_+=(path.heading-candidateHeading_)/stableFrames_;
+        candidateLateral_+=(features.lateral-candidateLateral_)/stableFrames_;
+        candidateHeading_+=(features.heading-candidateHeading_)/stableFrames_;
         if(stableFrames_>=confirmationFrames_) {
             referenceLateral_=candidateLateral_;referenceHeading_=candidateHeading_;
             hasReference_=true;referenceId_=++referenceSequence_;
@@ -79,8 +107,8 @@ SteeringObservation VisualSteeringObserver::observe(const Observation& observati
         return result;
     }
     result.state="TRACKING";result.hasSuggestion=true;
-    result.lateralError=path.lateral-referenceLateral_;
-    result.headingFeatureError=path.heading-referenceHeading_;
+    result.lateralError=features.lateral-referenceLateral_;
+    result.headingFeatureError=features.heading-referenceHeading_;
     const double lateral=std::abs(result.lateralError)<imageDeadband ? 0 : result.lateralError;
     const double heading=std::abs(result.headingFeatureError)<imageDeadband ? 0 : result.headingFeatureError;
     const double sign=motion_==ManualMotion::Forward ? 1 : -1;
