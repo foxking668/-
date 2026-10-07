@@ -148,6 +148,27 @@ int main() {
         VisualSteeringObserver smallReference(params,ManualMotion::Forward);
         for(int n=0;n<3;++n) f=smallReference.observe(small,n*.2,n*.2);
         check(f.hasSuggestion,"straight fit remains in bounds at the supported minimum path height");
+        VisualSteeringObserver pixelNoise(params,ManualMotion::Reverse);establish(pixelNoise);
+        auto isolated=line();isolated.blackPath.x[181]+=.010;measurePath(isolated.blackPath);
+        f=pixelNoise.observe(isolated,.6,.6);
+        check(f.hasSuggestion && std::abs(f.lateralError)<1e-12 && std::abs(f.headingFeatureError)<1e-12,
+              "isolated slight pixel displacement is removed without biasing the original target");
+        isolated.blackPath.x[150]-=.010;measurePath(isolated.blackPath);
+        f=pixelNoise.observe(isolated,.8,.8);
+        check(f.hasSuggestion && std::abs(f.lateralError)<1e-12,
+              "two slight isolated errors retain a supported straight reference");
+        isolated.blackPath.x[120]+=.010;measurePath(isolated.blackPath);
+        f=pixelNoise.observe(isolated,1.,1.);
+        check(f.state=="UNSUITABLE_REFERENCE" && !f.hasSuggestion && f.referenceId==1,
+              "three displaced pixels exceed the allowance and preserve reference identity");
+        auto severe=line();severe.blackPath.x[181]+=.030;measurePath(severe.blackPath);
+        f=pixelNoise.observe(severe,1.2,1.2);
+        check(f.state=="UNSUITABLE_REFERENCE" && !f.hasSuggestion,
+              "one severe local displacement still stops observation");
+        small.blackPath.x[14]+=.010;measurePath(small.blackPath);
+        f=smallReference.observe(small,.6,.6);
+        check(f.state=="UNSUITABLE_REFERENCE" && !f.hasSuggestion,
+              "short paths cannot borrow the full-length isolated pixel allowance");
         std::cout<<"PASS "<<checks<<" visual observer checks (no hardware library or actuator interface)\n";
         return 0;
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}

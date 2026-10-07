@@ -1,5 +1,5 @@
 #!/bin/sh
-# Explicit servo-only +2 test. No motor commands or configuration rewrites.
+# Explicit servo-only +5 test. No motor commands or configuration rewrites.
 set -eu
 if [ "$#" -ne 0 ]; then
     printf '%s\n' 'Usage: sh ./run_auto_reverse_probe.sh (no arguments)' >&2
@@ -14,16 +14,16 @@ fi
 export LD_LIBRARY_PATH="/home/root/opencv-4.11-loongarch/install/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 probe_help=$("$probe_program" --help)
 case "$probe_help" in
-    *'version=2026-10-07.5'*) ;;
-    *) printf '%s\n' 'Wrong recorder version: require 2026-10-07.5.' >&2; exit 1 ;;
+    *'version=2026-10-07.6'*) ;;
+    *) printf '%s\n' 'Wrong recorder version: require 2026-10-07.6.' >&2; exit 1 ;;
 esac
 case "$probe_help" in
     *'--auto-probe reverse'*) ;;
     *) printf '%s\n' 'Recorder does not support the automatic probe.' >&2; exit 1 ;;
 esac
-printf '%s\n' '保持小车静止；看到【开始后拉 / AUTO_PULL_READY】后再后拉20~30cm，然后停稳。无需再输入按键。'
+printf '%s\n' '【等待准备，请勿推拉】当前未允许移动。先保持静止；本次后拉目标10厘米，距离由地面标记确定。'
 exec "$probe_program" --config manual_capture.ini \
     --hardware-config config/calibration_hardware.ini \
     --vehicle-config config/calibration_vehicle.ini \
     --allow-partial --duration 45 --auto-probe reverse \
-    --output captures/auto_reverse_probe_plus2
+    --output captures/auto_reverse_probe_plus5_10cm

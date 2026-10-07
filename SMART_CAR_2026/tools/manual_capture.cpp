@@ -28,7 +28,7 @@ namespace fs=std::filesystem;
 using car2026::capture::Config;
 using car2026::capture::SensorSpec;
 namespace {
-constexpr const char* recorderVersion="2026-10-07.5";
+constexpr const char* recorderVersion="2026-10-07.6";
 constexpr const char* sensorHeader="cycle,channel,read_start_ns,read_end_ns,elapsed_s,value,unit,valid,status,read_return,raw_hex";
 constexpr const char* frameHeader="frame_index,read_start_ns,read_end_ns,elapsed_s";
 constexpr const char* markerHeader="monotonic_ns,elapsed_s,marker";
@@ -294,7 +294,8 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                   "probe_rest=both delta counts exactly zero for >=0.8s, valid samples <=0.25s old; not physical rest proof\n"
                   "servo_exit=configured_zero_command; stop pulling before Q/Ctrl+C/duration expiry\n";
     if(options.autoProbe)
-        metadata<<"probe_commands=automatic 0 then fixed +2 then 0; never uses image suggestions\n"
+        metadata<<"probe_commands=automatic 0 then fixed +"<<car2026::capture::AutomaticSteeringProbe::trialCommand<<" then 0; never uses image suggestions\n"
+                  "manual_pull_target_cm=10; human distance marker, NOT encoder-calibrated travel\n"
                   "probe_loss=stop pulling, stationary zero and finish; no rearm or repeated nonzero trial\n"
                   "auto_time_limits_s=initial rest 15, reference 15, start pulling 12, active pull 10\n";
     else if(options.isProbe())
@@ -309,7 +310,7 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
     nonemptyFileSize(directory/"frames.csv");nonemptyFileSize(directory/"markers.csv");
     std::cout<<"SESSION "<<directory.string()<<'\n';
     if(options.autoProbe)
-        std::cout<<"SERVO ONLY; no motor/GPIO/IMU initialization or writes. Keep stopped until AUTO_PULL_READY.\n";
+        std::cout<<"SERVO ONLY; no motor/GPIO/IMU initialization or writes. NOT READY: keep vehicle stationary.\n";
     else if(options.steerCommand || options.isProbe())
         std::cout<<"SERVO ONLY; no motor/GPIO/IMU initialization or writes. Wait for STEER_READY before manual pushing.\n"
                    "Stop pushing before Q/Ctrl+C or duration expiry; exit attempts configured zero steering.\n";
@@ -318,9 +319,9 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
         std::cout<<"OBSERVE ONLY motion="<<car2026::manualMotionName(*options.observeSteering)
                  <<"; suggestions are NOT applied. Keep the initial image steady until REFERENCE_READY.\n";
     if(options.autoProbe)
-        std::cout<<"AUTO PROBE: 保持小车静止，等待【开始后拉 / AUTO_PULL_READY】；无需输入 R、+、0 或 Q。\n"
-                   "看到开始提示后缓慢后拉约20~30cm，再停稳；程序自动回零、结束和保存。\n"
-                   "出现【停止后拉 / AUTO_STOP_PULLING】就停止，保持静止等待保存。\n";
+        std::cout<<"【等待准备，请勿推拉】当前尚未允许移动；下面的状态日志不是开始信号。\n"
+                   "请预先标出后退10厘米的位置；稍后程序会单独发出允许后拉的提示。\n"
+                   "无需输入按键；收到停止或结束提示就保持静止，等保存完成。\n"<<std::flush;
     else if(options.isProbe())
         std::cout<<"PROBE ONLY: no automatic image-error steering. Keep stopped; R+Enter centers and builds a reference.\n"
                    "Wait for PROBE_REFERENCE_READY. While stopped: + or - or 0 +Enter; wait for PROBE_STEER_READY.\n"
@@ -465,7 +466,9 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                         if(autoProbe.acknowledge(written,writtenSnapshot.rest,writtenTime,
                                                 writtenTime-frameTime<=vehicleParams->frame_timeout_s &&
                                                 !interrupted && !stop.load() && writtenTime<duration,lastServoCancellation))
-                            std::cout<<"【开始后拉】AUTO_PULL_READY command=+2; 缓慢后拉20~30cm，然后停稳，无需输入任何按键。\n"<<std::flush;
+                            std::cout<<"\n【开始后拉】AUTO_PULL_READY command=+"<<int(car2026::capture::AutomaticSteeringProbe::trialCommand)
+                                     <<" elapsed_s="<<writtenTime<<" session="<<directory.filename().string()
+                                     <<"; 现在才允许缓慢后拉10厘米，然后立即停稳；若先提示停止就提前停。\n"<<std::flush;
                         if(!written) {
                             action.command.reset();action.decision="SERVO_REQUEST_CANCELLED";action.reason=lastServoCancellation;
                             if(std::string(autoProbe.phaseName())=="WAIT_STILL") {
@@ -506,7 +509,7 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
                         std::cout<<"【停止后拉】AUTO_STOP_PULLING; 停稳后程序自动回零并保存。\n"<<std::flush;
                 }
                 if(options.autoProbe && probeInput.key!=car2026::capture::ProbeKey::None)
-                    std::cout<<"AUTO模式无需输入按键；请按【开始后拉】或【停止后拉】提示操作。\n";
+                    std::cout<<"AUTO模式无需输入按键；当前阶段="<<autoProbe.phaseName()<<"，未收到实际允许移动提示时请保持静止。\n";
                 else if(probeInput.key==car2026::capture::ProbeKey::Invalid)
                     std::cout<<"INVALID_PROBE_INPUT: use one R,+,-,0,S,Q followed by Enter; repeated +++ is not a command.\n";
             }
@@ -524,7 +527,7 @@ int capture(Config config,const car2026::HardwareConfig& hardware,const std::str
             }
             if(!canWrite) break;
             if(options.autoProbe && autoProbe.finished()) {
-                std::cout<<"AUTO_TRIAL_FINISHED result="<<autoProbe.outcome()<<"; 请保持停稳，正在保存。\n"<<std::flush;
+                std::cout<<"【本次已结束，请勿继续推拉】AUTO_TRIAL_FINISHED result="<<autoProbe.outcome()<<"; 保持静止，正在保存。\n"<<std::flush;
                 break;
             }
             if(options.steerCommand && !servo) {
@@ -640,7 +643,7 @@ int main(int argc,char** argv) {
                              " [--observe-steering forward|reverse --vehicle-config file --duration <=60]\n"
                              " [--steering-probe reverse --vehicle-config file --duration <=60]\n"
                              " [--auto-probe reverse --vehicle-config file --duration <=60]\n"
-                             "Auto probe: keep stopped, wait for AUTO_PULL_READY, pull backward then stop; automatic zero and save.\n"
+                             "Auto probe: fixed +5 command after rest/reference gates; cue then manually pull 10cm and stop; automatic zero and save.\n"
                              "Probe: keyboard R reference, +/0/- commands +2/0/-2 while stopped; S hold; SERVO ONLY.\n"
                              "Probe NEVER applies image suggestions; conflicts with fixed steering and observation.\n"
                              "Observation: no actuator writes; image-reference suggestions only; conflicts with --steer-command.\n"
@@ -659,6 +662,8 @@ int main(int argc,char** argv) {
                 throw std::runtime_error("Steering command exceeds vehicle-config command limit");
             if(options.isProbe() && vehicleParams->max_steer_deg<2)
                 throw std::runtime_error("Steering probe needs a configured command limit of at least 2");
+            if(options.autoProbe && vehicleParams->max_steer_deg<car2026::capture::AutomaticSteeringProbe::trialCommand)
+                throw std::runtime_error("Automatic probe needs a configured command limit of at least 5");
         }
         fillEncoderPaths(config,hardware);
         if(options.check) {

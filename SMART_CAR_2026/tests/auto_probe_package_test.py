@@ -44,7 +44,7 @@ class PackageTests(unittest.TestCase):
 
     def test_old_version_does_not_replace_existing_archive(self):
         self.archive.write_bytes(b'previous verified package')
-        self.program.write_bytes(self.fake_elf(version='2026-10-07.4'))
+        self.program.write_bytes(self.fake_elf(version='2026-10-07.5'))
         with self.assertRaisesRegex(ValueError, 'rebuild first'):
             packager.package_program(self.program, self.archive)
         self.assertEqual(self.archive.read_bytes(), b'previous verified package')

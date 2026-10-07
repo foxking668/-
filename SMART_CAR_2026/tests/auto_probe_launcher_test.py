@@ -40,23 +40,24 @@ def main():
             recorder.chmod(0o755)
         missing = run()
         assert missing.returncode != 0 and 'Missing executable' in missing.stderr and not invoked.exists()
-        fake('2026-10-07.4')
+        fake('2026-10-07.5')
         old = run()
         assert old.returncode != 0 and 'Wrong recorder version' in old.stderr and not invoked.exists()
-        fake('2026-10-07.5', automatic=False)
+        fake('2026-10-07.6', automatic=False)
         unsupported = run()
         assert unsupported.returncode != 0 and 'does not support' in unsupported.stderr and not invoked.exists()
-        fake('2026-10-07.5')
+        fake('2026-10-07.6')
         rejected = run(('unexpected',))
         assert rejected.returncode != 0 and 'Usage:' in rejected.stderr and not invoked.exists()
         success = run()
-        assert success.returncode == 0 and 'AUTO_PULL_READY' in success.stdout
+        assert success.returncode == 0 and '等待准备，请勿推拉' in success.stdout
+        assert 'AUTO_PULL_READY' not in success.stdout and '【开始后拉】' not in success.stdout, 'Startup text must not impersonate the acknowledged pull cue'
         passed = (scratch / 'args.txt').read_text().splitlines()
         assert passed == ['--config', 'manual_capture.ini', '--hardware-config', 'config/calibration_hardware.ini',
                           '--vehicle-config', 'config/calibration_vehicle.ini', '--allow-partial', '--duration', '45',
-                          '--auto-probe', 'reverse', '--output', 'captures/auto_reverse_probe_plus2']
+                          '--auto-probe', 'reverse', '--output', 'captures/auto_reverse_probe_plus5_10cm']
         assert (scratch / 'library.txt').read_text() == '/home/root/opencv-4.11-loongarch/install/lib:retained-library-path'
-        fake('2026-10-07.5', code=2)
+        fake('2026-10-07.6', code=2)
         assert run().returncode == 2, 'Recorder exit status must propagate without rerunning hardware'
         assert invoked.read_text().splitlines() == ['run', 'run'], 'Each launch invokes the recorder once'
         print('PASS launcher syntax, missing/old/unsupported recorder rejection, exact auto-only arguments, library path and exit propagation')

@@ -125,7 +125,7 @@ int main() {
             check(delayed.issue().empty(),"Fresh post-zero reference allows a separate nonzero request");
             servo.set(*steer.command);
             check(automatic.acknowledge(true,rest,1.12),"Fresh successful nonzero write finally permits pull cue");
-            servo.close();check(io.duties==std::vector<uint16_t>({4470,4370,4470}),"Delayed startup produces zero then +2 only, never motor output");
+            servo.close();check(io.duties==std::vector<uint16_t>({4470,4220,4470}),"Delayed startup produces zero then +5 only, never motor output");
         }
         {
             const capture::EncoderRestStatus rest{true,true,0};auto moving=rest;moving.stationary=false;
@@ -137,10 +137,10 @@ int main() {
             const auto retry=automatic.update(rest,{},1);
             check(retry.command==0 && retry.resetReference,"Startup recovery can request zero only after fresh rest");
             automatic.acknowledge(true,rest,1.01);automatic.update(rest,straightReference(),1.2);
-            check(automatic.update(rest,straightReference(),1.4).command==2,"Recovered startup still needs a new reference before +2");
+            check(automatic.update(rest,straightReference(),1.4).command==5,"Recovered startup still needs a new reference before +5");
             check(!automatic.acknowledge(false,rest,1.41,true,"SERVO_CANCELLED_FRAME_TOO_OLD"),"Cancelled nonzero output cannot cue pulling");
             check(automatic.outcome()=="SERVO_CANCELLED_FRAME_TOO_OLD","Nonzero cancellation preserves exact reason");
-            check(automatic.update(rest,straightReference(),1.6).command==0,"Cancelled nonzero trial ends with zero, never another +2");
+            check(automatic.update(rest,straightReference(),1.6).command==0,"Cancelled nonzero trial ends with zero, never another +5");
             automatic.acknowledge(true,rest,1.61);check(automatic.finished(),"Nonzero cancellation remains terminal");
             capture::AutomaticSteeringProbe repeated;
             repeated.update(rest,{},0);repeated.acknowledge(false,{},.1,true,"SERVO_CANCELLED_ENCODER_NOT_FRESH");
@@ -208,10 +208,10 @@ int main() {
             const auto center=automatic.update(rest,{},0);servo.set(*center.command);automatic.acknowledge(true,rest,.01);
             automatic.update(rest,straightReference(),.2);
             const auto steer=automatic.update(rest,straightReference(),.4);
-            check(steer.command==2 && !automatic.finished(),"Automatic nonzero request remains fixed at +2");
+            check(steer.command==5 && !automatic.finished(),"Automatic nonzero request remains fixed at +5, ignoring opposite image suggestion");
             check(!automatic.update(rest,straightReference(),.5).command,"Unacknowledged command is never resent");
             servo.set(*steer.command);
-            check(automatic.acknowledge(true,rest,.51),"Pull cue requires successful +2 software write and unchanged gates");
+            check(automatic.acknowledge(true,rest,.51),"Pull cue requires successful +5 software write and unchanged gates");
             auto moving=rest;moving.stationary=false;moving.movementEpoch=1;
             check(!automatic.update(moving,straightReference(),.7).command,"Moving trial holds its command");
             check(std::string(automatic.phaseName())=="PULLING","Inter-frame encoder movement starts automatic pull phase");
@@ -220,7 +220,7 @@ int main() {
             check(finish.command==0 && !automatic.finished(),"Stopping schedules zero but does not claim it succeeded");
             servo.set(*finish.command);automatic.acknowledge(true,stopped,1.61);servo.close();
             check(automatic.finished() && automatic.outcome()=="PULL_COMPLETED","Stationary zero acknowledgement finishes one trial");
-            check(io.duties==std::vector<uint16_t>({4470,4370,4470,4470}),"One-button integration writes only zero, +2, zero and exit zero; no motor access");
+            check(io.duties==std::vector<uint16_t>({4470,4220,4470,4470}),"One-button integration writes only zero, +5, zero and exit zero; no motor access");
         }
         {
             const capture::EncoderRestStatus rest{true,true,0};auto moving=rest;moving.stationary=false;moving.movementEpoch=1;
@@ -229,7 +229,7 @@ int main() {
             auto lost=straightReference();lost.state="DISCONTINUOUS";lost.hasSuggestion=false;
             const auto fail=automatic.update(moving,lost,.6);
             check(!fail.command && automatic.outcome()=="IMAGE_DISCONTINUOUS","Automatic visual loss records its cause and holds while pulling");
-            check(!automatic.update(moving,straightReference(),.8).command,"Automatic visual recovery never restarts +2");
+            check(!automatic.update(moving,straightReference(),.8).command,"Automatic visual recovery never restarts +5");
             const auto zero=automatic.update(rest,straightReference(),1);
             check(zero.command==0,"Automatic failed trial waits for rest before zero");
             automatic.acknowledge(true,rest,1.01);

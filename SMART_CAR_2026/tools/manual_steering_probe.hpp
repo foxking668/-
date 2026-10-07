@@ -186,10 +186,11 @@ private:
     }
 };
 
-// One explicit +2 trial. Reuses all ManualSteeringProbe gates. Command writes
+// One explicit +5 trial. Reuses all ManualSteeringProbe gates. Command writes
 // must be acknowledged: a planned write never authorizes the user to pull.
 class AutomaticSteeringProbe {
 public:
+    static constexpr double trialCommand=5;
     explicit AutomaticSteeringProbe(double duration=45) : duration_(duration) {
         if(!std::isfinite(duration) || duration<=0 || duration>60)
             throw std::runtime_error("Automatic probe duration must be within 0..60 seconds");
@@ -224,7 +225,9 @@ public:
             else {action.decision="AUTO_WAIT_STILL";action.reason=rest.reason;}
         } else if(phase_==Phase::Reference && action.decision=="PROBE_REFERENCE_READY") phase_=Phase::SetSteer;
         else if(phase_==Phase::SetSteer) {
-            if(action.command && *action.command==2) {phase_=Phase::WaitPull;pending_=Pending::ProbeSteer;}
+            if(action.command && *action.command==2) {
+                action.command=trialCommand;phase_=Phase::WaitPull;pending_=Pending::ProbeSteer;
+            }
             else stop(action.reason.empty() ? "PREPARE_COMMAND_REJECTED" : action.reason);
         }
         if(action.state=="HOLD" || action.decision=="REST_ZERO_REARM_REQUIRED")
@@ -236,7 +239,7 @@ public:
         }
         return action;
     }
-    // true means the +2 software write succeeded; only then show the pull cue.
+    // true means the fixed trial write succeeded; only then show the pull cue.
     bool acknowledge(bool written,const EncoderRestStatus& rest,double now,bool imageFresh=true,
                      const std::string& cancellationReason={}) {
         const auto pending=pending_;pending_=Pending::None;
