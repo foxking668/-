@@ -2,7 +2,7 @@
 #include "capture_data.hpp"
 #include <optional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-07.1";
+constexpr const char* rehearsalVersion="2026-10-07.2";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct StageTuning {double command=0,settleSeconds=.5,holdSeconds=0;};
@@ -54,7 +54,7 @@ struct ParkingTuning {
         if(keys.size()!=20) throw std::runtime_error("All session and six stage keys are required");
         result.validate();return result;
     }
-    static ParkingTuning load(const std::string& path) {
+    static std::string readSource(const std::string& path) {
         std::ifstream file(path,std::ios::binary);if(!file) throw std::runtime_error("Cannot open tuning file: "+path);
         std::string text;char chunk[1024];
         while(file.read(chunk,sizeof(chunk)) || file.gcount()) {
@@ -62,8 +62,9 @@ struct ParkingTuning {
             if(text.size()>16384) throw std::runtime_error("Tuning file too large");
         }
         if(file.bad()) throw std::runtime_error("Cannot read tuning file");
-        return parse(text);
+        return text;
     }
+    static ParkingTuning load(const std::string& path) {return parse(readSource(path));}
 };
 enum class RehearsalKey {None,Enter,Pause,Continue,Reload,Quit,Invalid};
 inline const char* rehearsalKeyName(RehearsalKey key) {
@@ -117,8 +118,7 @@ public:
         }
         if(key!=RehearsalKey::Enter) return {};
         if(state_==State::AwaitApply) {
-            if(proposal_) {tuning_=*proposal_;proposal_.reset();nextStage_=tuning_.stage-1;++revision_;}
-            stage_=nextStage_;state_=State::WritePending;return command();
+            stage_=nextStage_;automaticSavedTrial_=false;state_=State::WritePending;return command();
         }
         if(state_==State::AwaitStart) {state_=State::Running;++trials_[size_t(stage_)];}
         else if(state_==State::Running) {
@@ -130,17 +130,29 @@ public:
     void acknowledge(bool success,double now) {
         if(state_!=State::WritePending || finished()) throw std::runtime_error("No servo write pending");
         if(!success || !std::isfinite(now) || now<lastTime_) {stop("SERVO_WRITE_FAILED");return;}
-        state_=State::Settling;writeTime_=lastTime_=now;
+        state_=automaticSavedTrial_ ? State::Running : State::Settling;writeTime_=lastTime_=now;
     }
-    void propose(ParkingTuning tuning) {
-        if(!paused_ || finished()) throw std::runtime_error("R requires pause");
-        tuning.validate();proposal_=std::move(tuning);
+    // A stable, valid file save is the user's execution authorization.
+    std::optional<double> applySaved(ParkingTuning tuning,double now) {
+        if(finished()) return {};
+        if(!std::isfinite(now) || now<lastTime_) {stop("INVALID_TIME");return {};}
+        tuning.validate();lastTime_=now;
+        const bool selectorChanged=tuning.stage!=tuning_.stage || tuning.single!=tuning_.single;
+        const int target=selectorChanged ? tuning.stage-1 : stage_;
+        const auto& before=tuning_.stages[size_t(target)];const auto& after=tuning.stages[size_t(target)];
+        const bool execute=selectorChanged || target!=stage_ || before.command!=after.command || before.holdSeconds!=after.holdSeconds ||
+            before.settleSeconds!=after.settleSeconds;
+        tuning_=std::move(tuning);++revision_;
+        if(!execute) return {};
+        stage_=nextStage_=target;++trials_[size_t(stage_)];automaticSavedTrial_=true;
+        state_=State::WritePending;return command();
     }
+    bool automaticSavedTrial() const {return automaticSavedTrial_;}
     void stop(const std::string& reason) {if(!finished()) outcome_=reason;}
     bool finished() const {return !outcome_.empty();}
     bool paused() const {return paused_;}
     int stage() const {return stage_;}
-    int nextStage() const {return proposal_ ? proposal_->stage-1 : nextStage_;}
+    int nextStage() const {return nextStage_;}
     unsigned trial() const {return trials_[size_t(stage_)];}
     unsigned revision() const {return revision_;}
     double command() const {return tuning_.stages[size_t(stage_)].command;}
@@ -160,9 +172,28 @@ public:
         return "INVALID";
     }
 private:
-    ParkingTuning tuning_;std::optional<ParkingTuning> proposal_;
+    ParkingTuning tuning_;bool automaticSavedTrial_=false;
     int stage_,nextStage_;std::array<unsigned,6> trials_{};unsigned revision_=1;
     State state_=State::AwaitApply;double lastTime_=-1,writeTime_=0;
     bool paused_=false;std::string outcome_;
+};
+class SavedTuningWatcher {
+public:
+    SavedTuningWatcher(const ParkingTuning& initial,double limit):accepted_(initial),observed_(initial.source),handled_(initial.source),limit_(limit) {}
+    std::optional<ParkingTuning> observe(const std::string& source,double now) {
+        if(!std::isfinite(now) || now<lastTime_) throw std::runtime_error("Invalid watcher time");
+        lastTime_=now;
+        if(source!=observed_) {observed_=source;stableSince_=now;return {};}
+        if(source==handled_ || now-stableSince_<.3) return {};
+        handled_=source; // A rejected save is reported once; the next save can recover.
+        auto candidate=ParkingTuning::parse(source);candidate.validate(limit_);
+        bool same=candidate.single==accepted_.single && candidate.stage==accepted_.stage;
+        for(size_t i=0;i<6;++i) same=same && candidate.stages[i].command==accepted_.stages[i].command &&
+            candidate.stages[i].holdSeconds==accepted_.stages[i].holdSeconds && candidate.stages[i].settleSeconds==accepted_.stages[i].settleSeconds;
+        accepted_=candidate;
+        return same ? std::optional<ParkingTuning>{} : candidate;
+    }
+private:
+    ParkingTuning accepted_;std::string observed_,handled_;double limit_,stableSince_=0,lastTime_=-1;
 };
 }}

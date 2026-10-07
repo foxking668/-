@@ -76,7 +76,7 @@ public:
     }
     void row(const ParkingRehearsal& trial,const std::string& event,int64_t begin,int64_t end,int64_t origin,
              std::optional<double> written,const std::string& detail="",const SensorSpec* sensor=nullptr,const Sample* sample=nullptr) {
-        auto& file=files_[size_t(trial.stage())];
+        std::ostringstream file;file<<std::setprecision(17);
         file<<csvString(event)<<','<<double(end-origin)/1e9<<','<<begin<<','<<end<<','<<trial.stage()+1<<','
             <<csvString(trial.stateName())<<','<<trial.trial()<<','<<trial.revision()<<','<<csvString(clip_)<<',';
         if(videoFrames_) file<<videoFrames_-1;
@@ -87,6 +87,12 @@ public:
         if(sample) file<<sample->valid<<','<<sample->returned<<','<<csvString(sample->raw);
         else file<<",,";
         file<<','<<csvString(sample ? sample->status : detail)<<'\n';
+        if(trial.paused()) deferredRows_.push_back({size_t(trial.stage()),file.str()});
+        else {flushDeferred();files_[size_t(trial.stage())]<<file.str();}
+    }
+    void flushDeferred() {
+        for(const auto& row:deferredRows_) files_[row.first]<<row.second;
+        deferredRows_.clear();
     }
     void holdEvent(const ServoHoldEvent& event,int64_t origin) {
         auto& file=files_[size_t(event.stage)];
@@ -107,7 +113,7 @@ public:
     }
     void flush() {for(auto& file:files_) file.flush();}
     void close() {
-        closeVideo();
+        flushDeferred();closeVideo();
         for(size_t i=0;i<files_.size();++i) {
             closeText(files_[i],directory_/stageFiles[i]);std::ifstream input(directory_/stageFiles[i]);
             verifyTextOutput(input,csvHeader);
@@ -122,13 +128,14 @@ private:
         if(!verify.read(first) || first.empty()) throw std::runtime_error("Video readback failed");
     }
     fs::path directory_;std::array<std::ofstream,6> files_;cv::VideoWriter writer_;
+    std::vector<std::pair<size_t,std::string>> deferredRows_;
     std::string clip_;unsigned clipNumber_=0,videoFrames_=0;
 };
 void showStatus(const ParkingRehearsal& model,std::optional<double> written) {
     std::cout<<"【当前阶段 "<<model.stage()+1<<" "<<stageNames[model.stage()]<<"】 "<<model.stateName()
         <<" | 文件命令="<<model.command()<<" | 最近写入=";
     if(written) std::cout<<*written;else std::cout<<"未写入";
-    if(model.paused()) std::cout<<" | 已暂停：改文件后R预览，C恢复；暂停不改变舵机";
+    if(model.paused()) std::cout<<" | 记录已暂停；保存文件仍直接更新舵机，C仅恢复记录";
     else if(model.state()==ParkingRehearsal::State::AwaitApply)
         std::cout<<" | 停稳后Enter授权设置阶段 "<<model.nextStage()+1<<" "<<stageNames[model.nextStage()];
     else if(model.state()==ParkingRehearsal::State::Settling) std::cout<<" | 保持静止，等待舵机";
@@ -160,7 +167,8 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     fs::copy_file(options.capture,directory/"capture_config.ini");
     fs::copy_file(options.hardware,directory/"hardware_config.ini");
     fs::copy_file(options.vehicle,directory/"vehicle_config.ini");
-    unsigned savedRevision=1;double lastStatus=-1,lastFlush=0;std::string lastState;
+    SavedTuningWatcher watcher(tuning,params.max_steer_deg);
+    unsigned savedRevision=1;double lastStatus=-1,lastFlush=0,lastFilePoll=-1;std::string lastState,lastFileError;
     std::array<Sample,8> latestSamples;bool hasSamples=false;
     std::string failure;std::deque<ServoHoldEvent> deferredEvents;
     const auto collectHoldEvents=[&](bool final=false) {
@@ -177,33 +185,48 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         }
         for(const auto& event:events) if(!event.error.empty()) throw std::runtime_error("AUTO_CENTER_FAILED: "+event.error);
     };
+    const auto beginTrialHold=[&](const std::string& source) {
+        const auto duration=model.tuning().stages[size_t(model.stage())].holdSeconds;
+        const auto start=servo->beginHold(duration,model.stage(),model.revision(),model.trial());
+        if(start) recording.row(model,"HOLD_START",*start,monotonicNs(),origin,written,"hold_time_s="+std::to_string(duration)+" source="+source);
+        return start.has_value();
+    };
     std::cout<<"SESSION "<<directory<<"\nSERVO ONLY; no motor/GPIO-output/IMU initialization.\n"
-             <<"无自动结束时间；记录直到P暂停或Q结束。Enter声明停稳由你负责。所有字母键输入后按Enter。\n";
+             <<"保存调参文件即授权执行；新角度写入成功后直接计时，无需R/C/再次回车。记录直到P暂停或Q结束。字母键后按Enter。\n";
     try {
         while(!model.finished()) {
             collectHoldEvents();
             auto key=interrupted ? RehearsalKey::Quit : readKey();
-            if(key==RehearsalKey::Reload) {
-                try {
-                    auto proposal=ParkingTuning::load(options.tuning);proposal.validate(params.max_steer_deg);
-                    model.propose(proposal);
-                    std::cout<<"CONFIG_PREVIEW mode="<<(proposal.single?"single":"full")<<" stage="<<proposal.stage;
-                    for(size_t i=0;i<6;++i) std::cout<<" | "<<i+1<<":"<<proposal.stages[i].command<<"/"<<proposal.stages[i].settleSeconds<<"s/hold="<<proposal.stages[i].holdSeconds<<"s";
-                    std::cout<<"；尚未执行。C恢复后Enter才应用。\n";
-                } catch(const std::exception& error) {std::cout<<"CONFIG_REJECTED "<<error.what()<<"；原参数保留。\n";}
-            }
+            if(key==RehearsalKey::Reload) std::cout<<"程序自动监测文件；直接保存即可，不需要R。\n";
             if(key==RehearsalKey::Invalid) std::cout<<"输入无效；仅Enter/P/C/R/Q，连续多行不授权。\n";
             if(servo) written=servo->written();
             const auto before=monotonicNs();const bool wasPaused=model.paused();
             const auto oldState=model.state();
-            const auto request=model.update(double(before-origin)/1e9,key);
-            if(oldState==ParkingRehearsal::State::AwaitStart && model.state()==ParkingRehearsal::State::Running && servo) {
-                const auto duration=model.tuning().stages[size_t(model.stage())].holdSeconds;
-                const auto start=servo->beginHold(duration,model.stage(),model.revision(),model.trial());
-                if(start) recording.row(model,"HOLD_START",*start,monotonicNs(),origin,written,"hold_time_s="+std::to_string(duration));
+            auto request=model.update(double(before-origin)/1e9,key);bool savedExecution=false;
+            const double fileNow=double(monotonicNs()-origin)/1e9;
+            if(!model.finished() && key!=RehearsalKey::Pause && !request && fileNow-lastFilePoll>=.2) {
+                lastFilePoll=fileNow;
+                std::optional<ParkingTuning> candidate;
+                try {
+                    candidate=watcher.observe(ParkingTuning::readSource(options.tuning),fileNow);
+                    lastFileError.clear();
+                } catch(const std::exception& error) {
+                    if(lastFileError!=error.what()) std::cout<<"CONFIG_REJECTED "<<error.what()<<"；原参数及当前计时继续。\n";
+                    lastFileError=error.what();
+                }
+                if(candidate) {
+                    request=model.applySaved(*candidate,double(monotonicNs()-origin)/1e9);
+                    savedExecution=request.has_value();
+                    std::cout<<"CONFIG_AUTO_APPLIED revision="<<model.revision()<<" stage="<<model.stage()+1
+                        <<(savedExecution ? "；直接设置舵机并重新计时。" : "；更新其他阶段参数，当前段不重启。")<<std::endl;
+                }
+            }
+            if(!savedExecution && oldState==ParkingRehearsal::State::AwaitStart && model.state()==ParkingRehearsal::State::Running && servo) {
+                beginTrialHold("ENTER");
             }
             if(model.revision()!=savedRevision) {
                 saveSnapshot(directory,model.revision(),model.tuning());savedRevision=model.revision();
+                recording.row(model,"CONFIG_AUTO_APPLIED",before,monotonicNs(),origin,written,savedExecution?"EXECUTE_SAVED_STAGE":"FUTURE_STAGE_ONLY");
             }
             if(key!=RehearsalKey::None && key!=RehearsalKey::Reload && (!wasPaused || !model.paused()))
                 recording.row(model,"KEY",before,monotonicNs(),origin,written,rehearsalKeyName(key));
@@ -217,13 +240,21 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                (frame.channels()!=1 && frame.channels()!=3)) throw std::runtime_error("Unexpected camera frame format");
             const auto frameWritten=written;
             if(request) {
+                collectHoldEvents();
                 if(interrupted) {model.stop("USER_QUIT");break;}
                 if(double(monotonicNs()-frameStart)/1e9>params.frame_timeout_s)
                     throw std::runtime_error("Camera frame stale before authorized servo write");
                 const auto writeStart=monotonicNs();const auto duty=servo->set(*request);
                 const auto writeEnd=monotonicNs();written=*request;
                 model.acknowledge(true,double(writeEnd-origin)/1e9);
+                const bool timerArmed=savedExecution ? beginTrialHold("FILE_SAVE") : false;
                 recording.row(model,"SERVO_WRITE",writeStart,writeEnd,origin,written,"duty="+std::to_string(duty));
+                if(savedExecution) {
+                    std::cout<<"【保存参数已执行】阶段="<<model.stage()+1<<" command="<<*request
+                        <<" hold_time_s="<<model.tuning().stages[size_t(model.stage())].holdSeconds
+                        <<(timerArmed ? "；计时已从写入成功开始。" : "；命令已回正或保持时间为0，不启用定时回正。")
+                        <<"记录暂停状态不变。"<<std::endl;
+                }
                 tcflush(STDIN_FILENO,TCIFLUSH); // No typed-ahead permission after hardware latency.
             }
             const auto now=monotonicNs();const double elapsed=double(now-origin)/1e9;
@@ -293,8 +324,8 @@ int main(int argc,char** argv) {
             std::cout<<"parking_rehearsal version="<<rehearsalVersion<<"\n"
                 <<"--config file --hardware-config file --vehicle-config file --tuning-config file --output directory\n"
                 <<"--allow-partial --check-config (no hardware access)\n"
-                <<"Enter: permission; P: pause; C: resume; R: preview file while paused; Q: finish.\n"
-                <<"No recording duration limit. hold_time_s starts at movement permission; timer zero continues while paused.\n"
+                <<"Enter: initial/manual-stage permission; P: pause recording; C: resume recording; Q: finish.\n"
+                <<"auto_reload=save; saved settings execute immediately and restart hold_time_s after successful write. Timer continues while paused.\n"
                 <<"SERVO ONLY. Six stage CSV files.\n";return 0;
         }
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);
