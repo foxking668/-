@@ -6,6 +6,8 @@
 #include "rehearsal_session.hpp"
 #include "rehearsal_terminal.hpp"
 #include "rehearsal_speed.hpp"
+#include "rehearsal_motor.hpp"
+#include "rehearsal_timing.hpp"
 #include <opencv2/core.hpp>
 #include <opencv2/videoio.hpp>
 #include <chrono>
@@ -134,6 +136,13 @@ public:
             <<','<<event.beginNs<<','<<event.endNs<<','<<event.stage+1<<",TIMER,"<<csvString(rehearsalSegmentName(event.stage,event.segment))<<','<<event.trial<<','<<event.revision
             <<",,,,"<<(event.error.empty()?"0":"")<<",,,,,,,"<<csvString(event.error)<<'\n';
     }
+    void motorEvent(const MotorEvent& event,int64_t origin) {
+        auto& file=files_[size_t(event.stage)];
+        file<<csvString(event.event+(event.error.empty() || event.event=="MOTOR_START_FAILED" ? "" : "_FAILED"))<<','<<double(event.endNs-origin)/1e9
+            <<','<<event.beginNs<<','<<event.endNs<<','<<event.stage+1<<",MOTOR,PRIMARY,"<<event.trial<<','<<event.revision
+            <<",,,,,,,,,,,"<<csvString("left="+std::to_string(event.left)+" right="+std::to_string(event.right)+
+                " output="+(event.error.empty() ? (event.event=="MOTOR_START" ? "commanded" : "zero_written") : "write_failed")+" error="+event.error)<<'\n';
+    }
     void speed(const ParkingRehearsal& model,const RehearsalSpeedWindow& window,int64_t origin,std::optional<double> written) {
         const auto add=[&](const std::string& name,double value,const std::string& unit) {
             SensorSpec sensor{name,"","derived",unit};Sample sample;
@@ -184,15 +193,19 @@ void showStatus(const ParkingRehearsal& model,std::optional<double> written) {
         <<" | 步骤="<<model.segmentTitle()
         <<" | 文件命令="<<model.command()<<" | 最近写入=";
     if(written) std::cout<<*written;else std::cout<<"未写入";
-    if(model.paused()) std::cout<<" | 记录已暂停；保存文件仍直接更新舵机，C仅恢复记录";
+    if(model.paused()) std::cout<<" | 记录已暂停；电机停机，C恢复记录后须Enter重新运动";
     else if(model.state()==ParkingRehearsal::State::AwaitApply)
         std::cout<<" | 停稳后按一次Enter：开始记录并设置阶段 "<<model.nextStage()+1<<" "<<stageNames[model.nextStage()];
     else if(model.state()==ParkingRehearsal::State::Settling) std::cout<<" | 保持静止，等待舵机";
     else if(model.state()==ParkingRehearsal::State::Running) {
-        if(model.correctionSequenceActive()) std::cout<<" | 两步转向进行中：主转弯后自动反向修正，最后回正；Q提前结束，P只暂停记录";
+        if(model.correctionSequenceActive()) std::cout<<" | 两步转向进行中：主转弯后自动反向修正，最后回正；Q提前结束，P停电机并暂停记录";
         else std::cout<<" | 当前段进行中：定时回正后按模式收尾；停稳后Enter结束本段，P暂停记录，Q提前结束";
     }
     std::cout<<std::endl;
+    const auto& settings=model.currentTuning();
+    std::cout<<"电机幅值 左="<<settings.motorLeft<<" 右="<<settings.motorRight<<" | 运行上限="<<settings.motorSeconds
+        <<"s | 方向="<<(model.stage()==0 ? "前进" : model.stage()==5 ? "停止" : "倒退")
+        <<(settings.powered() ? " | 已配置电机试验" : " | 电机禁用")<<std::endl;
 }
 int run(const Options& options,const Config& config,const car2026::HardwareConfig& hardware,
         const car2026::Params& params,const ParkingTuning& tuning,bool partial) {
@@ -202,7 +215,10 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         throw std::runtime_error("Canonical terminal required (press keys then Enter)");
     car2026::HardwareLock lock;
     car2026::LinuxDeviceIo io(hardware); // Construction only stores protocol configuration.
+    // Independent logging/readback caches: servo and motor workers must not share mutable DeviceIo sets.
+    car2026::LinuxDeviceIo motorIo(hardware);
     std::unique_ptr<RehearsalServo> servo;
+    std::unique_ptr<RehearsalMotor> motor;
     cv::VideoCapture camera(hardware.camera_device,cv::CAP_V4L2);
     if(!camera.isOpened()) throw std::runtime_error("Cannot open camera");
     camera.set(cv::CAP_PROP_FRAME_WIDTH,config.width);camera.set(cv::CAP_PROP_FRAME_HEIGHT,config.height);
@@ -215,20 +231,43 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     ParkingRehearsal model(tuning);Recording recording(directory);std::optional<double> written;
     RehearsalSpeedRecorder speed(hardware.encoder_mode,hardware.encoder_left_sign*params.encoder_left_sign,
         hardware.encoder_right_sign*params.encoder_right_sign);
+    RehearsalTiming timing(hardware.encoder_mode);
     saveSnapshot(directory,1,tuning);
     fs::copy_file(options.capture,directory/"capture_config.ini");
     fs::copy_file(options.hardware,directory/"hardware_config.ini");
     fs::copy_file(options.vehicle,directory/"vehicle_config.ini");
-    SavedTuningWatcher watcher(tuning,params.max_steer_deg);
+    SavedTuningWatcher watcher(tuning,params.max_steer_deg,params.pwm_limit);
     unsigned savedRevision=1;double lastStatus=-1,lastFlush=0,lastFilePoll=-1;std::string lastState,lastFileError;
     std::array<Sample,8> latestSamples;bool hasSamples=false;
     std::string failure;std::deque<ServoHoldEvent> deferredEvents;
+    std::optional<MotorEvent> stopWait;bool stopConfirmed=false,motorExitZero=false;
+    const auto collectMotorEvents=[&](bool final=false) {
+        if(!motor) return;
+        for(const auto& event:motor->takeEvents()) {
+            recording.motorEvent(event,origin);
+            if(event.event=="MOTOR_START") timing.motorStart(event.endNs);
+            else if(event.error.empty()) timing.motorStop(event.endNs,event.event);
+            else timing.end(event.endNs,event.event+"_FAILED");
+            if(!event.error.empty()) throw std::runtime_error("MOTOR_ZERO_FAILED: "+event.error);
+            if(!final && event.event=="MOTOR_STOP_WATCHDOG") throw std::runtime_error("Motor stopped: camera/encoder heartbeat expired");
+            if(!final && (event.event=="MOTOR_STOP_DURATION" || event.event=="MOTOR_STOP_STEER_COMPLETED")) {
+                stopWait=event;
+                if(servo) {servo->set(0);written=0;}
+                std::cout<<"【电机已写零，舵机回正】继续记录停稳情况；不再启动新动作。"<<std::endl;
+            }
+        }
+    };
     const auto collectHoldEvents=[&](bool final=false) {
         if(!servo) return;
         auto events=servo->takeEvents();
         for(const auto& event:events) {
             deferredEvents.push_back(event);
-            if(event.error.empty()) model.holdCompleted(event.stage,event.trial,event.segment);
+            const bool matches=event.stage==model.stage() && event.trial==model.trial() && event.segment==model.segment();
+            const bool lastAction=event.segment==1 || !isBendStage(event.stage) || model.currentTuning().correction.holdSeconds==0;
+            if(!final && event.error.empty() && matches && lastAction && motor && model.currentTuning().powered() &&
+               model.state()==ParkingRehearsal::State::Running && !model.motorRestartRequired()) {
+                motor->stop("MOTOR_STOP_STEER_COMPLETED");collectMotorEvents();
+            } else if(event.error.empty() && !stopWait) model.holdCompleted(event.stage,event.trial,event.segment);
             const char* message=!event.error.empty() ? "【定时回正失败，请停止推/拉】" :
                 model.pendingCorrection() ? "【主转弯时间到，正在自动切换反向修正】" : "【时间到，舵机已自动回正】";
             std::cout<<message<<" 阶段="<<event.stage+1<<" 步骤="<<rehearsalSegmentName(event.stage,event.segment)<<"。"<<std::endl;
@@ -245,24 +284,32 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         if(start) recording.row(model,"HOLD_START",*start,monotonicNs(),origin,written,"hold_time_s="+std::to_string(duration)+" source="+source);
         return start.has_value();
     };
-    std::cout<<"SESSION "<<directory<<"\nSERVO ONLY; no motor/GPIO-output/IMU initialization.\n"
+    std::cout<<"SESSION "<<directory<<"\nSingle-stage motor tuning; no IMU initialization. motor_run_time_s=0 disables motor access.\n"
              <<"按一次Enter开始记录并设置舵机；静止等待结束后自动提示开始推/拉并计时，无须第二次Enter。\n"
-             <<"第一弯2A左打→2B右修正，第二弯4A右打→4B左修正；最后回零位。P只暂停记录、不暂停动作计时；Q提前结束。Y/N直接按键。\n"
+             <<"可选两步修正；P暂停记录并停电机，C只恢复记录，Enter重新运动；Q提前结束。Y/N直接按键。\n"
              <<"速度默认counts/s；只有填写实测speed_*_cm_per_count后才输出cm/s，不使用未标定轮周长默认值。\n";
     try {
         while(!model.finished()) {
+            collectMotorEvents();
             collectHoldEvents();
             if(model.finished()) break;
             auto key=interrupted ? RehearsalKey::Quit : readKey();
+            if(motor && ((key==RehearsalKey::Pause && model.currentTuning().powered()) || key==RehearsalKey::Quit)) {
+                motor->stop(key==RehearsalKey::Pause ? "MOTOR_STOP_PAUSE" : "MOTOR_STOP_QUIT");collectMotorEvents();
+                if(servo) {servo->set(0);written=0;}
+            }
+            if(stopWait && key!=RehearsalKey::Quit && key!=RehearsalKey::Pause && key!=RehearsalKey::Continue) key=RehearsalKey::None;
             if(key==RehearsalKey::Reload) std::cout<<"程序自动监测文件；直接保存即可，不需要R。\n";
             if(key==RehearsalKey::Invalid) std::cout<<"输入无效；仅Enter/P/C/R/Q，连续多行不授权。\n";
             if(servo) written=servo->written();
             const auto before=monotonicNs();const bool wasPaused=model.paused();
             const auto oldState=model.state();
-            auto request=model.update(double(before-origin)/1e9,key);bool savedExecution=false;
+            auto request=stopWait ? std::optional<double>{} : model.update(double(before-origin)/1e9,key);bool savedExecution=false;
+            if(stopWait && (key==RehearsalKey::Pause || key==RehearsalKey::Continue)) model.update(double(before-origin)/1e9,key);
+            if(stopWait && key==RehearsalKey::Quit) model.stop("USER_QUIT");
             const bool correctionExecution=request.has_value() && model.automaticCorrectionWrite();
             const double fileNow=double(monotonicNs()-origin)/1e9;
-            if(!model.finished() && key!=RehearsalKey::Pause && !request && fileNow-lastFilePoll>=.2) {
+            if(!model.finished() && !stopWait && key!=RehearsalKey::Pause && !request && fileNow-lastFilePoll>=.2) {
                 lastFilePoll=fileNow;
                 std::optional<ParkingTuning> candidate;
                 try {
@@ -273,17 +320,20 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                     lastFileError=error.what();
                 }
                 if(candidate) {
-                    request=model.applySaved(*candidate,double(monotonicNs()-origin)/1e9);
+                    // Preview decides whether this save affects the active action. Stop before replacing it.
+                    auto preview=model;const auto previewRequest=preview.applySaved(*candidate,double(monotonicNs()-origin)/1e9);
+                    if((previewRequest || preview.finished()) && motor) {motor->stop("MOTOR_STOP_RECONFIG");collectMotorEvents();}
+                    if(previewRequest || preview.finished()) timing.end(monotonicNs(),"CONFIG_REPLACED");
+                    if(!stopWait) request=model.applySaved(*candidate,double(monotonicNs()-origin)/1e9);
                     savedExecution=request.has_value();
                     std::cout<<"CONFIG_AUTO_APPLIED revision="<<model.revision()<<" stage="<<model.stage()+1
                         <<(model.finished() ? "；结束当前修正试验并回正。" : savedExecution ? "；直接设置当前步骤舵机并重新计时。" : "；更新其他阶段参数，当前段不重启。")<<std::endl;
                 }
             }
-            if(!savedExecution && oldState==ParkingRehearsal::State::Settling && model.state()==ParkingRehearsal::State::Running && servo) {
-                const bool timerArmed=beginTrialHold("ONE_ENTER_AFTER_SETTLE");
-                recording.row(model,"MOTION_READY",before,monotonicNs(),origin,written);
-                std::cout<<(model.stage()==5 ? "【停止确认，请保持静止】" : "【开始推/拉】舵机等待结束，无须再按回车。")
-                    <<(timerArmed ? "保持计时已开始。" : "保持时间为0，由你手动结束。")<<std::endl;
+            bool motionReady=!stopWait && !savedExecution && oldState==ParkingRehearsal::State::Settling && model.state()==ParkingRehearsal::State::Running;
+            if(oldState==ParkingRehearsal::State::Running && model.state()==ParkingRehearsal::State::AwaitApply) {
+                if(motor) {motor->stop("MOTOR_STOP_STAGE");collectMotorEvents();}
+                timing.end(before,"STAGE_END");
             }
             if(model.revision()!=savedRevision) {
                 saveSnapshot(directory,model.revision(),model.tuning());savedRevision=model.revision();
@@ -295,12 +345,15 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             if(model.finished()) break; // Q never waits for another camera read.
             // Metadata initialization precedes the fresh frame; a slow device open cannot age it.
             if(request && !servo) servo=std::make_unique<RehearsalServo>(io,hardware,params);
+            if(request && model.currentTuning().powered() && !motor && !model.motorRestartRequired())
+                motor=std::make_unique<RehearsalMotor>(motorIo,hardware,params);
             cv::Mat frame;const auto frameStart=monotonicNs();
             if(!camera.read(frame) || frame.empty()) throw std::runtime_error("Camera read failed");
             const auto frameEnd=monotonicNs();
             if(frame.cols!=config.width || frame.rows!=config.height || frame.depth()!=CV_8U ||
                (frame.channels()!=1 && frame.channels()!=3)) throw std::runtime_error("Unexpected camera frame format");
             const auto frameWritten=written;
+            if(request) {collectMotorEvents();if(stopWait) request.reset();}
             if(request) {
                 collectHoldEvents();
                 if(model.finished()) break;
@@ -310,19 +363,20 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                 const auto writeStart=monotonicNs();const auto duty=servo->set(*request);
                 const auto writeEnd=monotonicNs();written=*request;
                 model.acknowledge(true,double(writeEnd-origin)/1e9);
-                const bool timerArmed=(savedExecution || correctionExecution) ? beginTrialHold(correctionExecution ?
-                    (model.stage()==1 ? "AUTO_RIGHT_CORRECTION" : "AUTO_LEFT_CORRECTION") : "FILE_SAVE") : false;
                 recording.row(model,"SERVO_WRITE",writeStart,writeEnd,origin,written,"duty="+std::to_string(duty));
+                if((savedExecution || correctionExecution) && model.state()==ParkingRehearsal::State::Running) motionReady=true;
                 if(correctionExecution) std::cout<<"【"<<model.segmentTitle()<<"已执行，继续按原方向后拉】command="<<*request
                     <<" hold_time_s="<<model.holdSeconds()<<"；到时回正，当前弯道动作完成。"<<std::endl;
                 if(savedExecution) {
                     std::cout<<"【保存参数已执行】阶段="<<model.stage()+1<<" command="<<*request
                         <<" step="<<model.segmentName()<<" hold_time_s="<<model.holdSeconds()
-                        <<(timerArmed ? "；计时已从写入成功开始。" : "；保持时间为0，不启用定时结束，需要Q结束。")
+                        <<"；按状态提示等待/执行；计时将在动作允许后开始。"
                         <<"记录暂停状态不变。"<<std::endl;
                 }
                 tcflush(STDIN_FILENO,TCIFLUSH); // No typed-ahead permission after hardware latency.
             }
+            if(motor && motor->active() && double(monotonicNs()-frameStart)/1e9>params.frame_timeout_s)
+                throw std::runtime_error("Camera frame stale during motor motion");
             const auto now=monotonicNs();const double elapsed=double(now-origin)/1e9;
             if(model.recordingEnabled()) {
                 recording.frame(frame,config.fps);
@@ -335,13 +389,41 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                     recording.row(model,"SENSOR",start,end,origin,written,"",&sensor,&latestSamples[i]);
                     if(i<2) wheels[i]={latestSamples[i].valid,latestSamples[i].value,end};
                 }
+                const bool validWheels=timing.add(wheels[0],wheels[1]);
+                if(motor && motor->active()) {
+                    if(!validWheels || !wheels[0].valid || !wheels[1].valid) throw std::runtime_error("Invalid encoder feedback during motor motion");
+                    motor->heartbeat();
+                }
+                collectMotorEvents();
+                if(motionReady && !stopWait && !model.motorRestartRequired()) {
+                    const bool correction=correctionExecution || (model.segment()==1 && motor && motor->active());
+                    if(!correction) timing.begin(model.stage(),model.trial(),model.revision(),monotonicNs());
+                    if(!correction) speed.reset();
+                    if(model.currentTuning().powered() && !correction) {
+                        // Fresh camera + valid encoder pair required before any nonzero motor command.
+                        if(!wheels[0].valid || !wheels[1].valid || double(monotonicNs()-frameStart)/1e9>params.frame_timeout_s)
+                            throw std::runtime_error("Fresh camera and encoder pair required before motor start");
+                        const auto& settings=model.currentTuning();const double direction=model.stage()==0 ? 1 : -1;
+                        motor->start(direction*settings.motorLeft,direction*settings.motorRight,settings.motorSeconds,model.stage(),model.revision(),model.trial());
+                        collectMotorEvents();
+                    }
+                    if(!stopWait) beginTrialHold(correction ? "AUTO_CORRECTION" : "MOTION_READY");
+                    recording.row(model,"MOTION_READY",before,monotonicNs(),origin,written);
+                    std::cout<<(model.currentTuning().powered() ? "【电机开始执行】" : model.stage()==5 ? "【停止确认，请保持静止】" : "【开始推/拉】")<<std::endl;
+                }
+                if(stopWait) {
+                    if(timing.stationaryAfter(stopWait->endNs)) {stopConfirmed=true;model.stop("MOTOR_TRIAL_COMPLETED");}
+                }
                 if(model.state()==ParkingRehearsal::State::Running) {
                     const auto window=speed.add(model.stage(),model.segment(),model.trial(),model.revision(),
                         model.tuning().speedLeftCmPerCount,model.tuning().speedRightCmPerCount,wheels[0],wheels[1]);
                     if(window) recording.speed(model,*window,origin,written);
                 } else speed.reset();
                 hasSamples=true;
-            } else {speed.reset();hasSamples=false;}
+            } else {speed.reset();timing.gap();hasSamples=false;}
+            if(stopWait && !model.finished() && monotonicNs()-stopWait->endNs>=int64_t(2e9)) {
+                failure="Encoder zero tail not confirmed within 2s";model.stop("STOP_UNCONFIRMED");
+            }
             if(elapsed-lastFlush>=1) {
                 recording.flush();lastFlush=elapsed;
                 if(fs::space(directory).available<64u*1024u*1024u) throw std::runtime_error("Output storage below 64 MiB");
@@ -350,7 +432,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                 if(servo) written=servo->written();
                 showStatus(model,written);
                 if(servo) std::cout<<"当前步骤保持时间="<<model.holdSeconds()
-                    <<"s | 定时回正剩余="<<servo->remaining()<<"s (P暂停记录不暂停计时)"<<std::endl;
+                    <<"s | 定时回正剩余="<<servo->remaining()<<"s"<<std::endl;
                 if(speed.latest()) {
                     const auto& window=*speed.latest();
                     std::cout<<"编码器窗口速度：左="<<window.rate(0)<<" 右="<<window.rate(1)<<" counts/s";
@@ -376,6 +458,11 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     }
     // Manual Q/Ctrl+C or unavoidable error cleanup; never an automatic parking-success event.
     bool exitZeroAttempted=false,exitZeroSucceeded=false;
+    if(motor) {
+        try {motor->close();motorExitZero=true;}catch(const std::exception& error) {failure+="; MOTOR_ZERO_FAILED: "+std::string(error.what());}
+        try {collectMotorEvents(true);}catch(const std::exception& error) {failure+="; "+std::string(error.what());}
+    }
+    timing.end(monotonicNs(),model.outcome());
     if(servo) {
         exitZeroAttempted=servo->attempted();
         ServoHoldEvent exit{model.stage(),model.revision(),model.trial(),monotonicNs(),0,"","EXIT_ZERO"};
@@ -395,13 +482,18 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     auto speedSummary=outputFile(directory/"stage_speed_summary.csv");
     speedSummary<<std::setprecision(17);speed.writeSummary(speedSummary);
     closeText(speedSummary,directory/"stage_speed_summary.csv");
+    auto timingSummary=outputFile(directory/"stage_timing_summary.csv");timing.writeSummary(timingSummary,origin);
+    closeText(timingSummary,directory/"stage_timing_summary.csv");
+    for(const auto& row:timing.rows()) if(row.stage==0 && row.end)
+        std::cout<<"阶段1执行持续时间="<<double(row.end-row.ready)/1e9<<"s；不包含启动等待和Y/N确认。"<<std::endl;
     if(retention.decide()==SaveChoice::No) return failure.empty() ? (partial?2:0) : 1;
     auto metadata=outputFile(directory/"session.txt");
     metadata<<"version="<<rehearsalVersion<<"\nresult="<<(failure.empty()?model.outcome():"ERROR")
-        <<"\nerror="<<failure<<"\nmotor_writes=0\nimu_initialized=0\npartial="<<partial
+        <<"\nerror="<<failure<<"\nmotor_initialized="<<bool(motor)<<"\nmotor_zero_on_exit="<<(motor ? (motorExitZero ? "software_write_completed" : "failed") : "not_attempted")
+        <<"\nencoder_stop_confirmed="<<stopConfirmed<<"\nimu_initialized=0\npartial="<<partial
         <<"\nservo_zero_on_exit="<<(exitZeroAttempted ? (exitZeroSucceeded ? "software_write_completed":"failed") : "not_attempted")
         <<"\nmanual_parking_success=not_inferred\nvideo_timing=use_csv_monotonic_timestamps_not_nominal_fps\n"
-        <<"recording_start=one_enter_or_valid_file_save\nspeed_summary=stage_speed_summary.csv\nspeed_default_unit=counts/s\n";
+        <<"recording_start=one_enter_or_valid_file_save\nspeed_summary=stage_speed_summary.csv\nspeed_default_unit=counts/s\ntiming_summary=stage_timing_summary.csv\n";
     closeText(metadata,directory/"session.txt");retention.saved();
     std::cout<<"SAVED "<<directory<<" result="<<(failure.empty()?model.outcome():"ERROR")<<std::endl;
     return failure.empty() ? (partial?2:0) : 1;
@@ -414,16 +506,16 @@ int main(int argc,char** argv) {
             std::cout<<"parking_rehearsal version="<<rehearsalVersion<<"\n"
                 <<"--config file --hardware-config file --vehicle-config file --tuning-config file --output directory\n"
                 <<"--allow-partial --check-config (no hardware access)\n"
-                <<"Enter: start recording and set servo; automatically start motion timer after settling (one Enter). P: pause recording; C: resume recording; Q: finish.\n"
-                <<"auto_reload=save; saved settings execute immediately and restart hold_time_s after successful write. Timer continues while paused.\n"
+                <<"Enter: record/set servo, settle, then start configured motor/timers. P: pause recording and stop motors; C: resume recording only; Enter required to move again. Q: finish.\n"
+                <<"auto_reload=save; powered settings settle before motor start; paused motors require fresh Enter. motor_run_time_s=0 disables motors.\n"
                 <<"Saved timed trial ends after center; save_confirmation=single-key Y/N (no Enter, one prompt); restart=manual.\n"
                 <<"Stage 2: left bend then right correction; stage_2_step=right_correction selects correction-only tuning.\n"
                 <<"Stage 4: right bend then left correction; stage_4_step=left_correction selects correction-only tuning.\n"
-                <<"SERVO ONLY. Six stage CSV files plus stage_speed_summary.csv. Speed: counts/s; calibrated cm/s only with explicit speed_*_cm_per_count.\n";return 0;
+                <<"Single-stage motor tuning. Six stage CSV files plus stage_speed_summary.csv and stage_timing_summary.csv. No IMU. Speed: counts/s; calibrated cm/s only with explicit speed_*_cm_per_count.\n";return 0;
         }
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);
         const auto params=car2026::Params::load(options.vehicle);const auto tuning=ParkingTuning::load(options.tuning);
-        tuning.validate(params.max_steer_deg);fillEncoderPaths(config,hardware);
+        tuning.validate(params.max_steer_deg,params.pwm_limit);fillEncoderPaths(config,hardware);
         writeTuningSummary(std::cout,tuning,fs::absolute(options.tuning).lexically_normal().string());
         const auto missing=validateSensors(config,options.partial);
         for(const auto& name:missing) std::cout<<"UNCONFIGURED "<<name<<'\n';

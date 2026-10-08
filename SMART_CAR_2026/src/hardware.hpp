@@ -111,6 +111,8 @@ uint8_t readGpio(DeviceIo& io,const std::string& path);
 void inspectHardware(DeviceIo&,const HardwareConfig&,std::ostream&);
 void inspectIioImu(DeviceIo&,const HardwareConfig&,std::ostream&);
 uint16_t motorDuty(double command,double commandRange,const PwmInfo& info);
+void writeMotorCommand(DeviceIo&,const std::string& pwm,const std::string& directionPath,const PwmInfo&,
+                       double command,double commandRange,double limit,int forwardLevel,int& previousDirection);
 uint16_t servoDuty(double angleDeg,const HardwareConfig& config,const PwmInfo& info);
 
 struct WheelSample { double leftRps=0,rightRps=0,distanceM=0; };

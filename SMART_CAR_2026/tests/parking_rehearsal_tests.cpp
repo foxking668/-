@@ -316,10 +316,12 @@ int main() {
     SavedTuningWatcher bothWatcher(withCorrection,15);bothWatcher.observe(bothText,0);
     check(bothWatcher.observe(bothText,.4).has_value(),"watcher notices independent stage4 correction fields");
     const auto templateTuning=ParkingTuning::load("deploy/config/parking_tuning.ini");
-    check(templateTuning.stages[1].correction.holdSeconds>0 && templateTuning.stages[3].correction.holdSeconds>0,"delivered template explicitly enables both corrections");
+    check(templateTuning.stages[1].correction.holdSeconds==0 && templateTuning.stages[3].correction.holdSeconds==0,"delivered template preserves successful baseline with extra corrections disabled");
+    check(templateTuning.stage==1 && templateTuning.stages[0].motorLeft==2000 && templateTuning.stages[0].motorRight==2000 &&
+        !templateTuning.stages[0].powered(),"template delivers requested 2000 commands with motion disabled until time configured");
     std::ostringstream actualSummary;writeTuningSummary(actualSummary,templateTuning,"/actual/config/parking_tuning.ini");
     check(actualSummary.str().find(std::string("VERSION ")+rehearsalVersion)!=std::string::npos && actualSummary.str().find("TUNING_FILE /actual/config/parking_tuning.ini")!=std::string::npos,"startup identifies the actual version and config path");
-    check(actualSummary.str().find("右修正=启用 5/1s")!=std::string::npos && actualSummary.str().find("左修正=启用 -5/1s")!=std::string::npos,"startup identifies enabled directions and durations independently");
+    check(actualSummary.str().find("右修正=关闭 5/0s")!=std::string::npos && actualSummary.str().find("左修正=关闭 -5/0s")!=std::string::npos,"startup identifies baseline disabled corrections and stored optional angles independently");
     std::ostringstream legacySummary;writeTuningSummary(legacySummary,initial,"legacy.ini");
     check(legacySummary.str().find("右修正=关闭")!=std::string::npos && legacySummary.str().find("左修正=关闭")!=std::string::npos,"legacy config clearly reports both corrections disabled");
     full=ParkingRehearsal(ParkingTuning::parse(config(false,6)));

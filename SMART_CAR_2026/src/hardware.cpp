@@ -269,12 +269,16 @@ FactoryBoard::FactoryBoard(DeviceIo& io,const HardwareConfig& config,const Param
 FactoryBoard::~FactoryBoard() {stop();}
 void FactoryBoard::setMotor(const std::string& pwm,const std::string& dir,const PwmInfo& info,
                             double command,int forwardLevel,int& previousDirection) {
+    writeMotorCommand(io_,pwm,dir,info,command,config_.motor_command_range,params_.pwm_limit,forwardLevel,previousDirection);
+}
+void writeMotorCommand(DeviceIo& io,const std::string& pwm,const std::string& dir,const PwmInfo& info,
+                       double command,double commandRange,double limit,int forwardLevel,int& previousDirection) {
     require(std::isfinite(command),"Nonfinite motor command");
-    const uint16_t duty=motorDuty(clamp(command,-params_.pwm_limit,params_.pwm_limit),config_.motor_command_range,info);
+    const uint16_t duty=motorDuty(clamp(command,-limit,limit),commandRange,info);
     const int direction=command>=0 ? forwardLevel : 1-forwardLevel;
     // Zero first before direction changes; previousDirection changes only after successful GPIO write.
-    if(previousDirection!=direction) {writeDuty(io_,pwm,0);writeGpio(io_,dir,direction);previousDirection=direction;}
-    writeDuty(io_,pwm,duty);
+    if(previousDirection!=direction) {writeDuty(io,pwm,0);writeGpio(io,dir,direction);previousDirection=direction;}
+    writeDuty(io,pwm,duty);
 }
 void FactoryBoard::setMotorCommands(double left,double right) {
     try {

@@ -13,8 +13,8 @@ fi
 export LD_LIBRARY_PATH="/home/root/opencv-4.11-loongarch/install/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 program_help=$("$program" --help)
 case "$program_help" in
-    *'parking_rehearsal version=2026-10-08.2'*'--tuning-config'*) ;;
-    *) printf '%s\n' 'Wrong tuning program; require parking_rehearsal version=2026-10-08.2.' >&2; exit 1 ;;
+    *'parking_rehearsal version=2026-10-08.3'*'--tuning-config'*) ;;
+    *) printf '%s\n' 'Wrong tuning program; require parking_rehearsal version=2026-10-08.3.' >&2; exit 1 ;;
 esac
 # Install the template once. Never overwrite the user's tuning file.
 if [ ! -e config/parking_tuning.ini ]; then
@@ -25,7 +25,7 @@ if [ ! -e config/parking_tuning.ini ]; then
     mkdir -p config
     cp parking_tuning.example.ini config/parking_tuning.ini
 fi
-printf '%s\n' '按一次Enter开始记录并设置舵机，等待结束自动提示推车并计时；无需第二次回车。第一弯左打→右修正→零位；第二弯右打→左修正→零位。启动会显示实际参数及启用状态。保存参数直接执行，最后一步到时按模式收尾。P暂停记录但动作计时继续，C恢复，Q提前结束；P/C/Q后按Enter。结束只询问一次Y/N，直接按键，无需回车；下一次手动启动。'
+printf '%s\n' '单阶段电机调试：运行时间0禁用电机；一次Enter开始记录、设置舵机，静止等待后执行。P停电机并暂停记录，C只恢复记录，之后须Enter才运动；Q提前结束，P/C/Q后按Enter。保存当前段参数授权重执行（P后的电机仍需Enter）。时间到停机回正、采集短停稳尾段，结束只询问一次Y/N，直接按键；下一次手动启动。'
 exec "$program" --config manual_capture.ini \
     --hardware-config config/calibration_hardware.ini \
     --vehicle-config config/calibration_vehicle.ini \

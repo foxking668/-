@@ -2,13 +2,15 @@
 #include "capture_data.hpp"
 #include <optional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-08.2";
+constexpr const char* rehearsalVersion="2026-10-08.3";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct BendCorrection {double command=0,holdSeconds=0;};
 struct StageTuning {
     double command=0,settleSeconds=.5,holdSeconds=0;
     BendCorrection correction{};bool correctionOnly=false;
+    double motorLeft=0,motorRight=0,motorSeconds=0;
+    bool powered() const {return motorSeconds>0 && (motorLeft>0 || motorRight>0);}
 };
 inline bool isBendStage(int stageIndex) {return stageIndex==1 || stageIndex==3;}
 inline const char* rehearsalSegmentName(int stageIndex,unsigned segment) {
@@ -25,7 +27,7 @@ struct ParkingTuning {
     bool single=true;int stage=2;std::array<StageTuning,6> stages{};std::string source;
     // Zero means uncalibrated: report counts/s without inventing cm/s.
     double speedLeftCmPerCount=0,speedRightCmPerCount=0;
-    void validate(double limit=15) const {
+    void validate(double limit=15,double motorLimit=12000) const {
         if(stage<1 || stage>6) throw std::runtime_error("stage must be 1..6");
         for(double scale:{speedLeftCmPerCount,speedRightCmPerCount})
             if(!std::isfinite(scale) || scale<0 || scale>10)
@@ -51,6 +53,17 @@ struct ParkingTuning {
             const auto& item=stages[size_t(index)];
             if(item.correction.command!=0 || item.correction.holdSeconds!=0 || item.correctionOnly)
                 throw std::runtime_error("Correction parameters are only supported in stages 2 and 4");
+        }
+        for(size_t i=0;i<stages.size();++i) {
+            const auto& item=stages[i];
+            for(double command:{item.motorLeft,item.motorRight})
+                if(!std::isfinite(command) || command<0 || command>std::min(12000.,motorLimit))
+                    throw std::runtime_error("motor commands must be 0..min(12000,pwm_limit)");
+            if(!std::isfinite(item.motorSeconds) || item.motorSeconds<0 || item.motorSeconds>120)
+                throw std::runtime_error("motor_run_time_s must be 0..120 (0=disabled)");
+            if(i==5 && (item.motorLeft!=0 || item.motorRight!=0 || item.motorSeconds!=0))
+                throw std::runtime_error("stage_6 motor settings must all be zero");
+            if(item.powered() && !single) throw std::runtime_error("Powered tuning requires mode=single");
         }
     }
     static ParkingTuning parse(const std::string& text) {
@@ -93,6 +106,9 @@ struct ParkingTuning {
                 if(key=="steer_command") item.command=finiteNumber(value);
                 else if(key=="settle_time_s") item.settleSeconds=finiteNumber(value);
                 else if(key=="hold_time_s") item.holdSeconds=finiteNumber(value);
+                else if(key=="motor_left_command") item.motorLeft=finiteNumber(value);
+                else if(key=="motor_right_command") item.motorRight=finiteNumber(value);
+                else if(key=="motor_run_time_s") item.motorSeconds=finiteNumber(value);
                 else if(isBendStage(index) && key=="correction_steer_command") item.correction.command=finiteNumber(value);
                 else if(isBendStage(index) && key=="correction_hold_time_s") item.correction.holdSeconds=finiteNumber(value);
                 else throw std::runtime_error("Unknown stage key: "+key);
@@ -106,6 +122,11 @@ struct ParkingTuning {
         for(const auto* sectionName:{"stage_2","stage_4"})
             if(keys.count(std::string(sectionName)+".correction_steer_command")!=keys.count(std::string(sectionName)+".correction_hold_time_s"))
                 throw std::runtime_error(std::string(sectionName)+" correction keys are required together");
+        for(int stage=1;stage<=6;++stage) {
+            const auto prefix="stage_"+std::to_string(stage)+".";
+            const auto count=keys.count(prefix+"motor_left_command")+keys.count(prefix+"motor_right_command")+keys.count(prefix+"motor_run_time_s");
+            if(count!=0 && count!=3) throw std::runtime_error(prefix+"motor keys are required together");
+        }
         result.validate();return result;
     }
     static std::string readSource(const std::string& path) {
@@ -123,6 +144,11 @@ struct ParkingTuning {
 inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path) {
     out<<"VERSION "<<rehearsalVersion<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
+    for(size_t i=0;i<tuning.stages.size();++i) {
+        const auto& item=tuning.stages[i];
+        out<<"阶段"<<i+1<<" 电机左="<<item.motorLeft<<" 右="<<item.motorRight<<" 时间="<<item.motorSeconds<<"s"
+            <<(item.powered() ? " 启用" : " 禁用")<<'\n';
+    }
     for(int index:{1,3}) {
         const auto& item=tuning.stages[size_t(index)];const auto& correction=item.correction;
         out<<"阶段"<<index+1<<' '<<stageNames[index]<<" | 主转弯="<<item.command<<"/"<<item.holdSeconds<<"s"
@@ -176,6 +202,10 @@ public:
         if(key==RehearsalKey::Quit) {stop("USER_QUIT");return {};}
         if(key==RehearsalKey::Pause) {
             paused_=true;
+            if(currentTuning().powered()) {
+                motorRestartRequired_=true;state_=State::AwaitApply;nextStage_=stage_;
+                pendingCorrection_=automaticCorrectionWrite_=false;
+            }
             return {};
         }
         if(pendingCorrection_) {
@@ -190,6 +220,7 @@ public:
         if(paused_) return {};
         if(key!=RehearsalKey::Enter) return {};
         if(state_==State::AwaitApply) {
+            motorRestartRequired_=false;
             stage_=nextStage_;segment_=currentTuning().correctionOnly ? 1u : 0u;
             correctionComplete_=false;automaticSavedTrial_=automaticCorrectionWrite_=false;
             recordingStarted_=true;++trials_[size_t(stage_)];
@@ -205,7 +236,8 @@ public:
     void acknowledge(bool success,double now) {
         if(state_!=State::WritePending || finished()) throw std::runtime_error("No servo write pending");
         if(!success || !std::isfinite(now) || now<lastTime_) {stop("SERVO_WRITE_FAILED");return;}
-        state_=(automaticSavedTrial_ || automaticCorrectionWrite_) ? State::Running : State::Settling;
+        state_=motorRestartRequired_ ? State::AwaitApply :
+            (automaticCorrectionWrite_ || (automaticSavedTrial_ && !currentTuning().powered())) ? State::Running : State::Settling;
         writeTime_=lastTime_=now;
     }
     // A stable, valid file save is the user's execution authorization.
@@ -217,11 +249,13 @@ public:
         const int target=mainSelectorChanged ? tuning.stage-1 : stage_;
         const auto& before=tuning_.stages[size_t(target)];const auto& after=tuning.stages[size_t(target)];
         const bool selectorChanged=mainSelectorChanged || before.correctionOnly!=after.correctionOnly;
-        const bool primaryChanged=before.command!=after.command || before.holdSeconds!=after.holdSeconds || before.settleSeconds!=after.settleSeconds;
+        const bool primaryChanged=before.command!=after.command || before.holdSeconds!=after.holdSeconds || before.settleSeconds!=after.settleSeconds ||
+            before.motorLeft!=after.motorLeft || before.motorRight!=after.motorRight || before.motorSeconds!=after.motorSeconds;
         const bool correctionChanged=before.correction.command!=after.correction.command || before.correction.holdSeconds!=after.correction.holdSeconds;
         const bool execute=selectorChanged || target!=stage_ || primaryChanged || correctionChanged;
         const bool keepCorrection=target==stage_ && isBendStage(target) && segment_==1 && !selectorChanged && !primaryChanged;
         tuning_=std::move(tuning);++revision_;
+        if(paused_ && tuning_.stages[size_t(target)].powered()) motorRestartRequired_=true;
         if(!execute) return {};
         if(keepCorrection && currentTuning().correction.holdSeconds==0) {
             pendingCorrection_=false;stop(stage_==1 ? "RIGHT_CORRECTION_DISABLED" : "LEFT_CORRECTION_DISABLED");return {};
@@ -233,7 +267,7 @@ public:
         state_=State::WritePending;return command();
     }
     void holdCompleted(int stage,unsigned trial,unsigned segment=0) {
-        if(finished() || stage!=stage_ || trial!=trials_[size_t(stage_)] || segment!=segment_) return;
+        if(finished() || motorRestartRequired_ || state_==State::AwaitApply || stage!=stage_ || trial!=trials_[size_t(stage_)] || segment!=segment_) return;
         if(isBendStage(stage_) && currentTuning().correction.holdSeconds>0 && segment_==0) {
             segment_=1;pendingCorrection_=true;state_=State::WritePending;return;
         }
@@ -252,6 +286,7 @@ public:
     void stop(const std::string& reason) {if(!finished()) outcome_=reason;}
     bool finished() const {return !outcome_.empty();}
     bool paused() const {return paused_;}
+    bool motorRestartRequired() const {return motorRestartRequired_;}
     bool recordingEnabled() const {return recordingStarted_ && !paused_ && !finished();}
     int stage() const {return stage_;}
     int nextStage() const {return nextStage_;}
@@ -277,29 +312,31 @@ private:
     unsigned segment_=0;
     int stage_,nextStage_;std::array<unsigned,6> trials_{};unsigned revision_=1;
     State state_=State::AwaitApply;double lastTime_=-1,writeTime_=0;
-    bool paused_=false,recordingStarted_=false;std::string outcome_;
+    bool paused_=false,recordingStarted_=false,motorRestartRequired_=false;std::string outcome_;
 };
 class SavedTuningWatcher {
 public:
-    SavedTuningWatcher(const ParkingTuning& initial,double limit):accepted_(initial),observed_(initial.source),handled_(initial.source),limit_(limit) {}
+    SavedTuningWatcher(const ParkingTuning& initial,double limit,double motorLimit=12000):accepted_(initial),observed_(initial.source),handled_(initial.source),limit_(limit),motorLimit_(motorLimit) {}
     std::optional<ParkingTuning> observe(const std::string& source,double now) {
         if(!std::isfinite(now) || now<lastTime_) throw std::runtime_error("Invalid watcher time");
         lastTime_=now;
         if(source!=observed_) {observed_=source;stableSince_=now;return {};}
         if(source==handled_ || now-stableSince_<.3) return {};
         handled_=source; // A rejected save is reported once; the next save can recover.
-        auto candidate=ParkingTuning::parse(source);candidate.validate(limit_);
+        auto candidate=ParkingTuning::parse(source);candidate.validate(limit_,motorLimit_);
         bool same=candidate.single==accepted_.single && candidate.stage==accepted_.stage &&
             candidate.speedLeftCmPerCount==accepted_.speedLeftCmPerCount && candidate.speedRightCmPerCount==accepted_.speedRightCmPerCount;
         for(size_t i=0;i<6;++i) same=same && candidate.stages[i].command==accepted_.stages[i].command &&
             candidate.stages[i].holdSeconds==accepted_.stages[i].holdSeconds && candidate.stages[i].settleSeconds==accepted_.stages[i].settleSeconds &&
             candidate.stages[i].correctionOnly==accepted_.stages[i].correctionOnly &&
             candidate.stages[i].correction.command==accepted_.stages[i].correction.command &&
-            candidate.stages[i].correction.holdSeconds==accepted_.stages[i].correction.holdSeconds;
+            candidate.stages[i].correction.holdSeconds==accepted_.stages[i].correction.holdSeconds &&
+            candidate.stages[i].motorLeft==accepted_.stages[i].motorLeft && candidate.stages[i].motorRight==accepted_.stages[i].motorRight &&
+            candidate.stages[i].motorSeconds==accepted_.stages[i].motorSeconds;
         accepted_=candidate;
         return same ? std::optional<ParkingTuning>{} : candidate;
     }
 private:
-    ParkingTuning accepted_;std::string observed_,handled_;double limit_,stableSince_=0,lastTime_=-1;
+    ParkingTuning accepted_;std::string observed_,handled_;double limit_,motorLimit_,stableSince_=0,lastTime_=-1;
 };
 }}
