@@ -51,14 +51,26 @@ int main() {
         const auto stop=waitStop(motor);
         check(stop.back().event=="MOTOR_STOP_DURATION" && stop.back().error.empty() && !motor.active(),"independent deadline stops both motors without main loop");
         check(stop.back().endNs>=start.front().endNs,"actual stop timestamps");
+        check(stop.back().motorZeroNs>=start.front().endNs && stop.back().motorZeroNs<=stop.back().endNs,"motor zero timestamp separate from steering return latency");
+        int adjustments=0;
+        check(!motor.whileActive([&] {++adjustments;}),"expired motor cannot issue late steering");
+        motor.setStopAction([&] {++adjustments;});
         motor.start(-2000,-2000,.03,1,2,2);motor.takeEvents();motor.stop("MOTOR_STOP_PAUSE");
         check(io.has(hardware.motor_left_dir,1-int(hardware.motor_left_forward_level)),"reverse level derived from configured polarity");
         check(motor.takeEvents().back().event=="MOTOR_STOP_PAUSE" && !motor.active(),"pause stops without restart");
+        check(adjustments==1,"motor stop runs independent centering action");
         rejects([&] {motor.start(2000,2000,1,1,1,1);},"wrong stage direction rejected");
         rejects([&] {motor.start(12001,2000,1,0,1,1);},"oversized output rejected rather than clipped");
         rejects([&] {motor.start(2000,2000,0,0,1,1);},"zero duration cannot arm motor");
         rejects([&] {motor.start(-2000,-2000,1,5,1,1);},"stop stage cannot move");
         motor.close();const auto n=io.writes.size();motor.close();check(n==io.writes.size(),"close idempotent");
+    }
+    {
+        MotorOnlyIo io;RehearsalMotor motor(io,hardware,params);int corrections=0,centers=0;
+        motor.setStopAction([&] {++centers;});motor.start(2000,2000,.12,0,1,1);motor.takeEvents();
+        for(int i=0;i<8;++i) {std::this_thread::sleep_for(std::chrono::milliseconds(20));motor.whileActive([&] {++corrections;});motor.heartbeat();}
+        check(!motor.active() && corrections>0 && centers==1,"feedback never extends timer and stop centers once");
+        check(!motor.whileActive([&] {++corrections;}),"no feedback after asynchronous center");
     }
     {
         MotorOnlyIo io;auto shortWatch=params;shortWatch.frame_timeout_s=.1;

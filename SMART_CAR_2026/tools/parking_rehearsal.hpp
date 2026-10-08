@@ -1,8 +1,9 @@
 #pragma once
 #include "capture_data.hpp"
+#include "rehearsal_line.hpp"
 #include <optional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-08.3";
+constexpr const char* rehearsalVersion="2026-10-08.4";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct BendCorrection {double command=0,holdSeconds=0;};
@@ -10,6 +11,7 @@ struct StageTuning {
     double command=0,settleSeconds=.5,holdSeconds=0;
     BendCorrection correction{};bool correctionOnly=false;
     double motorLeft=0,motorRight=0,motorSeconds=0;
+    LineFollowTuning line{};
     bool powered() const {return motorSeconds>0 && (motorLeft>0 || motorRight>0);}
 };
 inline bool isBendStage(int stageIndex) {return stageIndex==1 || stageIndex==3;}
@@ -56,6 +58,9 @@ struct ParkingTuning {
         }
         for(size_t i=0;i<stages.size();++i) {
             const auto& item=stages[i];
+            item.line.validate(item.line.enabled ? limit : 15);
+            if(item.line.enabled && (i!=0 || !single || item.command!=0 || item.holdSeconds!=0 || item.motorLeft<=0 || item.motorRight<=0))
+                throw std::runtime_error("Line following requires single stage_1, steer_command=0, hold_time_s=0 and positive motor amplitudes (run time 0 may disable motors)");
             for(double command:{item.motorLeft,item.motorRight})
                 if(!std::isfinite(command) || command<0 || command>std::min(12000.,motorLimit))
                     throw std::runtime_error("motor commands must be 0..min(12000,pwm_limit)");
@@ -109,6 +114,27 @@ struct ParkingTuning {
                 else if(key=="motor_left_command") item.motorLeft=finiteNumber(value);
                 else if(key=="motor_right_command") item.motorRight=finiteNumber(value);
                 else if(key=="motor_run_time_s") item.motorSeconds=finiteNumber(value);
+                else if(index==0 && key=="line_follow_enable") {
+                    if(value!="0" && value!="1") throw std::runtime_error("line_follow_enable must be 0 or 1");
+                    item.line.enabled=value=="1";
+                }
+                else if(index==0 && key=="line_kp") item.line.kp=finiteNumber(value);
+                else if(index==0 && key=="line_kd") item.line.kd=finiteNumber(value);
+                else if(index==0 && key=="line_preview") item.line.preview=finiteNumber(value);
+                else if(index==0 && key=="line_filter_s") item.line.filterSeconds=finiteNumber(value);
+                else if(index==0 && key=="line_deadband_px") item.line.deadbandPx=finiteNumber(value);
+                else if(index==0 && key=="line_max_command") item.line.maxCommand=finiteNumber(value);
+                else if(index==0 && key=="line_slew_per_s") item.line.slewPerSecond=finiteNumber(value);
+                else if(index==0 && key=="line_target_x") item.line.targetX=finiteNumber(value);
+                else if(index==0 && key=="line_crop_top") item.line.cropTop=finiteNumber(value);
+                else if(index==0 && key=="line_crop_bottom") item.line.cropBottom=finiteNumber(value);
+                else if(index==0 && key=="line_lost_s") item.line.lostSeconds=finiteNumber(value);
+                else if(index==0 && key=="line_acquire_s") item.line.acquireSeconds=finiteNumber(value);
+                else if(index==0 && (key=="line_min_contrast" || key=="line_max_width_px")) {
+                    const double number=finiteNumber(value);
+                    if(number<0 || number>255 || std::floor(number)!=number) throw std::runtime_error("Line contrast/width must be integers");
+                    if(key=="line_min_contrast") item.line.contrast=int(number);else item.line.maxWidth=int(number);
+                }
                 else if(isBendStage(index) && key=="correction_steer_command") item.correction.command=finiteNumber(value);
                 else if(isBendStage(index) && key=="correction_hold_time_s") item.correction.holdSeconds=finiteNumber(value);
                 else throw std::runtime_error("Unknown stage key: "+key);
@@ -144,6 +170,7 @@ struct ParkingTuning {
 inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path) {
     out<<"VERSION "<<rehearsalVersion<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
+    out<<"阶段1巡线="<<(tuning.stages[0].line.enabled ? "启用（电机时间为0时仅观察）" : "关闭")<<"；不含交点分支选择。\n";
     for(size_t i=0;i<tuning.stages.size();++i) {
         const auto& item=tuning.stages[i];
         out<<"阶段"<<i+1<<" 电机左="<<item.motorLeft<<" 右="<<item.motorRight<<" 时间="<<item.motorSeconds<<"s"
@@ -250,7 +277,7 @@ public:
         const auto& before=tuning_.stages[size_t(target)];const auto& after=tuning.stages[size_t(target)];
         const bool selectorChanged=mainSelectorChanged || before.correctionOnly!=after.correctionOnly;
         const bool primaryChanged=before.command!=after.command || before.holdSeconds!=after.holdSeconds || before.settleSeconds!=after.settleSeconds ||
-            before.motorLeft!=after.motorLeft || before.motorRight!=after.motorRight || before.motorSeconds!=after.motorSeconds;
+            before.motorLeft!=after.motorLeft || before.motorRight!=after.motorRight || before.motorSeconds!=after.motorSeconds || !(before.line==after.line);
         const bool correctionChanged=before.correction.command!=after.correction.command || before.correction.holdSeconds!=after.correction.holdSeconds;
         const bool execute=selectorChanged || target!=stage_ || primaryChanged || correctionChanged;
         const bool keepCorrection=target==stage_ && isBendStage(target) && segment_==1 && !selectorChanged && !primaryChanged;
@@ -332,7 +359,7 @@ public:
             candidate.stages[i].correction.command==accepted_.stages[i].correction.command &&
             candidate.stages[i].correction.holdSeconds==accepted_.stages[i].correction.holdSeconds &&
             candidate.stages[i].motorLeft==accepted_.stages[i].motorLeft && candidate.stages[i].motorRight==accepted_.stages[i].motorRight &&
-            candidate.stages[i].motorSeconds==accepted_.stages[i].motorSeconds;
+            candidate.stages[i].motorSeconds==accepted_.stages[i].motorSeconds && candidate.stages[i].line==accepted_.stages[i].line;
         accepted_=candidate;
         return same ? std::optional<ParkingTuning>{} : candidate;
     }

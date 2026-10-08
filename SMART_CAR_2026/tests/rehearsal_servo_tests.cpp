@@ -62,6 +62,17 @@ int main() {
         check(io.duties.back()==4470,"exit centers configured PWM");
     }
     {
+        ServoOnlyIo feedback;RehearsalServo servo(feedback,hardware,params);bool rejected=false;
+        try {servo.adjust(3);}catch(...) {rejected=true;}
+        check(rejected && feedback.size()==0,"feedback cannot create unapproved servo trial");
+        servo.set(0);servo.beginHold(.08,0,1,1);
+        for(int i=0;i<3;++i) {std::this_thread::sleep_for(std::chrono::milliseconds(15));servo.adjust(i+1);}
+        const auto events=waitEvent(servo);
+        check(events.size()==1 && servo.written()==0,"feedback preserves original servo deadline");
+        rejected=false;try {servo.adjust(3);}catch(...) {rejected=true;}
+        check(rejected,"expired servo feedback cannot reapply nonzero command");
+    }
+    {
         ServoOnlyIo idle;RehearsalServo servo(idle,hardware,params);servo.close();
         check(idle.size()==0,"exit before authorization never writes");
     }

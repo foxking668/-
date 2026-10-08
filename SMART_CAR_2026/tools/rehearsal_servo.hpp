@@ -28,6 +28,15 @@ public:
         std::lock_guard<std::mutex> held(mutex_);
         if(closed_) throw std::runtime_error("Timed servo closed");
         deadline_.reset();++generation_;wake_.notify_all();
+        const auto duty=output_.set(command);written_=command;feedbackAllowed_=true;return duty;
+    }
+    // Feedback within an authorized motor trial. Unlike set(), this cannot cancel
+    // or extend a hold deadline. The caller serializes this with the motor stop.
+    uint16_t adjust(double command) {
+        std::lock_guard<std::mutex> held(mutex_);
+        if(closed_ || !written_ || !feedbackAllowed_) throw std::runtime_error("No authorized servo trial for feedback");
+        if(deadline_ && std::chrono::steady_clock::now()>=*deadline_)
+            throw std::runtime_error("Servo deadline expired before feedback");
         const auto duty=output_.set(command);written_=command;return duty;
     }
     std::optional<int64_t> beginHold(double seconds,int stage,unsigned revision,unsigned trial,unsigned segment=0) {
@@ -59,7 +68,7 @@ public:
         {
             std::lock_guard<std::mutex> held(mutex_);
             if(closed_) return;
-            closed_=true;deadline_.reset();++generation_;wake_.notify_all();
+            closed_=true;feedbackAllowed_=false;deadline_.reset();++generation_;wake_.notify_all();
         }
         if(worker_.joinable()) worker_.join();
         // No worker remains when the normal exit zero is written.
@@ -72,14 +81,14 @@ private:
             if(!deadline_) {wake_.wait(held,[this] {return closed_ || deadline_.has_value();});continue;}
             const auto generation=generation_;const auto deadline=*deadline_;
             if(wake_.wait_until(held,deadline,[&] {return closed_ || generation_!=generation;})) continue;
-            deadline_.reset();auto event=context_;event.beginNs=rehearsalMonotonicNs();
+            deadline_.reset();feedbackAllowed_=false;auto event=context_;event.beginNs=rehearsalMonotonicNs();
             try {output_.set(0);written_=0;}
             catch(const std::exception& error) {event.error=error.what();}
             event.endNs=rehearsalMonotonicNs();events_.push_back(event);
         }
     }
     ServoOutput output_;mutable std::mutex mutex_;std::condition_variable wake_;
-    bool closed_=false;unsigned generation_=0;std::optional<std::chrono::steady_clock::time_point> deadline_;
+    bool closed_=false,feedbackAllowed_=false;unsigned generation_=0;std::optional<std::chrono::steady_clock::time_point> deadline_;
     std::optional<double> written_;ServoHoldEvent context_{};std::deque<ServoHoldEvent> events_;
     std::thread worker_; // Last: all state is initialized before the worker starts.
 };

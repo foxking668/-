@@ -1,11 +1,13 @@
 #pragma once
 #include "rehearsal_servo.hpp"
+#include <functional>
 namespace car2026 { namespace capture {
 struct MotorEvent {
     int stage=0;unsigned revision=0,trial=0;
     int64_t beginNs=0,endNs=0;
     double left=0,right=0;
     std::string event,error;
+    int64_t motorZeroNs=0; // End of both motor zero writes, before steering return latency.
 };
 // Only the authorized main thread starts motion. The worker only writes zero.
 // No encoder, servo, beep or IMU initialization; capture owns all sensor reads.
@@ -50,6 +52,21 @@ public:
     }
     void heartbeat() {std::lock_guard<std::mutex> held(mutex_);if(active_) heartbeat_=rehearsalMonotonicNs();wake_.notify_all();}
     bool active() const {std::lock_guard<std::mutex> held(mutex_);return active_;}
+    void setStopAction(std::function<void()> action) {
+        std::lock_guard<std::mutex> held(mutex_);
+        if(closed_ || active_) throw std::runtime_error("Stop action must be installed before motion");
+        stopAction_=std::move(action);
+    }
+    // Same lock as worker stop: feedback cannot write a nonzero steering command
+    // after motor expiry. Lock order is motor -> servo; no caller may reverse it.
+    template<class Action> bool whileActive(Action action) {
+        std::lock_guard<std::mutex> held(mutex_);
+        if(closed_ || !active_) return false;
+        const auto now=rehearsalMonotonicNs();
+        if(now>=deadline_) {stopLocked("MOTOR_STOP_DURATION");return false;}
+        if(now>=heartbeat_+int64_t(params_.frame_timeout_s*1e9)) {stopLocked("MOTOR_STOP_WATCHDOG");return false;}
+        action();return true;
+    }
     void stop(const std::string& reason) {
         std::lock_guard<std::mutex> held(mutex_);if(closed_) return;
         if(active_) stopLocked(reason); // An already expired trial is never restarted here.
@@ -74,7 +91,11 @@ private:
     }
     void stopLocked(const std::string& reason) {
         active_=false;auto event=context_;event.event=reason;event.beginNs=rehearsalMonotonicNs();
-        try {zeroLocked();}catch(const std::exception& error) {event.error=error.what();fault_=event.error;}
+        try {zeroLocked();event.motorZeroNs=rehearsalMonotonicNs();}catch(const std::exception& error) {event.error=error.what();fault_=event.error;}
+        // Center independently of a stalled camera/recording loop, after both motor zeros.
+        if(stopAction_) try {stopAction_();}catch(const std::exception& error) {
+            event.error+="; STOP_ACTION_FAILED: "+std::string(error.what());fault_=event.error;
+        }
         event.endNs=rehearsalMonotonicNs();events_.push_back(event);wake_.notify_all();
     }
     void watch() noexcept {
@@ -93,6 +114,7 @@ private:
     DeviceIo& io_;HardwareConfig hardware_;Params params_;PwmInfo info_[2];int directions_[2]{-1,-1};
     mutable std::mutex mutex_;std::condition_variable wake_;bool closed_=false,active_=false;
     int64_t deadline_=0,heartbeat_=0;std::string fault_;MotorEvent context_;std::deque<MotorEvent> events_;
+    std::function<void()> stopAction_;
     std::thread worker_;
 };
 }}

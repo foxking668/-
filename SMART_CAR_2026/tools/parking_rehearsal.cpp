@@ -9,6 +9,7 @@
 #include "rehearsal_motor.hpp"
 #include "rehearsal_timing.hpp"
 #include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
 #include <chrono>
 #include <ctime>
@@ -76,6 +77,17 @@ SaveChoice askSave() {
     const auto choice=readSaveConfirmation([&] {return terminal.readKey();},std::cout);
     terminal.restore();return choice;
 }
+LineObservation observeLine(const cv::Mat& frame,LineFollowSession& session,const LineFollowTuning& tuning) {
+    const int top=int(frame.rows*tuning.cropTop),bottom=int(frame.rows*tuning.cropBottom);
+    if(bottom-top<16) throw std::runtime_error("Camera too small for line crop");
+    cv::Mat gray,small;
+    const auto crop=frame(cv::Rect(0,top,frame.cols,bottom-top));
+    if(frame.channels()==3) cv::cvtColor(crop,gray,cv::COLOR_BGR2GRAY);else gray=crop;
+    cv::resize(gray,small,cv::Size(lineWidth,lineHeight),0,0,cv::INTER_AREA);
+    LineGray pixels{};
+    for(int y=0;y<lineHeight;++y) std::copy_n(small.ptr<unsigned char>(y),lineWidth,pixels.begin()+y*lineWidth);
+    return session.tracker.analyze(pixels,tuning);
+}
 class SessionRetention {
 public:
     explicit SessionRetention(const fs::path& directory):files_(directory) {}
@@ -141,13 +153,12 @@ public:
         file<<csvString(event.event+(event.error.empty() || event.event=="MOTOR_START_FAILED" ? "" : "_FAILED"))<<','<<double(event.endNs-origin)/1e9
             <<','<<event.beginNs<<','<<event.endNs<<','<<event.stage+1<<",MOTOR,PRIMARY,"<<event.trial<<','<<event.revision
             <<",,,,,,,,,,,"<<csvString("left="+std::to_string(event.left)+" right="+std::to_string(event.right)+
-                " output="+(event.error.empty() ? (event.event=="MOTOR_START" ? "commanded" : "zero_written") : "write_failed")+" error="+event.error)<<'\n';
+                " output="+(event.error.empty() ? (event.event=="MOTOR_START" ? "commanded" : "zero_written") : "write_failed")+
+                " motor_zero_ns="+std::to_string(event.motorZeroNs)+" error="+event.error)<<'\n';
     }
     void speed(const ParkingRehearsal& model,const RehearsalSpeedWindow& window,int64_t origin,std::optional<double> written) {
         const auto add=[&](const std::string& name,double value,const std::string& unit) {
-            SensorSpec sensor{name,"","derived",unit};Sample sample;
-            sample.valid=true;sample.value=value;sample.status="encoder_window_0.5s_or_longer";
-            row(model,"SPEED",window.endNs,window.endNs,origin,written,"",&sensor,&sample);
+            derived(model,"SPEED",name,value,unit,window.endNs,origin,written,"encoder_window_0.5s_or_longer");
         };
         for(size_t i=0;i<2;++i) {
             const std::string side=i==0 ? "left" : "right";
@@ -156,6 +167,13 @@ public:
             if(window.scale[i]>0) add("speed_"+side+"_cm_s",window.rate(i)*window.scale[i],"cm/s");
         }
         if(window.calibrated()) add("speed_center_cm_s",window.centerCmPerSecond(),"cm/s");
+    }
+    void line(const ParkingRehearsal& model,const LineObservation& line,double error,int64_t end,int64_t origin,std::optional<double> written) {
+        const auto add=[&](const std::string& name,double value,const std::string& unit) {
+            derived(model,"LINE_FEEDBACK",name,value,unit,end,origin,written,line.reliable ? "detected" : "unreliable");
+        };
+        add("line_reliable",line.reliable,"bool");add("line_rows",line.rows,"rows");add("line_near_rows",line.nearRows,"rows");
+        if(line.reliable) {add("line_target_x",line.target,"px");add("line_near_x",line.nearX,"px");add("line_far_x",line.farX,"px");add("line_filtered_error",error,"px");}
     }
     void frame(const cv::Mat& image,double fps) {
         // Rotate clips without ending the session or changing its stage.
@@ -177,6 +195,12 @@ public:
         }
     }
 private:
+    void derived(const ParkingRehearsal& model,const std::string& event,const std::string& name,double value,
+                 const std::string& unit,int64_t end,int64_t origin,std::optional<double> written,const std::string& status) {
+        SensorSpec sensor{name,"","derived",unit};Sample sample;
+        sample.valid=true;sample.value=value;sample.status=status;
+        row(model,event,end,end,origin,written,"",&sensor,&sample);
+    }
     void closeVideo() {
         if(!writer_.isOpened()) return;
         writer_.release();syncFile(directory_/clip_);
@@ -241,18 +265,21 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     std::array<Sample,8> latestSamples;bool hasSamples=false;
     std::string failure;std::deque<ServoHoldEvent> deferredEvents;
     std::optional<MotorEvent> stopWait;bool stopConfirmed=false,motorExitZero=false;
+    LineFollowSession lineSession;LineObservation lineObservation;
+    bool pendingMotion=false;
     const auto collectMotorEvents=[&](bool final=false) {
         if(!motor) return;
         for(const auto& event:motor->takeEvents()) {
             recording.motorEvent(event,origin);
             if(event.event=="MOTOR_START") timing.motorStart(event.endNs);
-            else if(event.error.empty()) timing.motorStop(event.endNs,event.event);
+            else if(event.motorZeroNs) timing.motorStop(event.motorZeroNs,event.event+(event.error.empty() ? "" : "_FAILED"));
             else timing.end(event.endNs,event.event+"_FAILED");
             if(!event.error.empty()) throw std::runtime_error("MOTOR_ZERO_FAILED: "+event.error);
             if(!final && event.event=="MOTOR_STOP_WATCHDOG") throw std::runtime_error("Motor stopped: camera/encoder heartbeat expired");
-            if(!final && (event.event=="MOTOR_STOP_DURATION" || event.event=="MOTOR_STOP_STEER_COMPLETED")) {
+            if(!final && (event.event=="MOTOR_STOP_DURATION" || event.event=="MOTOR_STOP_STEER_COMPLETED" || event.event=="MOTOR_STOP_LINE_LOST")) {
                 stopWait=event;
-                if(servo) {servo->set(0);written=0;}
+                pendingMotion=false;lineSession.reset();
+                if(servo) written=servo->written(); // Stop worker already centered under the same motor lock.
                 std::cout<<"【电机已写零，舵机回正】继续记录停稳情况；不再启动新动作。"<<std::endl;
             }
         }
@@ -297,6 +324,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             if(motor && ((key==RehearsalKey::Pause && model.currentTuning().powered()) || key==RehearsalKey::Quit)) {
                 motor->stop(key==RehearsalKey::Pause ? "MOTOR_STOP_PAUSE" : "MOTOR_STOP_QUIT");collectMotorEvents();
                 if(servo) {servo->set(0);written=0;}
+                pendingMotion=false;lineSession.reset();
             }
             if(stopWait && key!=RehearsalKey::Quit && key!=RehearsalKey::Pause && key!=RehearsalKey::Continue) key=RehearsalKey::None;
             if(key==RehearsalKey::Reload) std::cout<<"程序自动监测文件；直接保存即可，不需要R。\n";
@@ -305,6 +333,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             const auto before=monotonicNs();const bool wasPaused=model.paused();
             const auto oldState=model.state();
             auto request=stopWait ? std::optional<double>{} : model.update(double(before-origin)/1e9,key);bool savedExecution=false;
+            if(key==RehearsalKey::Pause || key==RehearsalKey::Quit) {pendingMotion=false;lineSession.reset();}
             if(stopWait && (key==RehearsalKey::Pause || key==RehearsalKey::Continue)) model.update(double(before-origin)/1e9,key);
             if(stopWait && key==RehearsalKey::Quit) model.stop("USER_QUIT");
             const bool correctionExecution=request.has_value() && model.automaticCorrectionWrite();
@@ -334,6 +363,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             if(oldState==ParkingRehearsal::State::Running && model.state()==ParkingRehearsal::State::AwaitApply) {
                 if(motor) {motor->stop("MOTOR_STOP_STAGE");collectMotorEvents();}
                 timing.end(before,"STAGE_END");
+                pendingMotion=false;lineSession.reset();
             }
             if(model.revision()!=savedRevision) {
                 saveSnapshot(directory,model.revision(),model.tuning());savedRevision=model.revision();
@@ -345,8 +375,10 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             if(model.finished()) break; // Q never waits for another camera read.
             // Metadata initialization precedes the fresh frame; a slow device open cannot age it.
             if(request && !servo) servo=std::make_unique<RehearsalServo>(io,hardware,params);
-            if(request && model.currentTuning().powered() && !motor && !model.motorRestartRequired())
+            if(request && model.currentTuning().powered() && !motor && !model.motorRestartRequired()) {
                 motor=std::make_unique<RehearsalMotor>(motorIo,hardware,params);
+                motor->setStopAction([&] {servo->set(0);});
+            }
             cv::Mat frame;const auto frameStart=monotonicNs();
             if(!camera.read(frame) || frame.empty()) throw std::runtime_error("Camera read failed");
             const auto frameEnd=monotonicNs();
@@ -355,6 +387,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             const auto frameWritten=written;
             if(request) {collectMotorEvents();if(stopWait) request.reset();}
             if(request) {
+                pendingMotion=false;lineSession.reset();
                 collectHoldEvents();
                 if(model.finished()) break;
                 if(interrupted) {model.stop("USER_QUIT");break;}
@@ -374,6 +407,23 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                         <<"记录暂停状态不变。"<<std::endl;
                 }
                 tcflush(STDIN_FILENO,TCIFLUSH); // No typed-ahead permission after hardware latency.
+            }
+            const bool following=model.stage()==0 && model.currentTuning().line.enabled;
+            const auto& lineTuning=model.currentTuning().line;
+            if(motionReady) {
+                pendingMotion=true;
+                if(following && model.currentTuning().powered()) {
+                    lineSession.wait(double(monotonicNs()-origin)/1e9);
+                    recording.row(model,"WAIT_LINE",frameEnd,monotonicNs(),origin,written,"motor_timer_not_started");
+                    std::cout<<"【确认主线 / WAIT_LINE】保持静止，连续确认黑线后自动启动；此时尚未计前移时间。"<<std::endl;
+                }
+            }
+            if(following && model.recordingEnabled() && !stopWait) {
+                lineObservation=observeLine(frame,lineSession,lineTuning);
+                const double lineNow=double(monotonicNs()-origin)/1e9;
+                lineSession.observe(lineObservation,lineNow);
+                if(lineSession.expired(lineNow,lineTuning))
+                    throw std::runtime_error("LINE_ACQUIRE_TIMEOUT: no continuous reliable black line; motors not started");
             }
             if(motor && motor->active() && double(monotonicNs()-frameStart)/1e9>params.frame_timeout_s)
                 throw std::runtime_error("Camera frame stale during motor motion");
@@ -395,7 +445,8 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                     motor->heartbeat();
                 }
                 collectMotorEvents();
-                if(motionReady && !stopWait && !model.motorRestartRequired()) {
+                if(pendingMotion && !stopWait && !model.motorRestartRequired() &&
+                   (!following || !model.currentTuning().powered() || lineSession.ready())) {
                     const bool correction=correctionExecution || (model.segment()==1 && motor && motor->active());
                     if(!correction) timing.begin(model.stage(),model.trial(),model.revision(),monotonicNs());
                     if(!correction) speed.reset();
@@ -405,14 +456,41 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                             throw std::runtime_error("Fresh camera and encoder pair required before motor start");
                         const auto& settings=model.currentTuning();const double direction=model.stage()==0 ? 1 : -1;
                         motor->start(direction*settings.motorLeft,direction*settings.motorRight,settings.motorSeconds,model.stage(),model.revision(),model.trial());
+                        if(following) {
+                            lineSession.started();
+                            recording.row(model,"LINE_ACQUIRED",frameEnd,monotonicNs(),origin,written,"consecutive_real_detections_before_motor_start");
+                        }
                         collectMotorEvents();
                     }
                     if(!stopWait) beginTrialHold(correction ? "AUTO_CORRECTION" : "MOTION_READY");
                     recording.row(model,"MOTION_READY",before,monotonicNs(),origin,written);
                     std::cout<<(model.currentTuning().powered() ? "【电机开始执行】" : model.stage()==5 ? "【停止确认，请保持静止】" : "【开始推/拉】")<<std::endl;
+                    pendingMotion=false;
                 }
+                if(following && !stopWait && motor && motor->active()) {
+                    const double lineNow=double(monotonicNs()-origin)/1e9;
+                    if(lineObservation.reliable) {
+                        const double command=lineSession.controller.update(lineObservation,lineTuning,lineNow);
+                        if(interrupted) {motor->stop("MOTOR_STOP_QUIT");model.stop("USER_QUIT");}
+                        else {
+                            const auto start=monotonicNs();int64_t end=start;
+                            const bool applied=motor->whileActive([&] {servo->adjust(command);end=monotonicNs();});
+                            if(applied) {
+                                written=command;
+                                recording.row(model,"LINE_STEER_WRITE",start,end,origin,written,"feedback_does_not_restart_motor_timer");
+                            }
+                        }
+                    } else if(lineSession.lost(lineNow,lineTuning)) {
+                        motor->stop("MOTOR_STOP_LINE_LOST");
+                        std::cout<<"【丢线停车】黑线持续不可靠，本次结束，须手动重新启动。"<<std::endl;
+                    }
+                    collectMotorEvents();
+                }
+                if(following) recording.line(model,lineObservation,lineSession.controller.error(),monotonicNs(),origin,written);
                 if(stopWait) {
-                    if(timing.stationaryAfter(stopWait->endNs)) {stopConfirmed=true;model.stop("MOTOR_TRIAL_COMPLETED");}
+                    if(timing.stationaryAfter(stopWait->endNs)) {
+                        stopConfirmed=true;model.stop(stopWait->event=="MOTOR_STOP_LINE_LOST" ? "LINE_LOST" : "MOTOR_TRIAL_COMPLETED");
+                    }
                 }
                 if(model.state()==ParkingRehearsal::State::Running) {
                     const auto window=speed.add(model.stage(),model.segment(),model.trial(),model.revision(),
@@ -431,6 +509,9 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             if(lastState!=model.stateName() || elapsed-lastStatus>=1) {
                 if(servo) written=servo->written();
                 showStatus(model,written);
+                if(following) std::cout<<"巡线="<<(lineSession.waiting() ? "WAIT_LINE" : motor && motor->active() ? "ACTIVE" : "OBSERVE/STOPPED")
+                    <<" | 黑线有效="<<lineObservation.reliable<<" | 真实点行="<<lineObservation.rows<<" | 目标x="<<lineObservation.target
+                    <<"/160 | 滤波误差="<<lineSession.controller.error()<<std::endl;
                 if(servo) std::cout<<"当前步骤保持时间="<<model.holdSeconds()
                     <<"s | 定时回正剩余="<<servo->remaining()<<"s"<<std::endl;
                 if(speed.latest()) {
@@ -511,6 +592,7 @@ int main(int argc,char** argv) {
                 <<"Saved timed trial ends after center; save_confirmation=single-key Y/N (no Enter, one prompt); restart=manual.\n"
                 <<"Stage 2: left bend then right correction; stage_2_step=right_correction selects correction-only tuning.\n"
                 <<"Stage 4: right bend then left correction; stage_4_step=left_correction selects correction-only tuning.\n"
+                <<"Stage 1: optional line_follow_enable=1; acquire reliable black line before powered motion, dt-filtered PD steering, timed stop/center or sustained lost-line stop. No branch selection.\n"
                 <<"Single-stage motor tuning. Six stage CSV files plus stage_speed_summary.csv and stage_timing_summary.csv. No IMU. Speed: counts/s; calibrated cm/s only with explicit speed_*_cm_per_count.\n";return 0;
         }
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);
