@@ -76,34 +76,39 @@ int main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         check(cancelled.size()==2,"exit cancels pending timer before cleanup zero");
     }
-    {
-        ParkingTuning tuning;tuning.stage=2;tuning.stages[1]={-10,.5,.03};tuning.correction={5,.02};
+    for(int stageIndex:{1,3}) {
+        const double primary=stageIndex==1 ? -10. : 12.,correction=stageIndex==1 ? 5. : -5.;
+        ParkingTuning tuning;tuning.stage=stageIndex+1;tuning.stages[size_t(stageIndex)]={primary,.5,.03};
+        tuning.stages[size_t(stageIndex)].correction={correction,.02};
         ParkingRehearsal trial(tuning);ServoOnlyIo pairIo;RehearsalServo servo(pairIo,hardware,params);
-        const auto left=trial.update(0,RehearsalKey::Enter);servo.set(*left);trial.acknowledge(true,0);
+        const auto primaryRequest=trial.update(0,RehearsalKey::Enter);const auto primaryDuty=servo.set(*primaryRequest);trial.acknowledge(true,0);
         trial.update(.5,RehearsalKey::None);trial.update(.51,RehearsalKey::Enter);
         servo.beginHold(trial.holdSeconds(),trial.stage(),trial.revision(),trial.trial(),trial.segment());
         auto events=waitEvent(servo);
-        check(events.front().error.empty() && events.front().segment==0 && pairIo.size()==2,"left deadline centers and retains first-segment tag");
+        check(events.front().error.empty() && events.front().stage==stageIndex && events.front().segment==0 && pairIo.size()==2,"primary deadline centers and retains stage/segment tags");
         trial.holdCompleted(events.front().stage,events.front().trial,events.front().segment);
-        const auto right=trial.update(1,RehearsalKey::None);
-        check(right==5 && !trial.finished(),"successful left deadline authorizes configured right correction");
-        servo.set(*right);trial.acknowledge(true,1);
+        const auto correctionRequest=trial.update(1,RehearsalKey::None);
+        check(correctionRequest==correction && !trial.finished(),"successful primary deadline authorizes configured opposite correction");
+        const auto correctionDuty=servo.set(*correctionRequest);trial.acknowledge(true,1);
         servo.beginHold(trial.holdSeconds(),trial.stage(),trial.revision(),trial.trial(),trial.segment());
         events=waitEvent(servo);
-        check(events.front().segment==1 && events.front().error.empty(),"right deadline has its own segment tag");
+        check(events.front().stage==stageIndex && events.front().segment==1 && events.front().error.empty(),"correction deadline has its own stage/segment tags");
         trial.holdCompleted(events.front().stage,events.front().trial,events.front().segment);
-        check(trial.finished() && servo.written()==0 && pairIo.size()==4,"real timer and model complete left/zero/right/zero order without motors");
+        check(trial.finished() && servo.written()==0 && pairIo.size()==4,"real timer and model complete both bends without motor access");
+        check(pairIo.duties==std::vector<uint16_t>{primaryDuty,4470,correctionDuty,4470},"actual duty writes follow primary/zero/correction/zero order");
     }
-    {
-        ParkingTuning tuning;tuning.stage=2;tuning.stages[1]={-10,.5,.02};tuning.correction={5,.02};
+    for(int stageIndex:{1,3}) {
+        const double primary=stageIndex==1 ? -10. : 12.;
+        ParkingTuning tuning;tuning.stage=stageIndex+1;tuning.stages[size_t(stageIndex)]={primary,.5,.02};
+        tuning.stages[size_t(stageIndex)].correction={stageIndex==1 ? 5. : -5.,.02};
         ParkingRehearsal trial(tuning);ServoOnlyIo pairIo;RehearsalServo servo(pairIo,hardware,params);
-        const auto left=trial.update(0,RehearsalKey::Enter);servo.set(*left);trial.acknowledge(true,0);
+        const auto request=trial.update(0,RehearsalKey::Enter);servo.set(*request);trial.acknowledge(true,0);
         trial.update(.5,RehearsalKey::None);trial.update(.51,RehearsalKey::Enter);
         pairIo.failNext=true;servo.beginHold(trial.holdSeconds(),trial.stage(),trial.revision(),trial.trial(),trial.segment());
         const auto events=waitEvent(servo);
-        check(!events.front().error.empty() && events.front().segment==0,"first transition zero failure is observable");
+        check(!events.front().error.empty() && events.front().stage==stageIndex && events.front().segment==0,"each bend transition zero failure is observable");
         trial.stop("AUTO_CENTER_FAILED");
-        check(!trial.update(1,RehearsalKey::None) && !trial.pendingCorrection() && servo.written()==-10,"failed transition cannot trigger a right command");
+        check(!trial.update(1,RehearsalKey::None) && !trial.pendingCorrection() && servo.written()==primary,"failed transition cannot trigger opposite correction");
     }
     std::cout<<checks<<" timed servo checks passed\n";return 0;
  } catch(const std::exception& error) {std::cerr<<"FAIL "<<error.what()<<'\n';return 1;}

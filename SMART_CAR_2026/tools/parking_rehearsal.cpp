@@ -176,7 +176,7 @@ void showStatus(const ParkingRehearsal& model,std::optional<double> written) {
     else if(model.state()==ParkingRehearsal::State::AwaitStart)
         std::cout<<(model.stage()==5 ? " | Enter开始静态停止确认记录，保持车身静止" : " | Enter授权开始本段手动推/拉");
     else if(model.state()==ParkingRehearsal::State::Running) {
-        if(model.correctionSequenceActive()) std::cout<<" | 第二阶段计时动作进行中：左弯后自动右修正，最后回正；Q提前结束，P只暂停记录";
+        if(model.correctionSequenceActive()) std::cout<<" | 两步转向进行中：主转弯后自动反向修正，最后回正；Q提前结束，P只暂停记录";
         else std::cout<<" | 当前段进行中：定时回正后按模式收尾；停稳后Enter结束本段，P暂停记录，Q提前结束";
     }
     std::cout<<std::endl;
@@ -215,7 +215,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             deferredEvents.push_back(event);
             if(event.error.empty()) model.holdCompleted(event.stage,event.trial,event.segment);
             const char* message=!event.error.empty() ? "【定时回正失败，请停止推/拉】" :
-                model.pendingCorrection() ? "【2A左打时间到，正在自动切换2B右打修正】" : "【时间到，舵机已自动回正】";
+                model.pendingCorrection() ? "【主转弯时间到，正在自动切换反向修正】" : "【时间到，舵机已自动回正】";
             std::cout<<message<<" 阶段="<<event.stage+1<<" 步骤="<<rehearsalSegmentName(event.stage,event.segment)<<"。"<<std::endl;
         }
         if(!model.paused() || final) {
@@ -231,7 +231,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         return start.has_value();
     };
     std::cout<<"SESSION "<<directory<<"\nSERVO ONLY; no motor/GPIO-output/IMU initialization.\n"
-             <<"第二阶段可配置2A左弯后自动2B右修正，全部动作结束后按模式收尾。P只暂停记录、不暂停动作计时；Q提前结束。Y/N直接按键。\n";
+             <<"第一弯2A左打→2B右修正，第二弯4A右打→4B左修正；最后回零位。P只暂停记录、不暂停动作计时；Q提前结束。Y/N直接按键。\n";
     try {
         while(!model.finished()) {
             collectHoldEvents();
@@ -290,10 +290,11 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                 const auto writeStart=monotonicNs();const auto duty=servo->set(*request);
                 const auto writeEnd=monotonicNs();written=*request;
                 model.acknowledge(true,double(writeEnd-origin)/1e9);
-                const bool timerArmed=(savedExecution || correctionExecution) ? beginTrialHold(correctionExecution ? "AUTO_RIGHT_CORRECTION" : "FILE_SAVE") : false;
+                const bool timerArmed=(savedExecution || correctionExecution) ? beginTrialHold(correctionExecution ?
+                    (model.stage()==1 ? "AUTO_RIGHT_CORRECTION" : "AUTO_LEFT_CORRECTION") : "FILE_SAVE") : false;
                 recording.row(model,"SERVO_WRITE",writeStart,writeEnd,origin,written,"duty="+std::to_string(duty));
-                if(correctionExecution) std::cout<<"【2B右修正已执行，继续按原方向后拉】command="<<*request
-                    <<" hold_time_s="<<model.holdSeconds()<<"；到时回正，第二阶段动作完成。"<<std::endl;
+                if(correctionExecution) std::cout<<"【"<<model.segmentTitle()<<"已执行，继续按原方向后拉】command="<<*request
+                    <<" hold_time_s="<<model.holdSeconds()<<"；到时回正，当前弯道动作完成。"<<std::endl;
                 if(savedExecution) {
                     std::cout<<"【保存参数已执行】阶段="<<model.stage()+1<<" command="<<*request
                         <<" step="<<model.segmentName()<<" hold_time_s="<<model.holdSeconds()
@@ -377,12 +378,14 @@ int main(int argc,char** argv) {
                 <<"Enter: initial/manual-stage permission; P: pause recording; C: resume recording; Q: finish.\n"
                 <<"auto_reload=save; saved settings execute immediately and restart hold_time_s after successful write. Timer continues while paused.\n"
                 <<"Saved timed trial ends after center; save_confirmation=single-key Y/N (no Enter, one prompt); restart=manual.\n"
-                <<"Stage 2: optional automatic right correction; stage_2_step=right_correction selects correction-only tuning.\n"
+                <<"Stage 2: left bend then right correction; stage_2_step=right_correction selects correction-only tuning.\n"
+                <<"Stage 4: right bend then left correction; stage_4_step=left_correction selects correction-only tuning.\n"
                 <<"SERVO ONLY. Six stage CSV files.\n";return 0;
         }
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);
         const auto params=car2026::Params::load(options.vehicle);const auto tuning=ParkingTuning::load(options.tuning);
         tuning.validate(params.max_steer_deg);fillEncoderPaths(config,hardware);
+        writeTuningSummary(std::cout,tuning,fs::absolute(options.tuning).lexically_normal().string());
         const auto missing=validateSensors(config,options.partial);
         for(const auto& name:missing) std::cout<<"UNCONFIGURED "<<name<<'\n';
         if(options.check) {std::cout<<"Config checked without hardware access\n";return missing.empty()?0:2;}

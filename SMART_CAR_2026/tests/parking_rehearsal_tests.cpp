@@ -24,18 +24,18 @@ int main() {
  try {
     const auto initial=ParkingTuning::parse(config());check(initial.stage==2 && initial.single,"single stage2 parsed");
     check(ParkingTuning::parse("\xef\xbb\xbf"+config()).stage==2,"UTF8 BOM accepted");
-    check(initial.correction.holdSeconds==0,"older tuning files do not silently enable a new nonzero command");
+    check(initial.stages[1].correction.holdSeconds==0,"older tuning files do not silently enable a new nonzero command");
     auto narrowLegacy=initial;for(auto& stage:narrowLegacy.stages) stage.command=0;
     narrowLegacy.validate(4);
-    check(narrowLegacy.correction.command==0,"disabled legacy correction does not introduce a command above a narrow vehicle limit");
+    check(narrowLegacy.stages[1].correction.command==0,"disabled legacy correction does not introduce a command above a narrow vehicle limit");
     auto correctionText=config();correctionText.insert(correctionText.find("[stage_3]"),"correction_steer_command=5\ncorrection_hold_time_s=1\n");
     const auto withCorrection=ParkingTuning::parse(correctionText);
-    check(withCorrection.correction.command==5 && withCorrection.correction.holdSeconds==1,"right correction parameters parsed");
+    check(withCorrection.stages[1].correction.command==5 && withCorrection.stages[1].correction.holdSeconds==1,"right correction parameters parsed");
     for(const auto& entry:{std::string("correction_steer_command=5\n"),std::string("correction_hold_time_s=1\n")}) {
         auto partial=config();partial.insert(partial.find("[stage_3]"),entry);
         rejects([&] {ParkingTuning::parse(partial);},"partially specified correction rejected");
     }
-    auto unsafeCorrection=withCorrection;unsafeCorrection.correction.command=-5;
+    auto unsafeCorrection=withCorrection;unsafeCorrection.stages[1].correction.command=-5;
     rejects([&] {unsafeCorrection.validate();},"left correction forbidden for this right correction action");
     unsafeCorrection=withCorrection;unsafeCorrection.stages[1].command=5;
     rejects([&] {unsafeCorrection.validate();},"first bend must remain opposite to correction");
@@ -45,21 +45,21 @@ int main() {
     rejects([&] {ParkingTuning::parse(missingCore);},"optional keys cannot replace a required core key");
     auto correctionOnlyText=correctionText;correctionOnlyText.insert(correctionOnlyText.find("[stage_1]"),"stage_2_step=right_correction\n");
     const auto correctionOnly=ParkingTuning::parse(correctionOnlyText);
-    check(correctionOnly.startRightCorrection,"correction-only selection parsed");
+    check(correctionOnly.stages[1].correctionOnly,"correction-only selection parsed");
     auto invalidSelection=correctionOnly;invalidSelection.single=false;
     rejects([&] {invalidSelection.validate();},"correction-only cannot skip main bend in full mode");
     invalidSelection=correctionOnly;invalidSelection.stage=4;
     rejects([&] {invalidSelection.validate();},"correction-only is limited to stage2");
-    invalidSelection=correctionOnly;invalidSelection.correction.holdSeconds=0;
+    invalidSelection=correctionOnly;invalidSelection.stages[1].correction.holdSeconds=0;
     rejects([&] {invalidSelection.validate();},"correction-only requires positive hold time");
-    auto disabled=withCorrection;disabled.correction.holdSeconds=0;disabled.validate();
-    check(disabled.correction.holdSeconds==0,"zero correction duration disables automatic extra command");
+    auto disabled=withCorrection;disabled.stages[1].correction.holdSeconds=0;disabled.validate();
+    check(disabled.stages[1].correction.holdSeconds==0,"zero correction duration disables automatic extra command");
     for(double value:{-1.,121.,std::numeric_limits<double>::quiet_NaN()}) {
-        auto invalid=withCorrection;invalid.correction.holdSeconds=value;
+        auto invalid=withCorrection;invalid.stages[1].correction.holdSeconds=value;
         rejects([&] {invalid.validate();},"invalid correction duration rejected");
     }
     for(double value:{0.,16.,std::numeric_limits<double>::quiet_NaN()}) {
-        auto invalid=withCorrection;invalid.correction.command=value;
+        auto invalid=withCorrection;invalid.stages[1].correction.command=value;
         rejects([&] {invalid.validate();},"invalid enabled correction command rejected");
     }
     auto unknownStep=correctionText;unknownStep.insert(unknownStep.find("[stage_1]"),"stage_2_step=automatic\n");
@@ -199,18 +199,111 @@ int main() {
     check(savedPair.automaticSavedTrial() && savedPair.trial()==1,"saving correction parameters starts paired stage trial");
     auto futureEdit=withCorrection;futureEdit.stages[3].command=11;savedPair.applySaved(futureEdit,1);
     savedPair.holdCompleted(1,1,0);savedPair.update(6,RehearsalKey::None);savedPair.acknowledge(true,6);
-    auto rightEdit=futureEdit;rightEdit.correction.command=7;
+    auto rightEdit=futureEdit;rightEdit.stages[1].correction.command=7;
     check(savedPair.applySaved(rightEdit,6.1)==7 && savedPair.segment()==1 && savedPair.trial()==2,"editing active correction retunes right phase without replaying left");
     savedPair.acknowledge(true,6.1);savedPair.holdCompleted(1,1,1);
     check(!savedPair.finished(),"old right expiry cannot finish newly tuned correction");
     savedPair.holdCompleted(1,2,1);check(savedPair.finished(),"saved correction trial completes after its own timer");
     ParkingRehearsal disableRight(withCorrection);start(disableRight,0);disableRight.holdCompleted(1,1,0);
     disableRight.update(6,RehearsalKey::None);disableRight.acknowledge(true,6);
-    auto disableEdit=withCorrection;disableEdit.correction.holdSeconds=0;
+    auto disableEdit=withCorrection;disableEdit.stages[1].correction.holdSeconds=0;
     check(!disableRight.applySaved(disableEdit,6.1) && disableRight.outcome()=="RIGHT_CORRECTION_DISABLED","disabling active correction ends and centers instead of restarting left");
     SavedTuningWatcher correctionWatcher(initial,15);
     correctionWatcher.observe(correctionText,0);
     check(correctionWatcher.observe(correctionText,.4).has_value(),"watcher notices correction-only parameter changes");
+    auto bothText=correctionText;
+    bothText.insert(bothText.find("[stage_5]"),"correction_steer_command=-5\ncorrection_hold_time_s=1\n");
+    auto both=ParkingTuning::parse(bothText);both.stage=4;both.stages[3].command=12;
+    check(both.stages[1].correction.command==5 && both.stages[3].correction.command==-5,"two bends retain independent correction directions");
+    check(initial.stages[3].correction.holdSeconds==0,"old config does not enable new stage4 correction");
+    for(const auto& entry:{std::string("correction_steer_command=-5\n"),std::string("correction_hold_time_s=1\n")}) {
+        auto partial=config();partial.insert(partial.find("[stage_5]"),entry);
+        rejects([&] {ParkingTuning::parse(partial);},"stage4 correction must be specified as a complete pair");
+    }
+    for(double value:{0.,5.,-16.,std::numeric_limits<double>::quiet_NaN()}) {
+        auto invalid=both;invalid.stages[3].correction.command=value;
+        rejects([&] {invalid.validate();},"stage4 enabled correction must be a finite bounded left command");
+    }
+    for(double value:{-1.,121.,std::numeric_limits<double>::quiet_NaN()}) {
+        auto invalid=both;invalid.stages[3].correction.holdSeconds=value;
+        rejects([&] {invalid.validate();},"stage4 invalid correction duration rejected");
+    }
+    auto invalidSecond=both;invalidSecond.stages[3].command=-12;
+    rejects([&] {invalidSecond.validate();},"stage4 primary must turn right when left correction enabled");
+    invalidSecond=both;invalidSecond.stages[3].holdSeconds=0;
+    rejects([&] {invalidSecond.validate();},"stage4 primary timer required for automatic correction");
+    auto leftOnlyText=bothText;leftOnlyText.replace(leftOnlyText.find("stage=2"),7,"stage=4");
+    leftOnlyText.insert(leftOnlyText.find("[stage_1]"),"stage_4_step=left_correction\n");
+    const auto leftOnly=ParkingTuning::parse(leftOnlyText);
+    check(leftOnly.stages[3].correctionOnly,"stage4 correction-only selector parsed");
+    auto invalidOnly=leftOnly;invalidOnly.stage=2;
+    rejects([&] {invalidOnly.validate();},"stage4 standalone selection requires stage4");
+    invalidOnly=leftOnly;invalidOnly.single=false;
+    rejects([&] {invalidOnly.validate();},"stage4 standalone selection requires single mode");
+    invalidOnly=leftOnly;invalidOnly.stages[1].correctionOnly=true;
+    rejects([&] {invalidOnly.validate();},"two standalone selectors cannot conflict");
+    auto wrongOnlyText=leftOnlyText;wrongOnlyText.replace(wrongOnlyText.find("left_correction"),15,"right_correction");
+    rejects([&] {ParkingTuning::parse(wrongOnlyText);},"stage4 rejects stage2 selector value");
+    auto invalidNonBend=both;invalidNonBend.stages[2].correction={5,1};
+    rejects([&] {invalidNonBend.validate();},"non-bend stage cannot execute a correction");
+    ParkingRehearsal secondPair(both);start(secondPair,0);
+    check(secondPair.command()==12 && std::string(secondPair.segmentName())=="SECOND_RIGHT_BEND","stage4 starts right bend with correct CSV label");
+    secondPair.holdCompleted(3,1,0);
+    check(secondPair.update(6,RehearsalKey::None)==-5 && !secondPair.finished(),"stage4 automatically changes to left correction");
+    secondPair.acknowledge(true,6);
+    check(std::string(secondPair.segmentName())=="LEFT_CORRECTION" && std::string(secondPair.segmentTitle())=="4B左打修正","stage4 correction labels are explicit");
+    secondPair.holdCompleted(1,1,1);secondPair.holdCompleted(3,1,0);
+    check(!secondPair.finished(),"wrong-stage and old primary events cannot complete left correction");
+    secondPair.holdCompleted(3,1,1);check(secondPair.finished(),"stage4 ends after final correction timer");
+    ParkingRehearsal standaloneLeft(leftOnly);start(standaloneLeft,0);
+    check(standaloneLeft.command()==-5 && standaloneLeft.segment()==1,"standalone stage4 skips primary right bend");
+    standaloneLeft.holdCompleted(3,1,1);check(standaloneLeft.finished(),"standalone left correction finishes");
+    ParkingRehearsal pausedSecond(both);start(pausedSecond,0);
+    pausedSecond.update(.7,RehearsalKey::Pause);pausedSecond.holdCompleted(3,1,0);
+    check(pausedSecond.update(6,RehearsalKey::None)==-5 && pausedSecond.paused(),"stage4 automatically corrects left while recording paused");
+    pausedSecond.acknowledge(true,6);pausedSecond.holdCompleted(3,1,1);
+    check(pausedSecond.finished(),"paused stage4 finishes after correction");
+    ParkingRehearsal abortSecond(both);start(abortSecond,0);abortSecond.holdCompleted(3,1,0);
+    check(!abortSecond.update(6,RehearsalKey::Quit) && abortSecond.finished(),"Q prevents pending stage4 correction");
+    ParkingRehearsal failSecond(both);start(failSecond,0);failSecond.holdCompleted(3,1,0);
+    failSecond.update(6,RehearsalKey::None);failSecond.acknowledge(false,6);
+    check(failSecond.finished(),"failed stage4 correction write aborts maneuver");
+    ParkingRehearsal liveSecond(both);start(liveSecond,0);
+    auto otherBend=both;otherBend.stages[1].correction.command=6;
+    check(!liveSecond.applySaved(otherBend,1) && liveSecond.trial()==1,"editing first-bend correction does not restart second bend");
+    liveSecond.holdCompleted(3,1,0);liveSecond.update(6,RehearsalKey::None);liveSecond.acknowledge(true,6);
+    auto changedLeft=otherBend;changedLeft.stages[3].correction.command=-7;
+    check(liveSecond.applySaved(changedLeft,6.1)==-7 && liveSecond.segment()==1 && liveSecond.trial()==2,"stage4 correction retunes without replaying right bend");
+    liveSecond.acknowledge(true,6.1);liveSecond.holdCompleted(3,1,1);
+    check(!liveSecond.finished(),"old stage4 correction timer does not finish retuned correction");
+    auto changedPrimary=changedLeft;changedPrimary.stages[3].command=13;
+    check(liveSecond.applySaved(changedPrimary,6.2)==13 && liveSecond.segment()==0,"primary edit restarts stage4 from right bend");
+    liveSecond.acknowledge(true,6.2);liveSecond.holdCompleted(3,3,0);
+    liveSecond.update(12,RehearsalKey::None);liveSecond.acknowledge(true,12);
+    auto disableLeft=changedPrimary;disableLeft.stages[3].correction.holdSeconds=0;
+    check(!liveSecond.applySaved(disableLeft,12.1) && liveSecond.outcome()=="LEFT_CORRECTION_DISABLED","disabling active left correction finishes rather than replaying primary");
+    auto entire=both;entire.single=false;entire.stage=1;
+    ParkingRehearsal entireFlow(entire);
+    for(int index=0;index<6;++index) {
+        const double now=20.*index;start(entireFlow,now);
+        entireFlow.holdCompleted(index,entireFlow.trial(),0);
+        if(isBendStage(index)) {
+            check(entireFlow.update(now+6,RehearsalKey::None)==entire.stages[size_t(index)].correction.command,"full flow executes each bend correction");
+            entireFlow.acknowledge(true,now+6);entireFlow.holdCompleted(index,entireFlow.trial(),1);
+        }
+        check(!entireFlow.finished() && entireFlow.stage()==index,"full flow continues recording after each complete maneuver");
+        entireFlow.update(now+8,RehearsalKey::Enter);
+        check(entireFlow.nextStage()==std::min(index+1,5),"full flow advances to next main stage");
+    }
+    SavedTuningWatcher bothWatcher(withCorrection,15);bothWatcher.observe(bothText,0);
+    check(bothWatcher.observe(bothText,.4).has_value(),"watcher notices independent stage4 correction fields");
+    const auto templateTuning=ParkingTuning::load("deploy/config/parking_tuning.ini");
+    check(templateTuning.stages[1].correction.holdSeconds>0 && templateTuning.stages[3].correction.holdSeconds>0,"delivered template explicitly enables both corrections");
+    std::ostringstream actualSummary;writeTuningSummary(actualSummary,templateTuning,"/actual/config/parking_tuning.ini");
+    check(actualSummary.str().find("VERSION 2026-10-08.1")!=std::string::npos && actualSummary.str().find("TUNING_FILE /actual/config/parking_tuning.ini")!=std::string::npos,"startup identifies the actual version and config path");
+    check(actualSummary.str().find("右修正=启用 5/1s")!=std::string::npos && actualSummary.str().find("左修正=启用 -5/1s")!=std::string::npos,"startup identifies enabled directions and durations independently");
+    std::ostringstream legacySummary;writeTuningSummary(legacySummary,initial,"legacy.ini");
+    check(legacySummary.str().find("右修正=关闭")!=std::string::npos && legacySummary.str().find("左修正=关闭")!=std::string::npos,"legacy config clearly reports both corrections disabled");
     full=ParkingRehearsal(ParkingTuning::parse(config(false,6)));
     start(full,60.1);
     fullEdit.stage=6;
