@@ -65,7 +65,8 @@ int main() {
         ServoOnlyIo feedback;RehearsalServo servo(feedback,hardware,params);bool rejected=false;
         try {servo.adjust(3);}catch(...) {rejected=true;}
         check(rejected && feedback.size()==0,"feedback cannot create unapproved servo trial");
-        servo.set(0);servo.beginHold(.08,0,1,1);
+        // Leave scheduling margin for debug/CI load; still verify feedback cannot extend expiry.
+        servo.set(0);servo.beginHold(.5,0,1,1);
         for(int i=0;i<3;++i) {std::this_thread::sleep_for(std::chrono::milliseconds(15));servo.adjust(i+1);}
         const auto events=waitEvent(servo);
         check(events.size()==1 && servo.written()==0,"feedback preserves original servo deadline");

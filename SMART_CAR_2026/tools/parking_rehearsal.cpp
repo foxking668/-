@@ -152,9 +152,7 @@ public:
         auto& file=files_[size_t(event.stage)];
         file<<csvString(event.event+(event.error.empty() || event.event=="MOTOR_START_FAILED" ? "" : "_FAILED"))<<','<<double(event.endNs-origin)/1e9
             <<','<<event.beginNs<<','<<event.endNs<<','<<event.stage+1<<",MOTOR,PRIMARY,"<<event.trial<<','<<event.revision
-            <<",,,,,,,,,,,"<<csvString("left="+std::to_string(event.left)+" right="+std::to_string(event.right)+
-                " output="+(event.error.empty() ? (event.event=="MOTOR_START" ? "commanded" : "zero_written") : "write_failed")+
-                " motor_zero_ns="+std::to_string(event.motorZeroNs)+" error="+event.error)<<'\n';
+            <<",,,,,,,,,,,"<<csvString(motorEventDetail(event))<<'\n';
     }
     void speed(const ParkingRehearsal& model,const RehearsalSpeedWindow& window,int64_t origin,std::optional<double> written) {
         const auto add=[&](const std::string& name,double value,const std::string& unit) {
@@ -227,7 +225,7 @@ void showStatus(const ParkingRehearsal& model,std::optional<double> written) {
     }
     std::cout<<std::endl;
     const auto& settings=model.currentTuning();
-    std::cout<<"电机幅值 左="<<settings.motorLeft<<" 右="<<settings.motorRight<<" | 运行上限="<<settings.motorSeconds
+    std::cout<<"电机原始PWM 左="<<settings.motorLeft<<" 右="<<settings.motorRight<<" | 运行上限="<<settings.motorSeconds
         <<"s | 方向="<<(model.stage()==0 ? "前进" : model.stage()==5 ? "停止" : "倒退")
         <<(settings.powered() ? " | 已配置电机试验" : " | 电机禁用")<<std::endl;
 }
@@ -260,7 +258,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     fs::copy_file(options.capture,directory/"capture_config.ini");
     fs::copy_file(options.hardware,directory/"hardware_config.ini");
     fs::copy_file(options.vehicle,directory/"vehicle_config.ini");
-    SavedTuningWatcher watcher(tuning,params.max_steer_deg,params.pwm_limit);
+    SavedTuningWatcher watcher(tuning,params.max_steer_deg);
     unsigned savedRevision=1;double lastStatus=-1,lastFlush=0,lastFilePoll=-1;std::string lastState,lastFileError;
     std::array<Sample,8> latestSamples;bool hasSamples=false;
     std::string failure;std::deque<ServoHoldEvent> deferredEvents;
@@ -271,6 +269,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         if(!motor) return;
         for(const auto& event:motor->takeEvents()) {
             recording.motorEvent(event,origin);
+            std::cout<<event.event<<" "<<motorEventDetail(event)<<std::endl;
             if(event.event=="MOTOR_START") timing.motorStart(event.endNs);
             else if(event.motorZeroNs) timing.motorStop(event.motorZeroNs,event.event+(event.error.empty() ? "" : "_FAILED"));
             else timing.end(event.endNs,event.event+"_FAILED");
@@ -572,6 +571,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     metadata<<"version="<<rehearsalVersion<<"\nresult="<<(failure.empty()?model.outcome():"ERROR")
         <<"\nerror="<<failure<<"\nmotor_initialized="<<bool(motor)<<"\nmotor_zero_on_exit="<<(motor ? (motorExitZero ? "software_write_completed" : "failed") : "not_attempted")
         <<"\nencoder_stop_confirmed="<<stopConfirmed<<"\nimu_initialized=0\npartial="<<partial
+        <<"\nmotor_units=raw_pwm\nmotor_limit=per_device_duty_max\nnormalized_motor_scale_used=0"
         <<"\nservo_zero_on_exit="<<(exitZeroAttempted ? (exitZeroSucceeded ? "software_write_completed":"failed") : "not_attempted")
         <<"\nmanual_parking_success=not_inferred\nvideo_timing=use_csv_monotonic_timestamps_not_nominal_fps\n"
         <<"recording_start=one_enter_or_valid_file_save\nspeed_summary=stage_speed_summary.csv\nspeed_default_unit=counts/s\ntiming_summary=stage_timing_summary.csv\n";
@@ -589,6 +589,7 @@ int main(int argc,char** argv) {
                 <<"--allow-partial --check-config (no hardware access)\n"
                 <<"Enter: record/set servo, settle, then start configured motor/timers. P: pause recording and stop motors; C: resume recording only; Enter required to move again. Q: finish.\n"
                 <<"auto_reload=save; powered settings settle before motor start; paused motors require fresh Enter. motor_run_time_s=0 disables motors.\n"
+                <<"motor_units=raw_pwm; integer amplitudes, 2000 writes 2000. No tuning cap; per-device duty_max and uint16 wire bound enforced.\n"
                 <<"Saved timed trial ends after center; save_confirmation=single-key Y/N (no Enter, one prompt); restart=manual.\n"
                 <<"Stage 2: left bend then right correction; stage_2_step=right_correction selects correction-only tuning.\n"
                 <<"Stage 4: right bend then left correction; stage_4_step=left_correction selects correction-only tuning.\n"
@@ -597,7 +598,7 @@ int main(int argc,char** argv) {
         }
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);
         const auto params=car2026::Params::load(options.vehicle);const auto tuning=ParkingTuning::load(options.tuning);
-        tuning.validate(params.max_steer_deg,params.pwm_limit);fillEncoderPaths(config,hardware);
+        tuning.validate(params.max_steer_deg);fillEncoderPaths(config,hardware);
         writeTuningSummary(std::cout,tuning,fs::absolute(options.tuning).lexically_normal().string());
         const auto missing=validateSensors(config,options.partial);
         for(const auto& name:missing) std::cout<<"UNCONFIGURED "<<name<<'\n';

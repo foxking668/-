@@ -1,9 +1,10 @@
 #pragma once
 #include "capture_data.hpp"
 #include "rehearsal_line.hpp"
+#include "rehearsal_motor_units.hpp"
 #include <optional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-08.4";
+constexpr const char* rehearsalVersion="2026-10-08.5";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct BendCorrection {double command=0,holdSeconds=0;};
@@ -29,7 +30,7 @@ struct ParkingTuning {
     bool single=true;int stage=2;std::array<StageTuning,6> stages{};std::string source;
     // Zero means uncalibrated: report counts/s without inventing cm/s.
     double speedLeftCmPerCount=0,speedRightCmPerCount=0;
-    void validate(double limit=15,double motorLimit=12000) const {
+    void validate(double limit=15) const {
         if(stage<1 || stage>6) throw std::runtime_error("stage must be 1..6");
         for(double scale:{speedLeftCmPerCount,speedRightCmPerCount})
             if(!std::isfinite(scale) || scale<0 || scale>10)
@@ -62,8 +63,8 @@ struct ParkingTuning {
             if(item.line.enabled && (i!=0 || !single || item.command!=0 || item.holdSeconds!=0 || item.motorLeft<=0 || item.motorRight<=0))
                 throw std::runtime_error("Line following requires single stage_1, steer_command=0, hold_time_s=0 and positive motor amplitudes (run time 0 may disable motors)");
             for(double command:{item.motorLeft,item.motorRight})
-                if(!std::isfinite(command) || command<0 || command>std::min(12000.,motorLimit))
-                    throw std::runtime_error("motor commands must be 0..min(12000,pwm_limit)");
+                if(!validRehearsalRawPwm(command))
+                    throw std::runtime_error("motor commands must be integer raw PWM 0..65535; powered start also checks each device duty_max");
             if(!std::isfinite(item.motorSeconds) || item.motorSeconds<0 || item.motorSeconds>120)
                 throw std::runtime_error("motor_run_time_s must be 0..120 (0=disabled)");
             if(i==5 && (item.motorLeft!=0 || item.motorRight!=0 || item.motorSeconds!=0))
@@ -171,6 +172,7 @@ inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,con
     out<<"VERSION "<<rehearsalVersion<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
     out<<"阶段1巡线="<<(tuning.stages[0].line.enabled ? "启用（电机时间为0时仅观察）" : "关闭")<<"；不含交点分支选择。\n";
+    out<<"电机单位=原始PWM；填2000就写2000，无2000人为上限；启动车辆前核对各电机duty_max。\n";
     for(size_t i=0;i<tuning.stages.size();++i) {
         const auto& item=tuning.stages[i];
         out<<"阶段"<<i+1<<" 电机左="<<item.motorLeft<<" 右="<<item.motorRight<<" 时间="<<item.motorSeconds<<"s"
@@ -343,14 +345,14 @@ private:
 };
 class SavedTuningWatcher {
 public:
-    SavedTuningWatcher(const ParkingTuning& initial,double limit,double motorLimit=12000):accepted_(initial),observed_(initial.source),handled_(initial.source),limit_(limit),motorLimit_(motorLimit) {}
+    SavedTuningWatcher(const ParkingTuning& initial,double limit):accepted_(initial),observed_(initial.source),handled_(initial.source),limit_(limit) {}
     std::optional<ParkingTuning> observe(const std::string& source,double now) {
         if(!std::isfinite(now) || now<lastTime_) throw std::runtime_error("Invalid watcher time");
         lastTime_=now;
         if(source!=observed_) {observed_=source;stableSince_=now;return {};}
         if(source==handled_ || now-stableSince_<.3) return {};
         handled_=source; // A rejected save is reported once; the next save can recover.
-        auto candidate=ParkingTuning::parse(source);candidate.validate(limit_,motorLimit_);
+        auto candidate=ParkingTuning::parse(source);candidate.validate(limit_);
         bool same=candidate.single==accepted_.single && candidate.stage==accepted_.stage &&
             candidate.speedLeftCmPerCount==accepted_.speedLeftCmPerCount && candidate.speedRightCmPerCount==accepted_.speedRightCmPerCount;
         for(size_t i=0;i<6;++i) same=same && candidate.stages[i].command==accepted_.stages[i].command &&
@@ -364,6 +366,6 @@ public:
         return same ? std::optional<ParkingTuning>{} : candidate;
     }
 private:
-    ParkingTuning accepted_;std::string observed_,handled_;double limit_,motorLimit_,stableSince_=0,lastTime_=-1;
+    ParkingTuning accepted_;std::string observed_,handled_;double limit_,stableSince_=0,lastTime_=-1;
 };
 }}
