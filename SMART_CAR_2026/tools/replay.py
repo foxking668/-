@@ -33,9 +33,16 @@ def main():
     parser.add_argument('--stage', default='Depart', help='perception-only stage when no telemetry supplied')
     parser.add_argument('--observe-steering', choices=('forward','reverse'),
                         help='Diagnostic image-reference suggestions only; parking stage, no telemetry or actuator writes')
+    parser.add_argument('--observe-straight', nargs=2, type=float, metavar=('TARGET_X','TARGET_HEADING'),
+                        help='Forward diagnostic following of an explicit normalized image target; no actuator writes')
     parser.add_argument('--output', type=Path, default=Path('replay.jsonl'))
     parser.add_argument('--preview', action='store_true')
     args = parser.parse_args()
+    if args.observe_straight is not None and (args.telemetry or args.observe_steering or
+            args.stage not in ('Depart','ToCones','ToRing','ToCross','ToGarage')):
+        parser.error('--observe-straight requires an ordinary forward black-line --stage and forbids --telemetry/--observe-steering')
+    if args.observe_straight is not None and any(not math.isfinite(v) for v in args.observe_straight):
+        parser.error('--observe-straight targets must be finite')
     if args.observe_steering and (args.telemetry or args.stage not in ('GarageAlign','GarageAdvance','GarageReverse')):
         parser.error('--observe-steering requires a parking --stage and forbids --telemetry')
     try:
@@ -75,6 +82,7 @@ def main():
     command=[str(args.exe.resolve()),str(args.config.resolve())]
     if telemetry is None: command.append(args.stage)
     if args.observe_steering: command.extend(('--observe-steering',args.observe_steering))
+    if args.observe_straight is not None: command.extend(('--observe-straight',*(f'{v:.17g}' for v in args.observe_straight)))
     # Freeze processing dimensions for the run, as the C++ config is loaded once.
     width,height=320,240
     for line in args.config.read_text(encoding='utf-8-sig').splitlines():

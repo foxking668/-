@@ -13,13 +13,15 @@ try {
     }
     $prefix=@()
     if ([IO.Path]::GetFileNameWithoutExtension($Compiler) -eq 'zig') {$prefix=@('c++')}
-    $common=@('-std=c++17','-Wall','-Wextra','-Wpedantic','-O0','-g','-Isrc','src/config.cpp','src/vision.cpp','src/mission.cpp','src/imu.cpp','src/visual_observer.cpp')
+    $common=@('-std=c++17','-Wall','-Wextra','-Wpedantic','-O0','-g','-Isrc','src/config.cpp','src/vision.cpp','src/mission.cpp','src/imu.cpp','src/visual_observer.cpp','src/straight_follow.cpp')
     & $Compiler @prefix @common 'tests/core_tests.cpp' '-o' 'build/core_tests.exe'
     if($LASTEXITCODE -ne 0) {throw 'Core tests compilation failed'}
     & $Compiler @prefix @common 'src/replay_stream.cpp' '-o' 'build/vision_stream.exe'
     if($LASTEXITCODE -ne 0) {throw 'Replay compilation failed'}
     & $Compiler @prefix @common 'tests/visual_observer_tests.cpp' '-o' 'build/visual_observer_tests.exe'
     if($LASTEXITCODE -ne 0) {throw 'Visual observer tests compilation failed'}
+    & $Compiler @prefix @common 'tests/straight_follow_tests.cpp' '-o' 'build/straight_follow_tests.exe'
+    if($LASTEXITCODE -ne 0) {throw 'Straight-follow tests compilation failed'}
     $parking=@('-std=c++17','-Wall','-Wextra','-Wpedantic','-O0','-g','-Isrc','src/reverse_parking.cpp')
     & $Compiler @prefix @parking 'tests/reverse_parking_tests.cpp' '-o' 'build/reverse_parking_tests.exe'
     if($LASTEXITCODE -ne 0) {throw 'Reverse parking tests compilation failed'}
@@ -52,6 +54,8 @@ try {
         if($LASTEXITCODE -ne 0) {throw 'Core regression tests failed'}
         & './build/visual_observer_tests.exe'
         if($LASTEXITCODE -ne 0) {throw 'Visual observer tests failed'}
+        & './build/straight_follow_tests.exe'
+        if($LASTEXITCODE -ne 0) {throw 'Straight-follow tests failed'}
         & './build/reverse_parking_tests.exe'
         if($LASTEXITCODE -ne 0) {throw 'Reverse parking regression tests failed'}
         & './build/manual_steering_tests.exe'

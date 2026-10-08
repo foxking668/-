@@ -1,5 +1,6 @@
 #include "core.hpp"
 #include "visual_observer.hpp"
+#include "straight_follow.hpp"
 #include <iomanip>
 #include <iostream>
 #include <optional>
@@ -11,8 +12,8 @@
 using namespace car2026;
 int main(int argc,char** argv) {
     try {
-        if(argc!=2 && argc!=3 && argc!=5) {
-            std::cerr<<"Usage: vision_stream config/competition.ini [perception_stage [--observe-steering forward|reverse]]\n";return 2;
+        if(argc!=2 && argc!=3 && argc!=5 && argc!=6) {
+            std::cerr<<"Usage: vision_stream config.ini [perception_stage [--observe-steering forward|reverse | --observe-straight target_x target_heading]]\n";return 2;
         }
 #ifdef _WIN32
         _setmode(_fileno(stdin),_O_BINARY);
@@ -25,11 +26,27 @@ int main(int argc,char** argv) {
             if(!found) throw std::runtime_error("Unknown perception stage");
         }
         std::optional<VisualSteeringObserver> observer;
+        std::optional<StraightLineFollower> straightFollower;
+        StraightImageTarget straightTarget;
         if(argc==5) {
             if(std::string(argv[3])!="--observe-steering") throw std::runtime_error("Unknown observer option");
             if(perceptionStage!=Stage::GarageAlign && perceptionStage!=Stage::GarageAdvance && perceptionStage!=Stage::GarageReverse)
                 throw std::runtime_error("Steering observation requires a parking perception stage");
             observer.emplace(params,parseManualMotion(argv[4]));
+        }
+        if(argc==6) {
+            if(std::string(argv[3])!="--observe-straight") throw std::runtime_error("Unknown straight observation option");
+            if(perceptionStage!=Stage::Depart && perceptionStage!=Stage::ToCones &&
+               perceptionStage!=Stage::ToRing && perceptionStage!=Stage::ToCross && perceptionStage!=Stage::ToGarage)
+                throw std::runtime_error("Straight observation requires an ordinary forward black-line stage");
+            const auto number=[](const char* value) {
+                const std::string text=value;size_t consumed=0;
+                const double result=std::stod(text,&consumed);
+                if(consumed!=text.size() || !std::isfinite(result)) throw std::runtime_error("Invalid straight target number");
+                return result;
+            };
+            straightTarget={number(argv[4]),number(argv[5])};
+            straightFollower.emplace(params,straightTarget);
         }
         Telemetry telemetry;double previousTime=-1;
         // Each frame: telemetry line, P6 header, exactly width*height*3 RGB bytes.
@@ -76,6 +93,23 @@ int main(int argc,char** argv) {
                 std::cout<<",\"heading_error_image\":";
                 if(suggestion.hasSuggestion) std::cout<<suggestion.headingFeatureError;else std::cout<<"null";
                 std::cout<<",\"actuator_writes\":0";
+            }
+            if(straightFollower) {
+                const auto result=straightFollower->observe(observation,telemetry.time,telemetry.time);
+                std::cout<<",\"straight_state\":\""<<result.state<<"\",\"is_straight\":"<<result.isStraight
+                         <<",\"straight_target_x\":"<<straightTarget.nearX
+                         <<",\"straight_target_heading_image\":"<<straightTarget.headingFeature
+                         <<",\"straight_aligned\":"<<result.aligned<<",\"straight_confirmed_frames\":"<<result.confirmedFrames
+                         <<",\"straight_suggestion_valid\":"<<result.hasSuggestion<<",\"straight_suggested_command\":";
+                if(result.hasSuggestion) std::cout<<result.suggestedCommand;else std::cout<<"null";
+                std::cout<<",\"straight_lateral_error_image\":";
+                if(result.hasErrors) std::cout<<result.lateralError;else std::cout<<"null";
+                std::cout<<",\"straight_heading_error_image\":";
+                if(result.hasErrors) std::cout<<result.headingFeatureError;else std::cout<<"null";
+                std::cout<<",\"straight_fit_residual_image\":";
+                if(result.isStraight) std::cout<<result.features.maximumResidual;else std::cout<<"null";
+                std::cout<<",\"straight_fit_supported_rows\":"<<result.features.supportedRows
+                         <<",\"actuator_writes\":0";
             }
             std::cout<<"}\n"<<std::flush;
         }

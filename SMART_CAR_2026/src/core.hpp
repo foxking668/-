@@ -36,6 +36,12 @@ inline double wrapDegrees(double x) {
  X(steer_rate_deg_s, 100, 10, 300) \
  X(lateral_gain, 26, 0, 100) \
  X(heading_gain, 12, 0, 100) \
+ X(straight_lateral_gain, 8, 0, 100) \
+ X(straight_heading_gain, 12, 0, 100) \
+ X(straight_filter_s, 0.15, 0, 1) \
+ X(straight_deadband_image, 0.005, 0, 0.05) \
+ X(straight_max_command, 5, 0.1, 5) \
+ X(straight_command_rate_s, 3, 0.1, 30) \
  X(curvature_slow_gain, 2.0, 0, 10) \
  X(pid_kp, 64, 0, 5000) \
  X(pid_ki, 32, 0, 5000) \
