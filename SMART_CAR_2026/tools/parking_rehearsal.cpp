@@ -5,6 +5,7 @@
 #include "rehearsal_servo.hpp"
 #include "rehearsal_session.hpp"
 #include "rehearsal_terminal.hpp"
+#include "rehearsal_speed.hpp"
 #include <opencv2/core.hpp>
 #include <opencv2/videoio.hpp>
 #include <chrono>
@@ -133,6 +134,20 @@ public:
             <<','<<event.beginNs<<','<<event.endNs<<','<<event.stage+1<<",TIMER,"<<csvString(rehearsalSegmentName(event.stage,event.segment))<<','<<event.trial<<','<<event.revision
             <<",,,,"<<(event.error.empty()?"0":"")<<",,,,,,,"<<csvString(event.error)<<'\n';
     }
+    void speed(const ParkingRehearsal& model,const RehearsalSpeedWindow& window,int64_t origin,std::optional<double> written) {
+        const auto add=[&](const std::string& name,double value,const std::string& unit) {
+            SensorSpec sensor{name,"","derived",unit};Sample sample;
+            sample.valid=true;sample.value=value;sample.status="encoder_window_0.5s_or_longer";
+            row(model,"SPEED",window.endNs,window.endNs,origin,written,"",&sensor,&sample);
+        };
+        for(size_t i=0;i<2;++i) {
+            const std::string side=i==0 ? "left" : "right";
+            add("speed_"+side,window.rate(i),"counts/s");
+            add("speed_"+side+"_window",window.seconds[i],"s");
+            if(window.scale[i]>0) add("speed_"+side+"_cm_s",window.rate(i)*window.scale[i],"cm/s");
+        }
+        if(window.calibrated()) add("speed_center_cm_s",window.centerCmPerSecond(),"cm/s");
+    }
     void frame(const cv::Mat& image,double fps) {
         // Rotate clips without ending the session or changing its stage.
         if(!writer_.isOpened() || videoFrames_>=1800) {
@@ -171,10 +186,8 @@ void showStatus(const ParkingRehearsal& model,std::optional<double> written) {
     if(written) std::cout<<*written;else std::cout<<"未写入";
     if(model.paused()) std::cout<<" | 记录已暂停；保存文件仍直接更新舵机，C仅恢复记录";
     else if(model.state()==ParkingRehearsal::State::AwaitApply)
-        std::cout<<" | 停稳后Enter授权设置阶段 "<<model.nextStage()+1<<" "<<stageNames[model.nextStage()];
+        std::cout<<" | 停稳后按一次Enter：开始记录并设置阶段 "<<model.nextStage()+1<<" "<<stageNames[model.nextStage()];
     else if(model.state()==ParkingRehearsal::State::Settling) std::cout<<" | 保持静止，等待舵机";
-    else if(model.state()==ParkingRehearsal::State::AwaitStart)
-        std::cout<<(model.stage()==5 ? " | Enter开始静态停止确认记录，保持车身静止" : " | Enter授权开始本段手动推/拉");
     else if(model.state()==ParkingRehearsal::State::Running) {
         if(model.correctionSequenceActive()) std::cout<<" | 两步转向进行中：主转弯后自动反向修正，最后回正；Q提前结束，P只暂停记录";
         else std::cout<<" | 当前段进行中：定时回正后按模式收尾；停稳后Enter结束本段，P暂停记录，Q提前结束";
@@ -200,6 +213,8 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     if(!fs::create_directory(directory)) throw std::runtime_error("Session already exists");
     SessionRetention retention(directory);
     ParkingRehearsal model(tuning);Recording recording(directory);std::optional<double> written;
+    RehearsalSpeedRecorder speed(hardware.encoder_mode,hardware.encoder_left_sign*params.encoder_left_sign,
+        hardware.encoder_right_sign*params.encoder_right_sign);
     saveSnapshot(directory,1,tuning);
     fs::copy_file(options.capture,directory/"capture_config.ini");
     fs::copy_file(options.hardware,directory/"hardware_config.ini");
@@ -231,7 +246,9 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         return start.has_value();
     };
     std::cout<<"SESSION "<<directory<<"\nSERVO ONLY; no motor/GPIO-output/IMU initialization.\n"
-             <<"第一弯2A左打→2B右修正，第二弯4A右打→4B左修正；最后回零位。P只暂停记录、不暂停动作计时；Q提前结束。Y/N直接按键。\n";
+             <<"按一次Enter开始记录并设置舵机；静止等待结束后自动提示开始推/拉并计时，无须第二次Enter。\n"
+             <<"第一弯2A左打→2B右修正，第二弯4A右打→4B左修正；最后回零位。P只暂停记录、不暂停动作计时；Q提前结束。Y/N直接按键。\n"
+             <<"速度默认counts/s；只有填写实测speed_*_cm_per_count后才输出cm/s，不使用未标定轮周长默认值。\n";
     try {
         while(!model.finished()) {
             collectHoldEvents();
@@ -262,8 +279,11 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                         <<(model.finished() ? "；结束当前修正试验并回正。" : savedExecution ? "；直接设置当前步骤舵机并重新计时。" : "；更新其他阶段参数，当前段不重启。")<<std::endl;
                 }
             }
-            if(!savedExecution && oldState==ParkingRehearsal::State::AwaitStart && model.state()==ParkingRehearsal::State::Running && servo) {
-                beginTrialHold("ENTER");
+            if(!savedExecution && oldState==ParkingRehearsal::State::Settling && model.state()==ParkingRehearsal::State::Running && servo) {
+                const bool timerArmed=beginTrialHold("ONE_ENTER_AFTER_SETTLE");
+                recording.row(model,"MOTION_READY",before,monotonicNs(),origin,written);
+                std::cout<<(model.stage()==5 ? "【停止确认，请保持静止】" : "【开始推/拉】舵机等待结束，无须再按回车。")
+                    <<(timerArmed ? "保持计时已开始。" : "保持时间为0，由你手动结束。")<<std::endl;
             }
             if(model.revision()!=savedRevision) {
                 saveSnapshot(directory,model.revision(),model.tuning());savedRevision=model.revision();
@@ -304,16 +324,24 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                 tcflush(STDIN_FILENO,TCIFLUSH); // No typed-ahead permission after hardware latency.
             }
             const auto now=monotonicNs();const double elapsed=double(now-origin)/1e9;
-            if(!model.paused()) {
+            if(model.recordingEnabled()) {
                 recording.frame(frame,config.fps);
                 recording.row(model,"FRAME",frameStart,frameEnd,origin,frameWritten);
+                WheelSpeedSample wheels[2];
                 for(size_t i=0;i<config.sensors.size();++i) {
                     const auto& sensor=config.sensors[i];const auto start=monotonicNs();
                     latestSamples[i]=readSensor(sensor,config.factoryEncoderStatusZero,interrupted);
-                    recording.row(model,"SENSOR",start,monotonicNs(),origin,written,"",&sensor,&latestSamples[i]);
+                    const auto end=monotonicNs();
+                    recording.row(model,"SENSOR",start,end,origin,written,"",&sensor,&latestSamples[i]);
+                    if(i<2) wheels[i]={latestSamples[i].valid,latestSamples[i].value,end};
                 }
+                if(model.state()==ParkingRehearsal::State::Running) {
+                    const auto window=speed.add(model.stage(),model.segment(),model.trial(),model.revision(),
+                        model.tuning().speedLeftCmPerCount,model.tuning().speedRightCmPerCount,wheels[0],wheels[1]);
+                    if(window) recording.speed(model,*window,origin,written);
+                } else speed.reset();
                 hasSamples=true;
-            }
+            } else {speed.reset();hasSamples=false;}
             if(elapsed-lastFlush>=1) {
                 recording.flush();lastFlush=elapsed;
                 if(fs::space(directory).available<64u*1024u*1024u) throw std::runtime_error("Output storage below 64 MiB");
@@ -323,6 +351,13 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                 showStatus(model,written);
                 if(servo) std::cout<<"当前步骤保持时间="<<model.holdSeconds()
                     <<"s | 定时回正剩余="<<servo->remaining()<<"s (P暂停记录不暂停计时)"<<std::endl;
+                if(speed.latest()) {
+                    const auto& window=*speed.latest();
+                    std::cout<<"编码器窗口速度：左="<<window.rate(0)<<" 右="<<window.rate(1)<<" counts/s";
+                    if(window.calibrated()) std::cout<<" | 车速估计="<<window.centerCmPerSecond()<<" cm/s";
+                    else std::cout<<" | 厘米速度未标定";
+                    std::cout<<std::endl;
+                }
                 if(!model.paused() && hasSamples) {
                     for(size_t index:{size_t(6),size_t(7)}) {
                         std::cout<<config.sensors[index].name<<'=';
@@ -357,12 +392,16 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     }
     try {collectHoldEvents(true);} catch(const std::exception& error) {failure+="; "+std::string(error.what());}
     recording.close();
+    auto speedSummary=outputFile(directory/"stage_speed_summary.csv");
+    speedSummary<<std::setprecision(17);speed.writeSummary(speedSummary);
+    closeText(speedSummary,directory/"stage_speed_summary.csv");
     if(retention.decide()==SaveChoice::No) return failure.empty() ? (partial?2:0) : 1;
     auto metadata=outputFile(directory/"session.txt");
     metadata<<"version="<<rehearsalVersion<<"\nresult="<<(failure.empty()?model.outcome():"ERROR")
         <<"\nerror="<<failure<<"\nmotor_writes=0\nimu_initialized=0\npartial="<<partial
         <<"\nservo_zero_on_exit="<<(exitZeroAttempted ? (exitZeroSucceeded ? "software_write_completed":"failed") : "not_attempted")
-        <<"\nmanual_parking_success=not_inferred\nvideo_timing=use_csv_monotonic_timestamps_not_nominal_fps\n";
+        <<"\nmanual_parking_success=not_inferred\nvideo_timing=use_csv_monotonic_timestamps_not_nominal_fps\n"
+        <<"recording_start=one_enter_or_valid_file_save\nspeed_summary=stage_speed_summary.csv\nspeed_default_unit=counts/s\n";
     closeText(metadata,directory/"session.txt");retention.saved();
     std::cout<<"SAVED "<<directory<<" result="<<(failure.empty()?model.outcome():"ERROR")<<std::endl;
     return failure.empty() ? (partial?2:0) : 1;
@@ -375,12 +414,12 @@ int main(int argc,char** argv) {
             std::cout<<"parking_rehearsal version="<<rehearsalVersion<<"\n"
                 <<"--config file --hardware-config file --vehicle-config file --tuning-config file --output directory\n"
                 <<"--allow-partial --check-config (no hardware access)\n"
-                <<"Enter: initial/manual-stage permission; P: pause recording; C: resume recording; Q: finish.\n"
+                <<"Enter: start recording and set servo; automatically start motion timer after settling (one Enter). P: pause recording; C: resume recording; Q: finish.\n"
                 <<"auto_reload=save; saved settings execute immediately and restart hold_time_s after successful write. Timer continues while paused.\n"
                 <<"Saved timed trial ends after center; save_confirmation=single-key Y/N (no Enter, one prompt); restart=manual.\n"
                 <<"Stage 2: left bend then right correction; stage_2_step=right_correction selects correction-only tuning.\n"
                 <<"Stage 4: right bend then left correction; stage_4_step=left_correction selects correction-only tuning.\n"
-                <<"SERVO ONLY. Six stage CSV files.\n";return 0;
+                <<"SERVO ONLY. Six stage CSV files plus stage_speed_summary.csv. Speed: counts/s; calibrated cm/s only with explicit speed_*_cm_per_count.\n";return 0;
         }
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);
         const auto params=car2026::Params::load(options.vehicle);const auto tuning=ParkingTuning::load(options.tuning);

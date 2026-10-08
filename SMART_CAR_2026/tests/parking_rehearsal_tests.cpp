@@ -14,15 +14,32 @@ std::string config(bool single=true,int stage=2) {
 }
 void start(ParkingRehearsal& model,double time) {
     auto request=model.update(time,RehearsalKey::Enter);check(request.has_value(),"apply requires Enter");
+    check(model.recordingEnabled(),"one Enter starts recording before servo settling");
     model.acknowledge(true,time);check(!model.update(time+.49,RehearsalKey::Enter),"settling discards Enter");
-    model.update(time+.5,RehearsalKey::Enter);
-    check(model.state()==ParkingRehearsal::State::AwaitStart,"settling boundary never starts trial");
-    check(!model.update(time+.51,RehearsalKey::Enter),"start permission does not write");
-    check(model.state()==ParkingRehearsal::State::Running,"second permission starts");
+    model.update(time+.5,RehearsalKey::None);
+    check(model.state()==ParkingRehearsal::State::Running,"one authorization automatically runs after settling without another Enter");
 }
 int main() {
  try {
     const auto initial=ParkingTuning::parse(config());check(initial.stage==2 && initial.single,"single stage2 parsed");
+    check(initial.speedLeftCmPerCount==0 && initial.speedRightCmPerCount==0,"legacy config only produces counts/s");
+    auto speedText=config();speedText.insert(speedText.find("[stage_1]"),"speed_left_cm_per_count=0.01\nspeed_right_cm_per_count=0.02\n");
+    const auto speedTuning=ParkingTuning::parse(speedText);
+    check(speedTuning.speedLeftCmPerCount==.01 && speedTuning.speedRightCmPerCount==.02,"explicit independent speed calibration parsed");
+    for(double scale:{-1.,11.,std::numeric_limits<double>::quiet_NaN()}) {
+        auto badSpeed=initial;badSpeed.speedLeftCmPerCount=scale;
+        rejects([&] {badSpeed.validate();},"invalid speed calibration rejected");
+    }
+    ParkingRehearsal noActuation(initial);
+    check(!noActuation.applySaved(speedTuning,0) && !noActuation.recordingEnabled(),"calibration-only save never authorizes steering or starts data");
+    SavedTuningWatcher speedWatcher(initial,15);speedWatcher.observe(speedText,0);
+    check(speedWatcher.observe(speedText,.4).has_value(),"watcher notices speed scale without losing snapshot");
+    ParkingRehearsal pausedSettle(initial);
+    pausedSettle.update(0,RehearsalKey::Enter);pausedSettle.acknowledge(true,0);
+    pausedSettle.update(.1,RehearsalKey::Pause);pausedSettle.update(.5,RehearsalKey::None);
+    check(pausedSettle.state()==ParkingRehearsal::State::Running && !pausedSettle.recordingEnabled(),"P during settle only pauses data, authorized timer can start");
+    pausedSettle.update(.6,RehearsalKey::Continue);
+    check(pausedSettle.state()==ParkingRehearsal::State::Running && pausedSettle.recordingEnabled(),"C resumes same trial without second permission");
     check(ParkingTuning::parse("\xef\xbb\xbf"+config()).stage==2,"UTF8 BOM accepted");
     check(initial.stages[1].correction.holdSeconds==0,"older tuning files do not silently enable a new nonzero command");
     auto narrowLegacy=initial;for(auto& stage:narrowLegacy.stages) stage.command=0;
@@ -91,6 +108,7 @@ int main() {
     for(const auto& pair:std::vector<std::pair<std::string,RehearsalKey>>{{"",RehearsalKey::Enter},{"P",RehearsalKey::Pause},{"C",RehearsalKey::Continue},{"R",RehearsalKey::Reload},{"Q",RehearsalKey::Quit}})
         check(parseRehearsalInput({pair.first})==pair.second,"named key");
     ParkingRehearsal single(initial);check(single.stage()==1,"direct stage2 without stage1");
+    check(!single.recordingEnabled(),"startup waits without recording frames or samples");
     check(!single.update(10000,RehearsalKey::None) && !single.finished(),"wait has no duration finish/write");
     start(single,10001);check(single.trial()==1,"first trial number");
     single.update(20000,RehearsalKey::None);check(!single.finished(),"long running trial never times out");
@@ -300,7 +318,7 @@ int main() {
     const auto templateTuning=ParkingTuning::load("deploy/config/parking_tuning.ini");
     check(templateTuning.stages[1].correction.holdSeconds>0 && templateTuning.stages[3].correction.holdSeconds>0,"delivered template explicitly enables both corrections");
     std::ostringstream actualSummary;writeTuningSummary(actualSummary,templateTuning,"/actual/config/parking_tuning.ini");
-    check(actualSummary.str().find("VERSION 2026-10-08.1")!=std::string::npos && actualSummary.str().find("TUNING_FILE /actual/config/parking_tuning.ini")!=std::string::npos,"startup identifies the actual version and config path");
+    check(actualSummary.str().find(std::string("VERSION ")+rehearsalVersion)!=std::string::npos && actualSummary.str().find("TUNING_FILE /actual/config/parking_tuning.ini")!=std::string::npos,"startup identifies the actual version and config path");
     check(actualSummary.str().find("右修正=启用 5/1s")!=std::string::npos && actualSummary.str().find("左修正=启用 -5/1s")!=std::string::npos,"startup identifies enabled directions and durations independently");
     std::ostringstream legacySummary;writeTuningSummary(legacySummary,initial,"legacy.ini");
     check(legacySummary.str().find("右修正=关闭")!=std::string::npos && legacySummary.str().find("左修正=关闭")!=std::string::npos,"legacy config clearly reports both corrections disabled");

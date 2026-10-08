@@ -33,9 +33,13 @@ try {
     if($LASTEXITCODE -ne 0) {throw 'Capture-data tests compilation failed'}
     & $Compiler @prefix '-std=c++17' '-Wall' '-Wextra' '-Wpedantic' '-O0' '-g' '-Isrc' 'tests/parking_rehearsal_tests.cpp' '-o' 'build/parking_rehearsal_tests.exe'
     if($LASTEXITCODE -ne 0) {throw 'Parking rehearsal tests compilation failed'}
+    & $Compiler @prefix '-std=c++17' '-Wall' '-Wextra' '-Wpedantic' '-O0' '-g' '-Isrc' 'src/config.cpp' 'src/hardware.cpp' 'tests/rehearsal_speed_tests.cpp' '-o' 'build/rehearsal_speed_tests.exe'
+    if($LASTEXITCODE -ne 0) {throw 'Rehearsal speed tests compilation failed'}
     & $Compiler @prefix '-std=c++17' '-Wall' '-Wextra' '-Wpedantic' '-O0' '-g' '-Isrc' 'src/config.cpp' 'src/hardware.cpp' 'tests/rehearsal_servo_tests.cpp' '-o' 'build/rehearsal_servo_tests.exe'
     if($LASTEXITCODE -ne 0) {throw 'Timed servo tests compilation failed'}
     if(!$SkipTests) {
+        & './build/rehearsal_speed_tests.exe'
+        if($LASTEXITCODE -ne 0) {throw 'Rehearsal speed tests failed'}
         & './build/rehearsal_servo_tests.exe'
         if($LASTEXITCODE -ne 0) {throw 'Timed servo tests failed'}
         & './build/parking_rehearsal_tests.exe'

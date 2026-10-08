@@ -2,7 +2,7 @@
 #include "capture_data.hpp"
 #include <optional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-08.1";
+constexpr const char* rehearsalVersion="2026-10-08.2";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct BendCorrection {double command=0,holdSeconds=0;};
@@ -23,8 +23,13 @@ inline const char* rehearsalSegmentTitle(int stageIndex,unsigned segment) {
 }
 struct ParkingTuning {
     bool single=true;int stage=2;std::array<StageTuning,6> stages{};std::string source;
+    // Zero means uncalibrated: report counts/s without inventing cm/s.
+    double speedLeftCmPerCount=0,speedRightCmPerCount=0;
     void validate(double limit=15) const {
         if(stage<1 || stage>6) throw std::runtime_error("stage must be 1..6");
+        for(double scale:{speedLeftCmPerCount,speedRightCmPerCount})
+            if(!std::isfinite(scale) || scale<0 || scale>10)
+                throw std::runtime_error("speed_*_cm_per_count must be 0..10 (0=uncalibrated)");
         for(const auto& item:stages)
             if(!std::isfinite(item.command) || std::abs(item.command)>std::min(15.,limit) ||
                !std::isfinite(item.settleSeconds) || item.settleSeconds<.5 || item.settleSeconds>5 ||
@@ -80,7 +85,9 @@ struct ParkingTuning {
                     const auto correction=index==1 ? "right_correction" : "left_correction";
                     if(value!=primary && value!=correction) throw std::runtime_error(key+" must be "+primary+" or "+correction);
                     result.stages[size_t(index)].correctionOnly=value==correction;
-                } else throw std::runtime_error("Unknown session key: "+key);
+                } else if(key=="speed_left_cm_per_count") result.speedLeftCmPerCount=finiteNumber(value);
+                else if(key=="speed_right_cm_per_count") result.speedRightCmPerCount=finiteNumber(value);
+                else throw std::runtime_error("Unknown session key: "+key);
             } else {
                 const int index=section[6]-'1';auto& item=result.stages[size_t(index)];
                 if(key=="steer_command") item.command=finiteNumber(value);
@@ -158,7 +165,7 @@ inline RehearsalKey parseRehearsalInput(const std::vector<std::string>& lines) {
 }
 class ParkingRehearsal {
 public:
-    enum class State {AwaitApply,WritePending,Settling,AwaitStart,Running};
+    enum class State {AwaitApply,WritePending,Settling,Running};
     explicit ParkingRehearsal(ParkingTuning tuning):tuning_(std::move(tuning)),stage_(tuning_.stage-1),nextStage_(stage_) {
         tuning_.validate();segment_=currentTuning().correctionOnly ? 1u : 0u;
     }
@@ -169,29 +176,26 @@ public:
         if(key==RehearsalKey::Quit) {stop("USER_QUIT");return {};}
         if(key==RehearsalKey::Pause) {
             paused_=true;
-            if(!correctionSequenceActive()) {state_=State::AwaitApply;nextStage_=stage_;}
             return {};
         }
         if(pendingCorrection_) {
             if(key==RehearsalKey::Continue) paused_=false;
             pendingCorrection_=false;automaticCorrectionWrite_=true;state_=State::WritePending;return command();
         }
-        if(paused_) {
-            if(key==RehearsalKey::Continue) paused_=false;
-            return {};
-        }
+        if(key==RehearsalKey::Continue) paused_=false;
         if(state_==State::Settling) {
-            if(now-writeTime_>=tuning_.stages[size_t(stage_)].settleSeconds) state_=State::AwaitStart;
-            return {}; // Discard even Enter at the settling boundary.
+            if(now-writeTime_>=tuning_.stages[size_t(stage_)].settleSeconds) state_=State::Running;
+            return {}; // One Enter already authorized this trial; settling never needs another.
         }
+        if(paused_) return {};
         if(key!=RehearsalKey::Enter) return {};
         if(state_==State::AwaitApply) {
             stage_=nextStage_;segment_=currentTuning().correctionOnly ? 1u : 0u;
             correctionComplete_=false;automaticSavedTrial_=automaticCorrectionWrite_=false;
+            recordingStarted_=true;++trials_[size_t(stage_)];
             state_=State::WritePending;return command();
         }
-        if(state_==State::AwaitStart) {state_=State::Running;++trials_[size_t(stage_)];}
-        else if(state_==State::Running) {
+        if(state_==State::Running) {
             if(correctionSequenceActive()) return {}; // Timed pair is one authorized maneuver; Q can abort.
             state_=State::AwaitApply;
             nextStage_=tuning_.single ? stage_ : std::min(stage_+1,5);
@@ -223,6 +227,7 @@ public:
             pendingCorrection_=false;stop(stage_==1 ? "RIGHT_CORRECTION_DISABLED" : "LEFT_CORRECTION_DISABLED");return {};
         }
         stage_=nextStage_=target;++trials_[size_t(stage_)];automaticSavedTrial_=true;
+        recordingStarted_=true;
         automaticCorrectionWrite_=pendingCorrection_=correctionComplete_=false;
         segment_=(currentTuning().correctionOnly || keepCorrection) ? 1u : 0u;
         state_=State::WritePending;return command();
@@ -247,6 +252,7 @@ public:
     void stop(const std::string& reason) {if(!finished()) outcome_=reason;}
     bool finished() const {return !outcome_.empty();}
     bool paused() const {return paused_;}
+    bool recordingEnabled() const {return recordingStarted_ && !paused_ && !finished();}
     int stage() const {return stage_;}
     int nextStage() const {return nextStage_;}
     unsigned trial() const {return trials_[size_t(stage_)];}
@@ -262,7 +268,6 @@ public:
             case State::AwaitApply:return "WAIT_SERVO_PERMISSION";
             case State::WritePending:return "SERVO_WRITE_PENDING";
             case State::Settling:return "WAIT_SERVO_SETTLE";
-            case State::AwaitStart:return "WAIT_PUSH_PERMISSION";
             case State::Running:return "MANUAL_TRIAL";
         }
         return "INVALID";
@@ -272,7 +277,7 @@ private:
     unsigned segment_=0;
     int stage_,nextStage_;std::array<unsigned,6> trials_{};unsigned revision_=1;
     State state_=State::AwaitApply;double lastTime_=-1,writeTime_=0;
-    bool paused_=false;std::string outcome_;
+    bool paused_=false,recordingStarted_=false;std::string outcome_;
 };
 class SavedTuningWatcher {
 public:
@@ -284,7 +289,8 @@ public:
         if(source==handled_ || now-stableSince_<.3) return {};
         handled_=source; // A rejected save is reported once; the next save can recover.
         auto candidate=ParkingTuning::parse(source);candidate.validate(limit_);
-        bool same=candidate.single==accepted_.single && candidate.stage==accepted_.stage;
+        bool same=candidate.single==accepted_.single && candidate.stage==accepted_.stage &&
+            candidate.speedLeftCmPerCount==accepted_.speedLeftCmPerCount && candidate.speedRightCmPerCount==accepted_.speedRightCmPerCount;
         for(size_t i=0;i<6;++i) same=same && candidate.stages[i].command==accepted_.stages[i].command &&
             candidate.stages[i].holdSeconds==accepted_.stages[i].holdSeconds && candidate.stages[i].settleSeconds==accepted_.stages[i].settleSeconds &&
             candidate.stages[i].correctionOnly==accepted_.stages[i].correctionOnly &&
