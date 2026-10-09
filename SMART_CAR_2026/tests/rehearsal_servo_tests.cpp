@@ -107,7 +107,7 @@ int main() {
         check(events.front().stage==stageIndex && events.front().segment==1 && events.front().error.empty(),"correction deadline has its own stage/segment tags");
         trial.holdCompleted(events.front().stage,events.front().trial,events.front().segment);
         check(trial.finished() && servo.written()==0 && pairIo.size()==4,"real timer and model complete both bends without motor access");
-        check(pairIo.duties==std::vector<uint16_t>{primaryDuty,4470,correctionDuty,4470},"actual duty writes follow primary/zero/correction/zero order");
+        check(pairIo.duties==std::vector<uint16_t>{uint16_t(primaryDuty),4470,uint16_t(correctionDuty),4470},"actual duty writes follow primary/zero/correction/zero order");
     }
     for(int stageIndex:{1,3}) {
         const double primary=stageIndex==1 ? -10. : 12.;

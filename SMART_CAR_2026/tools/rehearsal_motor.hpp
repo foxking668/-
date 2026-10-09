@@ -14,17 +14,18 @@ struct MotorEvent {
     std::array<int,2> writtenRaw{{-1,-1}},gpio{{-1,-1}};
     std::array<uint32_t,2> dutyMax{{0,0}},frequency{{0,0}};
     bool factoryReadback=false;
+    bool sysfs=false;
 };
 inline std::string motorEventDetail(const MotorEvent& event) {
     std::ostringstream out;
-    out<<"units=raw_pwm requested_left="<<event.left<<" requested_right="<<event.right;
+    out<<"units="<<(event.sysfs ? "duty_ns" : "raw_pwm")<<" requested_left="<<event.left<<" requested_right="<<event.right;
     for(size_t i=0;i<2;++i) {
         const auto* side=i==0 ? "left" : "right";
         out<<' '<<side<<"_written_raw="<<event.writtenRaw[i]<<' '<<side<<"_gpio="<<event.gpio[i]
             <<' '<<side<<"_duty_max="<<event.dutyMax[i]<<' '<<side<<"_frequency_hz="<<event.frequency[i];
     }
     out<<" write_result="<<(event.error.empty() ? "completed" : "failed")
-        <<" verification="<<(event.factoryReadback ? "factory_status_zero_readback" : "byte_count")
+        <<" verification="<<(event.sysfs ? "sysfs_text_readback" : event.factoryReadback ? "factory_status_zero_readback" : "byte_count")
         <<" motor_zero_ns="<<event.motorZeroNs<<" error="<<event.error;
     return out.str(); // Successful software write only; -1 means unknown, not a measured waveform.
 }
@@ -36,6 +37,7 @@ public:
         :io_(io),hardware_(hardware),params_(params) {
         hardware_.validate();params_.validate();
         try {
+            io_.setMotorEnable(false);
             zeroLocked();
             info_[0]=readPwmInfo(io_,hardware_.motor_left_pwm);
             info_[1]=readPwmInfo(io_,hardware_.motor_right_pwm);
@@ -60,9 +62,11 @@ public:
                 std::to_string(info_[0].duty_max)+" right="+std::to_string(right)+"/"+std::to_string(info_[1].duty_max));
         context_={stage,revision,trial,rehearsalMonotonicNs(),0,left,right,"MOTOR_START",""};
         try {
+            io_.setMotorEnable(false);
             // A stationary wheel stays PWM-zero without changing its direction GPIO.
             if(left!=0) writeRawLocked(0,left);
             if(right!=0) writeRawLocked(1,right);
+            io_.setMotorEnable(true); // Both PWM/direction writes completed before releasing nSLEEP.
         } catch(const std::exception& error) {
             fault_=error.what();try {zeroLocked();}catch(const std::exception& zero) {fault_+="; "+std::string(zero.what());}
             auto failed=context_;snapshot(failed);failed.event="MOTOR_START_FAILED";failed.error=fault_;failed.endNs=rehearsalMonotonicNs();events_.push_back(failed);
@@ -111,6 +115,7 @@ private:
             event.dutyMax[i]=info_[i].duty_max;event.frequency[i]=info_[i].freq;
         }
         event.factoryReadback=hardware_.factory_write_readback;
+        event.sysfs=hardware_.motor_backend=="sysfs";
     }
     void writeRawLocked(size_t index,double command) {
         const auto& pwm=index==0 ? hardware_.motor_left_pwm : hardware_.motor_right_pwm;
@@ -132,6 +137,7 @@ private:
             try {io_.writePwmDuty(*paths[i],0);writtenRaw_[i]=0;}
             catch(const std::exception& failure) {error+=*paths[i]+": "+failure.what()+"; ";}
         }
+        try {io_.setMotorEnable(false);}catch(const std::exception& failure) {error+="motor enable: "+std::string(failure.what())+"; ";}
         if(!error.empty()) throw std::runtime_error("Both motor zeros attempted: "+error);
     }
     void stopLocked(const std::string& reason) {

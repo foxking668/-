@@ -24,7 +24,7 @@ public:
     ~RehearsalServo() noexcept {try {close();}catch(const std::exception&) {}}
     RehearsalServo(const RehearsalServo&)=delete;
     RehearsalServo& operator=(const RehearsalServo&)=delete;
-    uint16_t set(double command) {
+    uint32_t set(double command) {
         std::lock_guard<std::mutex> held(mutex_);
         if(closed_) throw std::runtime_error("Timed servo closed");
         deadline_.reset();++generation_;wake_.notify_all();
@@ -32,7 +32,7 @@ public:
     }
     // Feedback within an authorized motor trial. Unlike set(), this cannot cancel
     // or extend a hold deadline. The caller serializes this with the motor stop.
-    uint16_t adjust(double command) {
+    uint32_t adjust(double command) {
         std::lock_guard<std::mutex> held(mutex_);
         if(closed_ || !written_ || !feedbackAllowed_) throw std::runtime_error("No authorized servo trial for feedback");
         if(deadline_ && std::chrono::steady_clock::now()>=*deadline_)

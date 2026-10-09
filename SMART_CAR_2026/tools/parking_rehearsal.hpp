@@ -4,7 +4,7 @@
 #include "rehearsal_motor_units.hpp"
 #include <optional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-08.5";
+constexpr const char* rehearsalVersion="2026-10-09.1";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct BendCorrection {double command=0,holdSeconds=0;};
@@ -168,11 +168,11 @@ struct ParkingTuning {
     }
     static ParkingTuning load(const std::string& path) {return parse(readSource(path));}
 };
-inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path) {
+inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory") {
     out<<"VERSION "<<rehearsalVersion<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
     out<<"阶段1巡线="<<(tuning.stages[0].line.enabled ? "启用（电机时间为0时仅观察）" : "关闭")<<"；不含交点分支选择。\n";
-    out<<"电机单位=原始PWM；填2000就写2000，无2000人为上限；启动车辆前核对各电机duty_max。\n";
+    out<<(backend=="sysfs" ? "电机单位=duty_ns；3000=6%，50000=100%；无2000/12000人为上限。\n" : "电机单位=原始PWM；填2000就写2000，无2000人为上限；启动车辆前核对各电机duty_max。\n");
     for(size_t i=0;i<tuning.stages.size();++i) {
         const auto& item=tuning.stages[i];
         out<<"阶段"<<i+1<<" 电机左="<<item.motorLeft<<" 右="<<item.motorRight<<" 时间="<<item.motorSeconds<<"s"

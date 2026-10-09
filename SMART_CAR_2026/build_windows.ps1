@@ -43,7 +43,11 @@ try {
     if($LASTEXITCODE -ne 0) {throw 'Timed servo tests compilation failed'}
     & $Compiler @prefix '-std=c++17' '-Wall' '-Wextra' '-Wpedantic' '-O0' '-g' '-Isrc' 'src/config.cpp' 'src/hardware.cpp' 'tests/rehearsal_motor_tests.cpp' '-o' 'build/rehearsal_motor_tests.exe'
     if($LASTEXITCODE -ne 0) {throw 'Motor/timing tests compilation failed'}
+    & $Compiler @prefix '-std=c++17' '-Wall' '-Wextra' '-Wpedantic' '-O0' '-g' '-Isrc' 'src/config.cpp' 'src/hardware.cpp' 'tests/sysfs_board_tests.cpp' '-o' 'build/sysfs_board_tests.exe'
+    if($LASTEXITCODE -ne 0) {throw 'New-car sysfs tests compilation failed'}
     if(!$SkipTests) {
+        & './build/sysfs_board_tests.exe'
+        if($LASTEXITCODE -ne 0) {throw 'New-car sysfs tests failed'}
         & './build/rehearsal_line_tests.exe'
         if($LASTEXITCODE -ne 0) {throw 'Line-follow tests failed'}
         & './build/rehearsal_motor_tests.exe'

@@ -80,6 +80,14 @@ void HardwareConfig::validate() const {
     BOARD_NUMERIC_SETTINGS(FINITE)
 #undef FINITE
     require(motor_command_range>0 && motor_command_range<=65535,"Invalid motor_command_range");
+    require(motor_backend=="factory" || motor_backend=="sysfs","motor_backend must be factory or sysfs");
+    if(motor_backend=="sysfs") {
+        require(!factory_write_readback,"sysfs uses decimal text readback, not factory binary ABI");
+        require(motor_period_ns>=1 && motor_period_ns<=65535 && std::floor(motor_period_ns)==motor_period_ns,"Invalid sysfs motor period");
+        require(servo_period_ns>=2500000 && servo_period_ns<=20000000 && std::floor(servo_period_ns)==servo_period_ns,"Invalid sysfs servo period");
+        require(motor_enable_gpio.rfind("/sys/class/gpio/gpio",0)==0,"Missing sysfs motor enable GPIO");
+        require(motor_enable_gpio!=motor_left_dir && motor_enable_gpio!=motor_right_dir && motor_enable_gpio!=encoder_left && motor_enable_gpio!=encoder_right,"Motor enable aliases another GPIO");
+    }
     for(double b : {factory_write_readback,motor_left_forward_level,motor_right_forward_level,board_inputs_enabled,input_active_level,beep_enabled,voice_enabled})
         require(b==0 || b==1,"Hardware level/enable must be 0 or 1");
     for(double s : {encoder_left_sign,encoder_right_sign}) require(s==1 || s==-1,"Hardware encoder sign must be -1 or +1");
@@ -247,6 +255,7 @@ uint16_t servoDuty(double angle,const HardwareConfig& config,const PwmInfo& info
 FactoryBoard::FactoryBoard(DeviceIo& io,const HardwareConfig& config,const Params& params)
     : io_(io),config_(config),params_(params) {
     config_.validate();params_.validate();
+    require(config_.motor_backend=="factory","Sysfs new-car profile requires parking_rehearsal, not FactoryBoard");
     try {
         // Zero BOTH paths independently before reading metadata or initializing sensors.
         leftReady_=true;rightReady_=true;

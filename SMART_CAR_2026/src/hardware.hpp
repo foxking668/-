@@ -9,6 +9,8 @@ namespace car2026 {
 #define BOARD_NUMERIC_SETTINGS(X) \
  X(factory_write_readback,0) \
  X(motor_command_range,50000) \
+ X(motor_period_ns,50000) \
+ X(servo_period_ns,3040000) \
  X(motor_left_forward_level,0) \
  X(motor_right_forward_level,0) \
  X(encoder_left_sign,-1) \
@@ -29,6 +31,8 @@ namespace car2026 {
  X(imu_max_bias_deg_s,20) \
  X(imu_max_stddev_deg_s,0.8)
 #define BOARD_STRING_SETTINGS(X) \
+ X(motor_backend,"factory") \
+ X(motor_enable_gpio,"") \
  X(motor_left_pwm,"/dev/zf_device_pwm_motor_1") \
  X(motor_right_pwm,"/dev/zf_device_pwm_motor_2") \
  X(motor_left_dir,"/dev/zf_driver_gpio_motor_1") \
@@ -73,6 +77,9 @@ uint8_t decodeGpioRead(uint8_t rawLevel,std::ptrdiff_t returnedBytes,const std::
 class DeviceIo {
 public:
     virtual ~DeviceIo()=default;
+    virtual void setMotorEnable(bool) {} // Factory board has no separate software enable.
+    virtual bool nativeServo() const {return false;}
+    virtual uint32_t writeServoCommand(double) {throw std::runtime_error("Native servo unsupported");}
     virtual void readBinary(const std::string& path,void* data,size_t bytes)=0;
     virtual void writeBinary(const std::string& path,const void* data,size_t bytes)=0;
     // Typed outputs permit board-specific status handling without weakening raw I/O.
