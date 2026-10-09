@@ -1,0 +1,2 @@
+# Linux launchers must remain executable shell text after Windows Git checkout.
+*.sh text eol=lf

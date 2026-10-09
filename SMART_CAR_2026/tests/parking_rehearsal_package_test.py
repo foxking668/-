@@ -32,6 +32,9 @@ class PackageTests(unittest.TestCase):
         with zipfile.ZipFile(output) as archive:
             self.assertEqual(len(archive.namelist()), 11)
             self.assertIsNone(archive.testzip())
+            for name in ('run_parking_rehearsal.sh', 'run_new_car_parking.sh'):
+                self.assertTrue(archive.read(name).startswith(b'#!/bin/sh\n'))
+                self.assertNotIn(b'\r', archive.read(name))
             self.assertEqual(archive.read('parking_tuning.example.ini'), (ROOT / 'deploy/config/parking_tuning.ini').read_bytes())
             for line in manifest.splitlines():
                 checksum, name = line.split('  ', 1)
