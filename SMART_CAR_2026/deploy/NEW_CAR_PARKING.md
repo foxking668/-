@@ -6,6 +6,23 @@
 
 ## 首次编译和启动
 
+新车板上运行目录固定使用 **/home/root/smartcar/gy/**。
+把部署包上传到该目录，解压后程序和启动脚本直接放在gy下，不再套一层deploy。
+配置放在gy/config，录像和阶段记录放在gy/captures。启动脚本按自身所在目录定位，
+不会读取旧的/home/root/gy/deploy配置。
+
+```text
+/home/root/smartcar/gy/
+  parking_rehearsal_20261007
+  run_new_car_parking.sh
+  manual_capture.new_car.ini
+  config/
+    parking_tuning.new_car.ini
+    new_car_hardware.ini
+    new_car_vehicle.ini
+  captures/parking_tuning/
+```
+
 原来的Linux编译虚拟机，在共享目录执行：
 
 ```sh
@@ -18,12 +35,14 @@ sh deploy/build_new_car_parking.sh
 复制可执行文件，并生成同一入库程序的部署ZIP。当前Windows检查不等于完成此龙芯构建。
 
 上传新程序、启动脚本、`manual_capture.new_car.ini`、`parking_tuning.new_car.example.ini`、
-`config/new_car_hardware.ini`、`config/new_car_vehicle.ini`到 `/home/root/gy/deploy`。
+`config/new_car_hardware.ini`、`config/new_car_vehicle.ini`到 `/home/root/smartcar/gy`。
 若使用部署ZIP，解压后执行 `sha256sum -c PARKING_TUNING_SHA256SUMS`。
 无需上传额外电机测试程序。已有 `config/parking_tuning.new_car.ini` 不会被启动脚本覆盖。
 
 ```sh
-cd /home/root/gy/deploy
+cd /home/root/smartcar/gy
+unzip -o parking_rehearsal_20261009_1_verified.zip
+sha256sum -c PARKING_TUNING_SHA256SUMS
 chmod +x parking_rehearsal_20261007
 sh ./run_new_car_parking.sh
 ```
@@ -36,6 +55,9 @@ sh ./run_new_car_parking.sh
 不因旧车分辨率限制卡住。实际尺寸存入session.txt；运行中尺寸改变则停止。
 
 ## 只改这些参数
+
+板上实际调参文件：`/home/root/smartcar/gy/config/parking_tuning.new_car.ini`。
+首次启动自动创建；后续修改和上传该文件，保留原区段，不覆盖成不完整片段。
 
 ```ini
 [session]
