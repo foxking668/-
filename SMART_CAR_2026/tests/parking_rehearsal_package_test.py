@@ -139,4 +139,27 @@ class PackageTests(unittest.TestCase):
         self.assertIn(b'Old executable', result.stderr)
         self.assertFalse((self.directory / 'config').exists())
 
+    def test_cross_build_packages_without_running_target_programs(self):
+        shell = r'C:\Program Files\Git\bin\bash.exe' if sys.platform == 'win32' else shutil.which('bash')
+        if not shell or not Path(shell).exists(): self.skipTest('Bash unavailable')
+        deploy = self.directory / 'deploy'; deploy.mkdir()
+        (deploy / 'build_new_car_parking.sh').write_bytes((ROOT / 'deploy/build_new_car_parking.sh').read_bytes())
+        output = self.directory / 'out'; output.mkdir()
+        program = output / 'parking_rehearsal'
+        program.write_bytes(b'fake-cross-compiled-program-never-executed')
+        tools = self.directory / 'tools'; tools.mkdir()
+        bins = self.directory / 'bin'; bins.mkdir()
+        (bins / 'cmake').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> build_calls\ncase "$*" in *reference_cc_lane_tests*|*reference_cc_steering_tests*|*-E*) exit 87;; esac\n', newline='\n')
+        (bins / 'ctest').write_text('#!/bin/sh\ntouch attempted_target_execution\nexit 88\n', newline='\n')
+        (bins / 'python3').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> package_calls\n', newline='\n')
+        result = subprocess.run([shell, '-c', 'chmod +x bin/*; export PATH="$(pwd)/bin:$PATH"; export PARKING_BUILD_ROOT="$(pwd)/out"; sh deploy/build_new_car_parking.sh'], cwd=self.directory, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+        self.assertIn(b'READY 2026-10-10.4', result.stdout)
+        calls = (self.directory / 'build_calls').read_text().splitlines()
+        self.assertEqual(len(calls), 2)
+        self.assertIn('--target parking_rehearsal --parallel 2', calls[1])
+        self.assertIn('--program', (self.directory / 'package_calls').read_text())
+        self.assertFalse((self.directory / 'attempted_target_execution').exists())
+        self.assertEqual((deploy / 'parking_rehearsal_20261007').read_bytes(), program.read_bytes())
+
 if __name__ == '__main__': unittest.main()
