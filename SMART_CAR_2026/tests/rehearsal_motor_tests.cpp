@@ -34,9 +34,12 @@ public:
     bool has(const std::string& path,int value) {std::lock_guard<std::mutex> held(mutex);for(const auto& write:writes) if(write.first==path && write.second==value) return true;return false;}
 };
 std::deque<MotorEvent> waitStop(RehearsalMotor& motor) {
+    std::deque<MotorEvent> collected;
     auto until=std::chrono::steady_clock::now()+std::chrono::seconds(2);
     while(std::chrono::steady_clock::now()<until) {
-        auto events=motor.takeEvents();for(const auto& event:events) if(event.event!="MOTOR_START") return events;
+        bool stopped=false;
+        for(const auto& event:motor.takeEvents()) {collected.push_back(event);if(event.event.rfind("MOTOR_STOP_",0)==0) stopped=true;}
+        if(stopped) return collected;
         std::this_thread::sleep_for(std::chrono::milliseconds(3));
     }
     throw std::runtime_error("No motor stop event");
@@ -45,6 +48,39 @@ std::deque<MotorEvent> waitStop(RehearsalMotor& motor) {
 int main() {
  try {
     HardwareConfig hardware;Params params;
+    {
+        MotorOnlyIo io;RehearsalMotor motor(io,hardware,params);int updates=0;
+        motor.setSpeedController([&](double left,double right) {
+            ++updates;if(left!=1.25 || right!=2.5) throw std::runtime_error("Feedback mismatch");
+            return std::array<int,2>{3000,4000};
+        });
+        rejects([&]{motor.start(0,0,.16,1,1,1,true);},"speed start requires fresh encoder pair");
+        motor.submitSpeedFeedback(1.25,2.5);
+        motor.start(0,0,.16,1,1,1,true);const auto start=motor.takeEvents().front();
+        const auto events=waitStop(motor);int samples=0;
+        for(const auto& event:events) if(event.event=="MOTOR_PID_UPDATE") {
+            ++samples;check(event.beginNs>=start.endNs+40000000,"PID does not update before control interval");
+            check(event.writtenRaw[0]==3000 && event.writtenRaw[1]==4000 && event.measuredRps[0]==1.25,"PID records actual per-wheel PWM and native feedback");
+        }
+        check(updates>=2 && samples==updates,"worker updates without camera-thread motor writes");
+        check(events.back().event=="MOTOR_STOP_DURATION" && !motor.active(),"feedback cannot extend original deadline");
+        check(io.writes.back()==std::make_pair(hardware.motor_right_pwm,0),"duration expiry ends with both wheels zero");
+        const int endedUpdates=updates;std::this_thread::sleep_for(std::chrono::milliseconds(70));
+        check(updates==endedUpdates && motor.outputs()==std::array<int,2>{0,0},"late feedback cannot re-arm stopped motors");
+        motor.submitSpeedFeedback(1.25,2.5);
+        motor.start(0,0,1,1,1,2,true);motor.stop("MOTOR_STOP_PAUSE");const int pausedUpdates=updates;
+        motor.submitSpeedFeedback(5,5);std::this_thread::sleep_for(std::chrono::milliseconds(70));
+        check(updates==pausedUpdates && !motor.active(),"paused motor stays stopped after encoder feedback");
+    }
+    {
+        MotorOnlyIo io;RehearsalMotor motor(io,hardware,params);
+        motor.setSpeedController([](double,double){return std::array<int,2>{3000,4000};});
+        motor.submitSpeedFeedback(0,0);io.failRightNonzero=true;
+        motor.start(0,0,1,1,1,1,true);motor.takeEvents();const auto events=waitStop(motor);
+        check(events.back().event=="MOTOR_STOP_PID_FAILED" && !events.back().error.empty() && !motor.active(),"PID write failure independently stops the trial");
+        check(motor.outputs()==std::array<int,2>{0,0},"both outputs cleared after partial feedback write");
+        rejects([&]{motor.start(0,0,1,1,1,2,true);},"failed controller cannot start another powered trial");
+    }
     {
         MotorOnlyIo io;RehearsalMotor motor(io,hardware,params);
         check(io.writes.size()==2,"initialization only zeros both motors, no direction output or encoder reads");

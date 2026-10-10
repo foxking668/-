@@ -30,7 +30,7 @@ int64_t monotonicNs() {return rehearsalMonotonicNs();}
 struct Options {
     std::string capture="manual_capture.ini",hardware="config/calibration_hardware.ini",vehicle="config/calibration_vehicle.ini",
         tuning="config/parking_tuning.ini",output="captures/parking_tuning";
-    bool help=false,check=false,partial=false;
+    bool help=false,check=false,partial=false,ccSpeed=false;
     static Options parse(int argc,char** argv) {
         Options result;std::set<std::string> seen;
         for(int i=1;i<argc;++i) {
@@ -39,6 +39,7 @@ struct Options {
             if(key=="--help") result.help=true;
             else if(key=="--check-config") result.check=true;
             else if(key=="--allow-partial") result.partial=true;
+            else if(key=="--cc-motor-control") result.ccSpeed=true;
             else {
                 std::string* target=nullptr;
                 if(key=="--config") target=&result.capture;
@@ -213,7 +214,7 @@ private:
     std::vector<std::pair<size_t,std::string>> deferredRows_;
     std::string clip_;unsigned clipNumber_=0,videoFrames_=0;
 };
-void showStatus(const ParkingRehearsal& model,std::optional<double> written) {
+void showStatus(const ParkingRehearsal& model,std::optional<double> written,bool ccSpeed=false) {
     std::cout<<"【当前阶段 "<<model.stage()+1<<" "<<stageNames[model.stage()]<<"】 "<<model.stateName()
         <<" | 步骤="<<model.segmentTitle()
         <<" | 文件命令="<<model.command()<<" | 最近写入=";
@@ -228,7 +229,7 @@ void showStatus(const ParkingRehearsal& model,std::optional<double> written) {
     }
     std::cout<<std::endl;
     const auto& settings=model.currentTuning();
-    std::cout<<"电机原始PWM 左="<<settings.motorLeft<<" 右="<<settings.motorRight<<" | 运行上限="<<settings.motorSeconds
+    std::cout<<(ccSpeed ? "电机兼容轮使能字段 左=" : "电机原始PWM 左=")<<settings.motorLeft<<" 右="<<settings.motorRight<<" | 运行上限="<<settings.motorSeconds
         <<"s | 方向="<<(model.stage()==0 ? "前进" : model.stage()==5 ? "停止" : "倒退")
         <<(settings.powered() ? " | 已配置电机试验" : " | 电机禁用")<<std::endl;
 }
@@ -287,6 +288,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     car2026::DeviceIo& motorIo=sysfs ? static_cast<car2026::DeviceIo&>(*sysfsMotorIo) : factoryMotorIo;
     std::unique_ptr<car2026::NewCarEncoders> nativeEncoders;
     std::unique_ptr<RehearsalServo> servo;
+    ReferenceMotorSpeed motorSpeed; // Outlives the motor worker which calls it.
     std::unique_ptr<RehearsalMotor> motor;
     cv::VideoCapture camera;
     if(sysfs) initializeReferenceHardware(nodes,*sysfsMotorIo,*sysfsServoIo,hardware,tuning,nativeEncoders);
@@ -304,7 +306,9 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     fs::copy_file(options.capture,directory/"capture_config.ini");
     fs::copy_file(options.hardware,directory/"hardware_config.ini");
     fs::copy_file(options.vehicle,directory/"vehicle_config.ini");
-    SavedTuningWatcher watcher(tuning,params.max_steer_deg);
+    SavedTuningWatcher watcher(tuning,params.max_steer_deg,[&](const ParkingTuning& candidate) {
+        if(options.ccSpeed) candidate.validateReferenceSpeed(hardware.motor_period_ns);
+    });
     unsigned savedRevision=1;double lastStatus=-1,lastFlush=0,lastFilePoll=-1;std::string lastState,lastFileError;
     std::array<Sample,8> latestSamples;bool hasSamples=false;
     std::string failure;std::deque<ServoHoldEvent> deferredEvents;
@@ -316,11 +320,12 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         if(!motor) return;
         for(const auto& event:motor->takeEvents()) {
             recording.motorEvent(event,origin);
+            if(event.event=="MOTOR_PID_UPDATE") continue; // Record at 50 ms; terminal summary stays at 1 Hz.
             std::cout<<event.event<<" "<<motorEventDetail(event)<<std::endl;
             if(event.event=="MOTOR_START") timing.motorStart(event.endNs);
             else if(event.motorZeroNs) timing.motorStop(event.motorZeroNs,event.event+(event.error.empty() ? "" : "_FAILED"));
             else timing.end(event.endNs,event.event+"_FAILED");
-            if(!event.error.empty()) throw std::runtime_error("MOTOR_ZERO_FAILED: "+event.error);
+            if(!event.error.empty()) throw std::runtime_error(event.event+": "+event.error);
             if(!final && event.event=="MOTOR_STOP_WATCHDOG") throw std::runtime_error("Motor stopped: camera/encoder heartbeat expired");
             if(!final && (event.event=="MOTOR_STOP_DURATION" || event.event=="MOTOR_STOP_STEER_COMPLETED" || event.event=="MOTOR_STOP_LINE_LOST")) {
                 stopWait=event;
@@ -393,6 +398,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                     candidate=watcher.observe(ParkingTuning::readSource(options.tuning),fileNow);
                     lastFileError.clear();
                 } catch(const std::exception& error) {
+                    candidate.reset();
                     if(lastFileError!=error.what()) std::cout<<"CONFIG_REJECTED "<<error.what()<<"；原参数及当前计时继续。\n";
                     lastFileError=error.what();
                 }
@@ -426,6 +432,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             if(request && model.currentTuning().powered() && !motor && !model.motorRestartRequired()) {
                 motor=std::make_unique<RehearsalMotor>(motorIo,hardware,params);
                 motor->setStopAction([&] {servo->set(0);});
+                if(options.ccSpeed) motor->setSpeedController([&](double left,double right) {return motorSpeed.update(left,right);});
             }
             cv::Mat frame;const auto frameStart=monotonicNs();
             if(!camera.read(frame) || frame.empty()) throw std::runtime_error("Camera read failed");
@@ -501,6 +508,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                 }
                 const bool validWheels=sysfs ? (wheels[0].valid && wheels[1].valid && std::isfinite(wheels[0].count) && std::isfinite(wheels[1].count)) : timing.add(wheels[0],wheels[1]);
                 if(sysfs) timing.gap(); // Pulse-period speeds are not count deltas or physical-stop proof.
+                if(options.ccSpeed && motor && validWheels) motor->submitSpeedFeedback(wheels[0].count,wheels[1].count);
                 if(motor && motor->active()) {
                     if(!validWheels || !wheels[0].valid || !wheels[1].valid) throw std::runtime_error("Invalid encoder feedback during motor motion");
                     motor->heartbeat();
@@ -516,7 +524,21 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                         if(!wheels[0].valid || !wheels[1].valid || double(monotonicNs()-frameStart)/1e9>params.frame_timeout_s)
                             throw std::runtime_error("Fresh camera and encoder pair required before motor start");
                         const auto& settings=model.currentTuning();const double direction=model.stage()==0 ? 1 : -1;
-                        motor->start(direction*settings.motorLeft,direction*settings.motorRight,settings.motorSeconds,model.stage(),model.revision(),model.trial());
+                        double left=direction*settings.motorLeft,right=direction*settings.motorRight;
+                        if(options.ccSpeed) {
+                            motorSpeed.reset(settings.speed,direction,settings.motorLeft>0,settings.motorRight>0);
+                            const auto output=motorSpeed.update(wheels[0].count,wheels[1].count);
+                            left=output[0];right=output[1];
+                        }
+                        motor->start(left,right,settings.motorSeconds,model.stage(),model.revision(),model.trial(),options.ccSpeed);
+                        if(options.ccSpeed) {
+                            const auto target=motorSpeed.targets();
+                            const auto pidStart=monotonicNs();
+                            recording.row(model,"MOTOR_PID_START",pidStart,pidStart,origin,written,
+                                "target_left_rps="+std::to_string(target[0])+" target_right_rps="+std::to_string(target[1])+
+                                " kp="+std::to_string(settings.speed.kp)+" ki="+std::to_string(settings.speed.ki)+" kd="+std::to_string(settings.speed.kd)+
+                                " pwm_limit_ns="+std::to_string(settings.speed.pwmLimit)+" period_ms=50");
+                        }
                         if(following) {
                             lineSession.started();
                             recording.row(model,"LINE_ACQUIRED",frameEnd,monotonicNs(),origin,written,"consecutive_real_detections_before_motor_start");
@@ -577,7 +599,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             }
             if(lastState!=model.stateName() || elapsed-lastStatus>=1) {
                 if(servo) written=servo->written();
-                showStatus(model,written);
+                showStatus(model,written,options.ccSpeed);
                 if(const auto measured=timing.elapsed(model.stage(),model.trial(),monotonicNs()))
                     std::cout<<"当前阶段实际持续时间="<<*measured<<"s（旁路记录，不改变动作）"<<std::endl;
                 if(following) std::cout<<"巡线="<<(lineSession.waiting() ? "WAIT_LINE" : motor && motor->active() ? "ACTIVE" : "OBSERVE/STOPPED")
@@ -586,6 +608,10 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                 if(servo) std::cout<<"当前步骤保持时间="<<model.holdSeconds()
                     <<"s | 定时回正剩余="<<servo->remaining()<<"s"<<std::endl;
                 if(sysfs && hasSamples) {
+                    if(options.ccSpeed && motor) {
+                        const auto target=motorSpeed.targets();const auto pwm=motor->outputs();
+                        std::cout<<"电机控制=CC_SPEED_PID | 目标左="<<target[0]<<" 右="<<target[1]<<" rps | 当前PWM左="<<pwm[0]<<" 右="<<pwm[1]<<" ns"<<std::endl;
+                    }
                     std::cout<<"编码器原生速度：";
                     for(size_t index=0;index<2;++index) {
                         std::cout<<(index==0 ? "左=" : " 右=");
@@ -659,6 +685,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         <<"\ncamera_actual_width="<<(nativeCameraSize ? nativeCameraSize->width : config.width)<<"\ncamera_actual_height="<<(nativeCameraSize ? nativeCameraSize->height : config.height)
         <<"\nencoder_stop_confirmed="<<stopConfirmed<<"\nimu_initialized=0\npartial="<<partial
         <<"\nmotor_backend="<<hardware.motor_backend<<"\nmotor_units="<<(sysfs ? "duty_ns" : "raw_pwm")<<"\nmotor_limit=per_device_duty_max\nnormalized_motor_scale_used=0"
+        <<"\nmotor_control="<<(options.ccSpeed ? "cc_incremental_speed_pid" : "fixed_raw_pwm")<<"\nmotor_pid_period_ms="<<(options.ccSpeed ? 50 : 0)
         <<"\nservo_zero_on_exit="<<(exitZeroAttempted ? (exitZeroSucceeded ? "software_write_completed":"failed") : "not_attempted")
         <<"\nmanual_parking_success=not_inferred\nvideo_timing=use_csv_monotonic_timestamps_not_nominal_fps\n"
         <<"recording_start=one_enter_or_valid_file_save\nstartup_sequence="<<(sysfs ? "second_invocation_after_preparation" : "single_invocation")
@@ -676,7 +703,7 @@ std::string startupFile(const fs::path& path) {
 }
 std::string startupIdentity(const Options& options,const ParkingTuning& tuning) {
     std::string identity=std::string(rehearsalVersion)+"\n"+std::to_string(tuning.stage)+"\n"+
-        std::to_string(tuning.single)+"\n"+std::to_string(tuning.stages[size_t(tuning.stage-1)].correctionOnly)+"\n";
+        std::to_string(tuning.single)+"\n"+std::to_string(tuning.stages[size_t(tuning.stage-1)].correctionOnly)+"\n"+std::to_string(options.ccSpeed)+"\n";
     for(const auto& path:{fs::path("/proc/sys/kernel/random/boot_id"),fs::path(options.hardware),fs::path(options.vehicle),fs::path(options.capture)}) {
         const auto text=startupFile(path);
         identity+=std::to_string(text.size())+":"+text;
@@ -692,9 +719,10 @@ int main(int argc,char** argv) {
             std::cout<<"parking_rehearsal version="<<rehearsalVersion<<"\n"
                 <<"--config file --hardware-config file --vehicle-config file --tuning-config file --output directory\n"
                 <<"--allow-partial --check-config (no hardware access)\n"
+                <<"--cc-motor-control: sysfs native encoder speed PID, reused cc source; 50ms; default targets 9 rps, gains 64/32/48, configurable PWM limit 12000 ns.\n"
                 <<"Enter: record/set servo, settle, then start configured motor/timers. P: pause recording and stop motors; C: resume recording only; Enter required to move again. Q: finish.\n"
                 <<"auto_reload=save; powered settings settle before motor start; paused motors require fresh Enter. motor_run_time_s=0 disables motors.\n"
-                <<"motor_units=factory:raw_pwm/sysfs:duty_ns; integer amplitudes write verbatim. No tuning cap; device duty_max enforced.\n"
+                <<"motor_units=factory:raw_pwm/sysfs:duty_ns; fixed mode writes integer amplitudes verbatim; cc mode uses motor_target_rps and speed PID. Device duty_max enforced.\n"
                 <<"sysfs_startup=two-pass: first initialize only, Ctrl+C to finish preparation; second invocation waits for Enter to execute/record. Applies to all six stages.\n"
                 <<"Saved timed trial ends after center; save_confirmation=single-key Y/N (no Enter, one prompt); restart=manual.\n"
                 <<"Stage 2: left bend then right correction; stage_2_step=right_correction selects correction-only tuning.\n"
@@ -705,6 +733,10 @@ int main(int argc,char** argv) {
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);
         const auto params=car2026::Params::load(options.vehicle);const auto tuning=ParkingTuning::load(options.tuning);
         tuning.validate(params.max_steer_deg);
+        if(options.ccSpeed) {
+            if(hardware.motor_backend!="sysfs") throw std::runtime_error("--cc-motor-control requires sysfs native rps encoders");
+            tuning.validateReferenceSpeed(hardware.motor_period_ns);
+        }
         if(hardware.motor_backend=="sysfs") {
             config.factoryEncoderStatusZero=false;
             for(size_t index=0;index<2;++index) {
@@ -715,7 +747,7 @@ int main(int argc,char** argv) {
             for(size_t index=0;index<2;++index) {config.sensors[index].format="text";config.sensors[index].unit="rps";}
         }
         fillEncoderPaths(config,hardware);
-        writeTuningSummary(std::cout,tuning,fs::absolute(options.tuning).lexically_normal().string(),hardware.motor_backend);
+        writeTuningSummary(std::cout,tuning,fs::absolute(options.tuning).lexically_normal().string(),hardware.motor_backend,options.ccSpeed);
         const auto missing=validateSensors(config,options.partial);
         for(const auto& name:missing) std::cout<<"UNCONFIGURED "<<name<<'\n';
         if(options.check) {std::cout<<"Config checked without hardware access\n";return missing.empty()?0:2;}

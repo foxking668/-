@@ -13,8 +13,10 @@ struct MotorEvent {
     int64_t motorZeroNs=0; // End of both motor zero writes, before steering return latency.
     std::array<int,2> writtenRaw{{-1,-1}},gpio{{-1,-1}};
     std::array<uint32_t,2> dutyMax{{0,0}},frequency{{0,0}};
+    std::array<int,2> pwmEnabled{{-1,-1}};int driverEnabled=-1;
     bool factoryReadback=false;
     bool sysfs=false;
+    std::array<double,2> measuredRps{{0,0}};
 };
 inline std::string motorEventDetail(const MotorEvent& event) {
     std::ostringstream out;
@@ -22,14 +24,16 @@ inline std::string motorEventDetail(const MotorEvent& event) {
     for(size_t i=0;i<2;++i) {
         const auto* side=i==0 ? "left" : "right";
         out<<' '<<side<<"_written_raw="<<event.writtenRaw[i]<<' '<<side<<"_gpio="<<event.gpio[i]
-            <<' '<<side<<"_duty_max="<<event.dutyMax[i]<<' '<<side<<"_frequency_hz="<<event.frequency[i];
+            <<' '<<side<<"_duty_max="<<event.dutyMax[i]<<' '<<side<<"_frequency_hz="<<event.frequency[i]
+            <<' '<<side<<"_pwm_enable="<<event.pwmEnabled[i];
     }
-    out<<" write_result="<<(event.error.empty() ? "completed" : "failed")
+    out<<" gpio73_enable="<<event.driverEnabled<<" write_result="<<(event.error.empty() ? "completed" : "failed")
         <<" verification="<<(event.sysfs ? "sysfs_text_readback" : event.factoryReadback ? "factory_status_zero_readback" : "byte_count")
-        <<" motor_zero_ns="<<event.motorZeroNs<<" error="<<event.error;
+        <<" motor_zero_ns="<<event.motorZeroNs<<" measured_left_rps="<<event.measuredRps[0]<<" measured_right_rps="<<event.measuredRps[1]<<" error="<<event.error;
     return out.str(); // Successful software write only; -1 means unknown, not a measured waveform.
 }
-// Only the authorized main thread starts motion. The worker only writes zero.
+// Only the authorized main thread starts motion. Within that trial the worker
+// updates the configured speed PID and enforces the original stop deadline.
 // No encoder, servo, beep or IMU initialization; capture owns all sensor reads.
 class RehearsalMotor {
 public:
@@ -49,13 +53,14 @@ public:
     ~RehearsalMotor() noexcept {try {close();}catch(...) {}}
     RehearsalMotor(const RehearsalMotor&)=delete;
     RehearsalMotor& operator=(const RehearsalMotor&)=delete;
-    void start(double left,double right,double seconds,int stage,unsigned revision,unsigned trial) {
+    void start(double left,double right,double seconds,int stage,unsigned revision,unsigned trial,bool speedControlled=false) {
         if(stage<0 || stage>4 || !std::isfinite(seconds) || seconds<=0 || seconds>120 ||
-           !validRehearsalRawPwm(std::abs(left)) || !validRehearsalRawPwm(std::abs(right)) || (left==0 && right==0) ||
-           (stage==0 ? (left<0 || right<0) : (left>0 || right>0)))
+           !validRehearsalRawPwm(std::abs(left)) || !validRehearsalRawPwm(std::abs(right)) ||
+           (!speedControlled && ((left==0 && right==0) || (stage==0 ? (left<0 || right<0) : (left>0 || right>0)))))
             throw std::runtime_error("Invalid powered stage request");
         std::lock_guard<std::mutex> held(mutex_);
         if(closed_ || active_ || !fault_.empty()) throw std::runtime_error("Motor unavailable or already active: "+fault_);
+        if(speedControlled && (!speedControl_ || !feedbackReady_)) throw std::runtime_error("Speed controller requires fresh encoder feedback before start");
         // Check BOTH devices before any nonzero output; never clip a saved tuning value.
         if(std::abs(left)>info_[0].duty_max || std::abs(right)>info_[1].duty_max)
             throw std::runtime_error("Raw PWM exceeds device duty_max: left="+std::to_string(left)+"/"+
@@ -74,10 +79,21 @@ public:
         }
         snapshot(context_);context_.endNs=rehearsalMonotonicNs();events_.push_back(context_);
         active_=true;deadline_=context_.endNs+int64_t(seconds*1e9);heartbeat_=context_.endNs;
+        speedActive_=speedControlled;nextPidNs_=context_.endNs+speedPeriodNs;
         wake_.notify_all();
     }
     void heartbeat() {std::lock_guard<std::mutex> held(mutex_);if(active_) heartbeat_=rehearsalMonotonicNs();wake_.notify_all();}
     bool active() const {std::lock_guard<std::mutex> held(mutex_);return active_;}
+    std::array<int,2> outputs() const {std::lock_guard<std::mutex> held(mutex_);return {writtenRaw_[0],writtenRaw_[1]};}
+    void setSpeedController(std::function<std::array<int,2>(double,double)> control) {
+        std::lock_guard<std::mutex> held(mutex_);
+        if(closed_ || active_) throw std::runtime_error("Configure speed controller before motion");
+        speedControl_=std::move(control);
+    }
+    void submitSpeedFeedback(double left,double right) {
+        if(!std::isfinite(left) || !std::isfinite(right)) throw std::runtime_error("Invalid speed feedback");
+        std::lock_guard<std::mutex> held(mutex_);feedback_={left,right};feedbackReady_=true;
+    }
     void setStopAction(std::function<void()> action) {
         std::lock_guard<std::mutex> held(mutex_);
         if(closed_ || active_) throw std::runtime_error("Stop action must be installed before motion");
@@ -109,6 +125,12 @@ public:
         if(!fault_.empty()) throw std::runtime_error(fault_);
     }
 private:
+    static constexpr int64_t speedPeriodNs=50000000;
+    void updateSpeedPwmLocked(int left,int right) {
+        if(std::abs(double(left))>info_[0].duty_max || std::abs(double(right))>info_[1].duty_max)
+            throw std::runtime_error("Reference PID output exceeds device period");
+        writeRawLocked(0,left);writeRawLocked(1,right);
+    }
     void snapshot(MotorEvent& event) const {
         for(size_t i=0;i<2;++i) {
             event.writtenRaw[i]=writtenRaw_[i];event.gpio[i]=directions_[i];
@@ -116,6 +138,17 @@ private:
         }
         event.factoryReadback=hardware_.factory_write_readback;
         event.sysfs=hardware_.motor_backend=="sysfs";
+        event.measuredRps=feedback_;
+        if(event.sysfs) {
+            // Diagnostics on failure are best effort; do not hide the original error.
+            try {
+                for(size_t i=0;i<2;++i) {
+                    const auto& path=i==0 ? hardware_.motor_left_pwm : hardware_.motor_right_pwm;
+                    event.pwmEnabled[i]=int(std::stoul(io_.readText(path.substr(0,path.rfind('/'))+"/enable")));
+                }
+                event.driverEnabled=int(std::stoul(io_.readText(hardware_.motor_enable_gpio)));
+            } catch(...) {}
+        }
     }
     void writeRawLocked(size_t index,double command) {
         const auto& pwm=index==0 ? hardware_.motor_left_pwm : hardware_.motor_right_pwm;
@@ -123,6 +156,7 @@ private:
         const int forward=int(index==0 ? hardware_.motor_left_forward_level : hardware_.motor_right_forward_level);
         writtenRaw_[index]=-1;
         try {
+            if(command==0) {io_.writePwmDuty(pwm,0);writtenRaw_[index]=0;return;} // Reference leaves GPIO unchanged at zero.
             // Reuse zero-before-direction handling with an identity PWM scale.
             // Generic competition control retains its existing normalized units.
             writeMotorCommand(io_,pwm,dir,info_[index],command,info_[index].duty_max,info_[index].duty_max,forward,directions_[index]);
@@ -141,7 +175,7 @@ private:
         if(!error.empty()) throw std::runtime_error("Both motor zeros attempted: "+error);
     }
     void stopLocked(const std::string& reason) {
-        active_=false;auto event=context_;event.event=reason;event.beginNs=rehearsalMonotonicNs();
+        active_=false;feedbackReady_=false;auto event=context_;event.event=reason;event.beginNs=rehearsalMonotonicNs();
         try {zeroLocked();event.motorZeroNs=rehearsalMonotonicNs();}catch(const std::exception& error) {event.error=error.what();fault_=event.error;}
         // Center independently of a stalled camera/recording loop, after both motor zeros.
         if(stopAction_) try {stopAction_();}catch(const std::exception& error) {
@@ -154,18 +188,30 @@ private:
         while(!closed_) {
             if(!active_) {wake_.wait(held,[this] {return closed_ || active_;});continue;}
             const auto heartbeatDeadline=heartbeat_+int64_t(params_.frame_timeout_s*1e9);
-            const auto expiry=std::min(deadline_,heartbeatDeadline);
+            const auto expiry=std::min(std::min(deadline_,heartbeatDeadline),speedActive_ ? nextPidNs_ : deadline_);
             wake_.wait_until(held,std::chrono::steady_clock::time_point(std::chrono::nanoseconds(expiry)));
             if(closed_ || !active_) continue;
             const auto now=rehearsalMonotonicNs();
             if(now>=deadline_) stopLocked("MOTOR_STOP_DURATION");
             else if(now>=heartbeat_+int64_t(params_.frame_timeout_s*1e9)) stopLocked("MOTOR_STOP_WATCHDOG");
+            else if(speedActive_ && now>=nextPidNs_) {
+                auto event=context_;event.event="MOTOR_PID_UPDATE";event.beginNs=now;
+                try {
+                    const auto pwm=speedControl_(feedback_[0],feedback_[1]);
+                    updateSpeedPwmLocked(pwm[0],pwm[1]);event.left=pwm[0];event.right=pwm[1];
+                    snapshot(event);event.endNs=rehearsalMonotonicNs();events_.push_back(event);
+                    nextPidNs_=event.endNs+speedPeriodNs; // No burst of stale catch-up calculations.
+                } catch(const std::exception& error) {fault_=error.what();stopLocked("MOTOR_STOP_PID_FAILED");events_.back().error=fault_;}
+                catch(...) {fault_="Unknown speed PID failure";stopLocked("MOTOR_STOP_PID_FAILED");events_.back().error=fault_;}
+            }
         }
     }
     DeviceIo& io_;HardwareConfig hardware_;Params params_;PwmInfo info_[2]{};int directions_[2]{-1,-1},writtenRaw_[2]{-1,-1};
     mutable std::mutex mutex_;std::condition_variable wake_;bool closed_=false,active_=false;
     int64_t deadline_=0,heartbeat_=0;std::string fault_;MotorEvent context_;std::deque<MotorEvent> events_;
     std::function<void()> stopAction_;
+    std::function<std::array<int,2>(double,double)> speedControl_;
+    std::array<double,2> feedback_{{0,0}};bool feedbackReady_=false,speedActive_=false;int64_t nextPidNs_=0;
     std::thread worker_;
 };
 }}

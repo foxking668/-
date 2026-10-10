@@ -22,6 +22,26 @@ void start(ParkingRehearsal& model,double time) {
 int main() {
  try {
     const auto initial=ParkingTuning::parse(config());check(initial.stage==2 && initial.single,"single stage2 parsed");
+    check(initial.stages[1].speed.leftRps==9 && initial.stages[1].speed.kp==64 && initial.stages[1].speed.pwmLimit==12000,"older file gets cc speed defaults without treating raw command as rps");
+    auto motorText=config();motorText.insert(motorText.find("[stage_3]"),"motor_left_command=3000\nmotor_right_command=3000\nmotor_run_time_s=7\nmotor_left_target_rps=5\nmotor_right_target_rps=6\nmotor_pid_pwm_limit=50000\n");
+    const auto motorTuning=ParkingTuning::parse(motorText);motorTuning.validateReferenceSpeed(50000);
+    check(motorTuning.stages[1].speed.leftRps==5 && motorTuning.stages[1].speed.rightRps==6 && motorTuning.stages[1].speed.pwmLimit==50000,"independent reference speed and full PWM range parsed");
+    rejects([&]{motorTuning.validateReferenceSpeed(49999);},"device period also constrains PID mode");
+    ParkingRehearsal newSpeedTrial(motorTuning);start(newSpeedTrial,0);
+    auto changedSpeed=motorTuning;changedSpeed.stages[1].speed.leftRps=7;
+    check(newSpeedTrial.applySaved(changedSpeed,1).has_value(),"saving active speed starts a new authorized trial");
+    auto invalidText=motorText;invalidText.replace(invalidText.find("motor_pid_pwm_limit=50000"),25,"motor_pid_pwm_limit=50001");
+    SavedTuningWatcher modeWatcher(motorTuning,15,[](const ParkingTuning& value){value.validateReferenceSpeed(50000);});
+    modeWatcher.observe(invalidText,0);
+    rejects([&]{modeWatcher.observe(invalidText,.4);},"invalid mode save is rejected before accepted snapshot changes");
+    modeWatcher.observe(motorText,.5);
+    check(!modeWatcher.observe(motorText,.9),"restoring original valid mode file does not re-authorize motion");
+    auto combinedText=config();combinedText.insert(combinedText.find("[stage_1]"),"motor_target_rps=4\n");
+    const auto combined=ParkingTuning::parse(combinedText);
+    check(combined.stages[0].speed.leftRps==4 && combined.stages[0].speed.rightRps==4 && combined.stages[4].speed.leftRps==4,"one session speed parameter controls both wheels in all stages");
+    auto combinedChange=combinedText;combinedChange.replace(combinedChange.find("motor_target_rps=4"),18,"motor_target_rps=5");
+    ParkingRehearsal combinedTrial(combined);
+    check(combinedTrial.applySaved(ParkingTuning::parse(combinedChange),0).has_value(),"one global speed save re-authorizes current stage");
     check(initial.speedLeftCmPerCount==0 && initial.speedRightCmPerCount==0,"legacy config only produces counts/s");
     auto speedText=config();speedText.insert(speedText.find("[stage_1]"),"speed_left_cm_per_count=0.01\nspeed_right_cm_per_count=0.02\n");
     const auto speedTuning=ParkingTuning::parse(speedText);

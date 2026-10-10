@@ -2,16 +2,33 @@
 #include "capture_data.hpp"
 #include "rehearsal_line.hpp"
 #include "rehearsal_motor_units.hpp"
+#include "reference_motor_speed.hpp"
 #include <optional>
+#include <functional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-10.1";
+constexpr const char* rehearsalVersion="2026-10-10.2";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct BendCorrection {double command=0,holdSeconds=0;};
+inline bool setReferenceSpeedKey(ReferenceMotorTuning& speed,const std::string& key,const std::string& value) {
+    if(key=="motor_target_rps") speed.leftRps=speed.rightRps=finiteNumber(value);
+    else if(key=="motor_left_target_rps") speed.leftRps=finiteNumber(value);
+    else if(key=="motor_right_target_rps") speed.rightRps=finiteNumber(value);
+    else if(key=="motor_pid_kp") speed.kp=finiteNumber(value);
+    else if(key=="motor_pid_ki") speed.ki=finiteNumber(value);
+    else if(key=="motor_pid_kd") speed.kd=finiteNumber(value);
+    else if(key=="motor_pid_pwm_limit") {
+        const double number=finiteNumber(value);
+        if(number<100 || number>50000 || std::floor(number)!=number) throw std::runtime_error("motor_pid_pwm_limit must be integer 100..50000");
+        speed.pwmLimit=int(number);
+    } else return false;
+    return true;
+}
 struct StageTuning {
     double command=0,settleSeconds=.5,holdSeconds=0;
     BendCorrection correction{};bool correctionOnly=false;
     double motorLeft=0,motorRight=0,motorSeconds=0;
+    ReferenceMotorTuning speed{};
     LineFollowTuning line{};
     bool powered() const {return motorSeconds>0 && (motorLeft>0 || motorRight>0);}
 };
@@ -28,9 +45,18 @@ inline const char* rehearsalSegmentTitle(int stageIndex,unsigned segment) {
 }
 struct ParkingTuning {
     bool single=true;int stage=2;std::array<StageTuning,6> stages{};std::string source;
+    ReferenceMotorTuning referenceSpeed{};
     // Zero means uncalibrated: report counts/s without inventing cm/s.
     double speedLeftCmPerCount=0,speedRightCmPerCount=0;
+    void validateReferenceSpeed(double period) const {
+        for(size_t index=0;index<5;++index) {
+            const auto& item=stages[index];
+            if(item.powered() && item.speed.pwmLimit>period)
+                throw std::runtime_error("Reference PID limit exceeds configured PWM period");
+        }
+    }
     void validate(double limit=15) const {
+        referenceSpeed.validate();
         if(stage<1 || stage>6) throw std::runtime_error("stage must be 1..6");
         for(double scale:{speedLeftCmPerCount,speedRightCmPerCount})
             if(!std::isfinite(scale) || scale<0 || scale>10)
@@ -59,6 +85,7 @@ struct ParkingTuning {
         }
         for(size_t i=0;i<stages.size();++i) {
             const auto& item=stages[i];
+            item.speed.validate();
             item.line.validate(item.line.enabled ? limit : 15);
             if(item.line.enabled && (i!=0 || !single || item.command!=0 || item.holdSeconds!=0 || item.motorLeft<=0 || item.motorRight<=0))
                 throw std::runtime_error("Line following requires single stage_1, steer_command=0, hold_time_s=0 and positive motor amplitudes (run time 0 may disable motors)");
@@ -106,6 +133,7 @@ struct ParkingTuning {
                     result.stages[size_t(index)].correctionOnly=value==correction;
                 } else if(key=="speed_left_cm_per_count") result.speedLeftCmPerCount=finiteNumber(value);
                 else if(key=="speed_right_cm_per_count") result.speedRightCmPerCount=finiteNumber(value);
+                else if(setReferenceSpeedKey(result.referenceSpeed,key,value)) {}
                 else throw std::runtime_error("Unknown session key: "+key);
             } else {
                 const int index=section[6]-'1';auto& item=result.stages[size_t(index)];
@@ -115,6 +143,7 @@ struct ParkingTuning {
                 else if(key=="motor_left_command") item.motorLeft=finiteNumber(value);
                 else if(key=="motor_right_command") item.motorRight=finiteNumber(value);
                 else if(key=="motor_run_time_s") item.motorSeconds=finiteNumber(value);
+                else if(setReferenceSpeedKey(item.speed,key,value)) {}
                 else if(index==0 && key=="line_follow_enable") {
                     if(value!="0" && value!="1") throw std::runtime_error("line_follow_enable must be 0 or 1");
                     item.line.enabled=value=="1";
@@ -142,6 +171,8 @@ struct ParkingTuning {
             }
         }
         if(!keys.count("session.mode") || !keys.count("session.stage")) throw std::runtime_error("All session keys are required");
+        if(keys.count("session.motor_target_rps") && (keys.count("session.motor_left_target_rps") || keys.count("session.motor_right_target_rps")))
+            throw std::runtime_error("Do not mix combined and separate motor speed keys in session");
         for(int stage=1;stage<=6;++stage)
             for(const auto* key:{"steer_command","settle_time_s","hold_time_s"})
                 if(!keys.count("stage_"+std::to_string(stage)+"."+key))
@@ -153,6 +184,17 @@ struct ParkingTuning {
             const auto prefix="stage_"+std::to_string(stage)+".";
             const auto count=keys.count(prefix+"motor_left_command")+keys.count(prefix+"motor_right_command")+keys.count(prefix+"motor_run_time_s");
             if(count!=0 && count!=3) throw std::runtime_error(prefix+"motor keys are required together");
+            auto& speed=result.stages[size_t(stage-1)].speed;
+            if(keys.count(prefix+"motor_target_rps") && (keys.count(prefix+"motor_left_target_rps") || keys.count(prefix+"motor_right_target_rps")))
+                throw std::runtime_error("Do not mix combined and separate motor speed keys in one stage");
+            if(!keys.count(prefix+"motor_target_rps")) {
+                if(!keys.count(prefix+"motor_left_target_rps")) speed.leftRps=result.referenceSpeed.leftRps;
+                if(!keys.count(prefix+"motor_right_target_rps")) speed.rightRps=result.referenceSpeed.rightRps;
+            }
+            if(!keys.count(prefix+"motor_pid_kp")) speed.kp=result.referenceSpeed.kp;
+            if(!keys.count(prefix+"motor_pid_ki")) speed.ki=result.referenceSpeed.ki;
+            if(!keys.count(prefix+"motor_pid_kd")) speed.kd=result.referenceSpeed.kd;
+            if(!keys.count(prefix+"motor_pid_pwm_limit")) speed.pwmLimit=result.referenceSpeed.pwmLimit;
         }
         result.validate();return result;
     }
@@ -168,15 +210,18 @@ struct ParkingTuning {
     }
     static ParkingTuning load(const std::string& path) {return parse(readSource(path));}
 };
-inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory") {
+inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory",bool ccSpeed=false) {
     out<<"VERSION "<<rehearsalVersion<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
     out<<"阶段1巡线="<<(tuning.stages[0].line.enabled ? "启用（电机时间为0时仅观察）" : "关闭")<<"；不含交点分支选择。\n";
-    out<<(backend=="sysfs" ? "电机单位=duty_ns；3000=6%，50000=100%；无2000/12000人为上限。\n" : "电机单位=原始PWM；填2000就写2000，无2000人为上限；启动车辆前核对各电机duty_max。\n");
+    if(ccSpeed) out<<"电机控制=cc增量速度PID，每50ms更新；目标单位rps；PWM单位ns。旧motor_*_command只作轮使能，幅值不再固定输出。\n";
+    else out<<(backend=="sysfs" ? "电机单位=duty_ns；3000=6%，50000=100%；无2000/12000人为上限。\n" : "电机单位=原始PWM；填2000就写2000，无2000人为上限；启动车辆前核对各电机duty_max。\n");
     for(size_t i=0;i<tuning.stages.size();++i) {
         const auto& item=tuning.stages[i];
         out<<"阶段"<<i+1<<" 电机左="<<item.motorLeft<<" 右="<<item.motorRight<<" 时间="<<item.motorSeconds<<"s"
             <<(item.powered() ? " 启用" : " 禁用")<<'\n';
+        if(ccSpeed) out<<"  目标速度 左="<<(item.motorLeft>0 ? item.speed.leftRps : 0)<<" 右="<<(item.motorRight>0 ? item.speed.rightRps : 0)
+            <<" rps | PID="<<item.speed.kp<<'/'<<item.speed.ki<<'/'<<item.speed.kd<<" | 可调PWM限幅="<<item.speed.pwmLimit<<"ns\n";
     }
     for(int index:{1,3}) {
         const auto& item=tuning.stages[size_t(index)];const auto& correction=item.correction;
@@ -279,7 +324,7 @@ public:
         const auto& before=tuning_.stages[size_t(target)];const auto& after=tuning.stages[size_t(target)];
         const bool selectorChanged=mainSelectorChanged || before.correctionOnly!=after.correctionOnly;
         const bool primaryChanged=before.command!=after.command || before.holdSeconds!=after.holdSeconds || before.settleSeconds!=after.settleSeconds ||
-            before.motorLeft!=after.motorLeft || before.motorRight!=after.motorRight || before.motorSeconds!=after.motorSeconds || !(before.line==after.line);
+            before.motorLeft!=after.motorLeft || before.motorRight!=after.motorRight || before.motorSeconds!=after.motorSeconds || !(before.speed==after.speed) || !(before.line==after.line);
         const bool correctionChanged=before.correction.command!=after.correction.command || before.correction.holdSeconds!=after.correction.holdSeconds;
         const bool execute=selectorChanged || target!=stage_ || primaryChanged || correctionChanged;
         const bool keepCorrection=target==stage_ && isBendStage(target) && segment_==1 && !selectorChanged && !primaryChanged;
@@ -345,7 +390,8 @@ private:
 };
 class SavedTuningWatcher {
 public:
-    SavedTuningWatcher(const ParkingTuning& initial,double limit):accepted_(initial),observed_(initial.source),handled_(initial.source),limit_(limit) {}
+    SavedTuningWatcher(const ParkingTuning& initial,double limit,std::function<void(const ParkingTuning&)> modeValidator={})
+        :accepted_(initial),observed_(initial.source),handled_(initial.source),limit_(limit),modeValidator_(std::move(modeValidator)) {}
     std::optional<ParkingTuning> observe(const std::string& source,double now) {
         if(!std::isfinite(now) || now<lastTime_) throw std::runtime_error("Invalid watcher time");
         lastTime_=now;
@@ -353,7 +399,9 @@ public:
         if(source==handled_ || now-stableSince_<.3) return {};
         handled_=source; // A rejected save is reported once; the next save can recover.
         auto candidate=ParkingTuning::parse(source);candidate.validate(limit_);
+        if(modeValidator_) modeValidator_(candidate); // Rejected saves never replace the last accepted parameters.
         bool same=candidate.single==accepted_.single && candidate.stage==accepted_.stage &&
+            candidate.referenceSpeed==accepted_.referenceSpeed &&
             candidate.speedLeftCmPerCount==accepted_.speedLeftCmPerCount && candidate.speedRightCmPerCount==accepted_.speedRightCmPerCount;
         for(size_t i=0;i<6;++i) same=same && candidate.stages[i].command==accepted_.stages[i].command &&
             candidate.stages[i].holdSeconds==accepted_.stages[i].holdSeconds && candidate.stages[i].settleSeconds==accepted_.stages[i].settleSeconds &&
@@ -361,11 +409,12 @@ public:
             candidate.stages[i].correction.command==accepted_.stages[i].correction.command &&
             candidate.stages[i].correction.holdSeconds==accepted_.stages[i].correction.holdSeconds &&
             candidate.stages[i].motorLeft==accepted_.stages[i].motorLeft && candidate.stages[i].motorRight==accepted_.stages[i].motorRight &&
-            candidate.stages[i].motorSeconds==accepted_.stages[i].motorSeconds && candidate.stages[i].line==accepted_.stages[i].line;
+            candidate.stages[i].motorSeconds==accepted_.stages[i].motorSeconds && candidate.stages[i].speed==accepted_.stages[i].speed && candidate.stages[i].line==accepted_.stages[i].line;
         accepted_=candidate;
         return same ? std::optional<ParkingTuning>{} : candidate;
     }
 private:
     ParkingTuning accepted_;std::string observed_,handled_;double limit_,stableSince_=0,lastTime_=-1;
+    std::function<void(const ParkingTuning&)> modeValidator_;
 };
 }}

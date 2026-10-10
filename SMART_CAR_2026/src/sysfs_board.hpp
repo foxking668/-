@@ -93,7 +93,16 @@ public:
         sysfsPwmDirectory(config_.motor_left_pwm);sysfsPwmDirectory(config_.motor_right_pwm);sysfsPwmDirectory(config_.servo_pwm);
     }
     void setMotorEnable(bool enabled) override {
-        prepareMotors();sysfsWriteChecked(nodes_,config_.motor_enable_gpio,enabled ? 1 : 0);
+        prepareMotors();
+        if(enabled) {
+            // An initial enable before period may have failed, or another process
+            // disabled PWM. Verify both channels at the actual authorized start.
+            for(const auto& path:{config_.motor_left_pwm,config_.motor_right_pwm}) {
+                const auto enable=sysfsPwmDirectory(path)+"/enable";
+                if(sysfsNumber(nodes_.read(enable))!=1) sysfsWriteChecked(nodes_,enable,1);
+            }
+        }
+        sysfsWriteChecked(nodes_,config_.motor_enable_gpio,enabled ? 1 : 0);
     }
     bool nativeServo() const override {return true;}
     void initializeReferenceServo() {prepareServo();}

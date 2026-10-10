@@ -22,7 +22,7 @@ def package(program, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--program', required=True)
-    parser.add_argument('--output', default=str(ROOT / 'deploy/parking_rehearsal_20261010_1_verified.zip'))
+    parser.add_argument('--output', default=str(ROOT / 'deploy/parking_rehearsal_20261010_2_verified.zip'))
     args = parser.parse_args()
     output, manifest = package(args.program, args.output)
     print('VERIFIED_PACKAGE ' + str(output))

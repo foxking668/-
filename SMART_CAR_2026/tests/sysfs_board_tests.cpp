@@ -52,7 +52,7 @@ int main() {
     const auto hardware=HardwareConfig::load("deploy/config/new_car_hardware.ini");
     const auto params=Params::load("deploy/config/new_car_vehicle.ini");
     const auto tuning=ParkingTuning::load("deploy/config/parking_tuning.new_car.ini");tuning.validate(params.max_steer_deg);
-    check(tuning.stages[0].motorLeft==3000 && tuning.stages[0].motorSeconds==1,"initial stage is ready for one-second tuning");
+    check(tuning.stages[0].motorLeft==1 && tuning.stages[0].speed.leftRps==9 && tuning.stages[0].motorSeconds==1,"initial stage enables cc reference speed for one second");
     check(hardware.motor_backend=="sysfs" && !hardware.factory_write_readback,"new-car decimal backend");
     check(hardware.encoder_left_sign==1 && hardware.encoder_right_sign==1,"native reference encoder signs");
     check(params.steer_offset_deg==-15 && !params.require_imu,"new-car steering offset without IMU");
@@ -112,6 +112,23 @@ int main() {
         check(nodes.read(hardware.motor_left_pwm)=="0" && nodes.read(hardware.motor_right_pwm)=="0","rejected tuning leaves both motors at zero");
         motor.start(50000,0,.2,0,1,4);check(nodes.read(hardware.motor_left_pwm)=="50000" && nodes.read(hardware.motor_right_pwm)=="0","full physical range and stationary right wheel supported");
         motor.close();
+    }
+    {
+        MemoryNodes nodes;SysfsBoardIo io(nodes,hardware);RehearsalMotor motor(io,hardware,params);
+        nodes.write("/sys/class/pwm/pwmchip8/pwm2/enable","0");
+        nodes.write("/sys/class/pwm/pwmchip8/pwm1/enable","0");
+        motor.start(3000,3000,.2,0,1,1);
+        check(nodes.read("/sys/class/pwm/pwmchip8/pwm2/enable")=="1" && nodes.read("/sys/class/pwm/pwmchip8/pwm1/enable")=="1","authorized start repairs disabled PWM channels after configured period");
+        const auto events=motor.takeEvents();
+        check(events.front().pwmEnabled[0]==1 && events.front().pwmEnabled[1]==1 && events.front().driverEnabled==1,"start diagnostics include both enables and driver nSLEEP");
+        motor.stop("MOTOR_STOP_QUIT");
+    }
+    {
+        MemoryNodes nodes;SysfsBoardIo io(nodes,hardware);RehearsalMotor motor(io,hardware,params);
+        nodes.write("/sys/class/pwm/pwmchip8/pwm1/enable","0");
+        nodes.failedPath="/sys/class/pwm/pwmchip8/pwm1/enable";nodes.failedValue="1";
+        rejects([&]{motor.start(3000,3000,.2,0,1,1);},"PWM enable failure rejects motor start");
+        check(nodes.read(hardware.motor_left_pwm)=="0" && nodes.read(hardware.motor_right_pwm)=="0" && nodes.read(hardware.motor_enable_gpio)=="0","enable failure zeros both PWM channels before returning error");
     }
     {
         MemoryNodes nodes;SysfsBoardIo io(nodes,hardware);RehearsalMotor motor(io,hardware,params);
