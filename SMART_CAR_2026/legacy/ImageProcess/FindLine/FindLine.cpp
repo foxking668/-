@@ -1,4 +1,5 @@
 #include "FindLine.hpp"
+#include "MissingBoundaryPolicy.hpp"
 
 namespace ImageProcess
 {
@@ -645,6 +646,11 @@ namespace ImageProcess
 
         return this->left_line;
     }
+
+    void FindLine::setMissingEdgeProxyEnabled(bool enabled)
+    {
+        this->missing_edge_proxy_enabled = enabled;
+    }
     /**
      * @brief 获取 getCenterLine 对应数据
      *
@@ -683,15 +689,11 @@ namespace ImageProcess
                 this->center_line[i] = -1;
                 continue;
             }
-            if (this->left_line[i] == -1)
-            {
-                this->left_line[i] = 0;
-            }
-            if (this->right_line[i] == -1)
-            {
-                this->right_line[i] = screenWidth - 1;
-            }
-            this->center_line[i] = (this->left_line[i] + this->right_line[i]) / 2;
+            this->center_line[i] = applyMissingBoundaryPolicy(
+                this->left_line[i],
+                this->right_line[i],
+                screenWidth,
+                this->missing_edge_proxy_enabled);
         }
 
         return this->center_line;
@@ -740,12 +742,12 @@ namespace ImageProcess
     FindLine::~FindLine()
     {
         if (this->left_line != nullptr)
-            delete this->left_line;
+            delete[] this->left_line;
 
         if (this->center_line != nullptr)
-            delete this->center_line;
+            delete[] this->center_line;
 
         if (this->right_line != nullptr)
-            delete this->right_line;
+            delete[] this->right_line;
     };
 }

@@ -50,6 +50,7 @@ namespace ImageProcess
         int *left_line = nullptr;
         int *center_line = nullptr;
         int *right_line = nullptr;
+        bool missing_edge_proxy_enabled = true;
 
         /**
          * @brief 计算 calculateAngle 结果
@@ -389,6 +390,8 @@ namespace ImageProcess
          * @param rightLine 指针参数，指向调用方提供的数据或内部管理的资源。
          */
         void submitRightLine(int *rightLine);
+
+        void setMissingEdgeProxyEnabled(bool enabled);
 
 #ifdef FIXLINE_INCLUDE_ELEMENTS_ZEBRA
 

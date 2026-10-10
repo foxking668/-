@@ -1,4 +1,5 @@
 #include "FixLine.hpp"
+#include "ImageProcess/FindLine/MissingBoundaryPolicy.hpp"
 
 // using namespace Other;
 
@@ -1192,15 +1193,11 @@ namespace ImageProcess
                 this->center_line[i] = -1;
                 continue;
             }
-            if (this->left_line[i] == -1)
-            {
-                this->left_line[i] = 0;
-            }
-            if (this->right_line[i] == -1)
-            {
-                this->right_line[i] = screenWidth - 1;
-            }
-            this->center_line[i] = (this->left_line[i] + this->right_line[i]) / 2;
+            this->center_line[i] = applyMissingBoundaryPolicy(
+                this->left_line[i],
+                this->right_line[i],
+                screenWidth,
+                this->missing_edge_proxy_enabled);
         }
 
         for (const auto fixInfo : center_fix_infos)
@@ -1209,6 +1206,11 @@ namespace ImageProcess
         }
 
         this->fix_infos.clear();
+    }
+
+    void FixLine::setMissingEdgeProxyEnabled(bool enabled)
+    {
+        this->missing_edge_proxy_enabled = enabled;
     }
 
     /**

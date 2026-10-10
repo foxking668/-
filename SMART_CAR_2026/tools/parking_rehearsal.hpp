@@ -6,7 +6,7 @@
 #include <optional>
 #include <functional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-10.3";
+constexpr const char* rehearsalVersion="2026-10-10.4";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct BendCorrection {double command=0,holdSeconds=0;};
@@ -243,17 +243,21 @@ inline std::string normalizeCcSpeedSource(const std::string& source) {
         const auto key=equal==std::string::npos ? std::string{} : trimmed(line.substr(0,equal));
         if(section=="session" && key=="motor_target_rps") hasTarget=true;
         if(section!="session" && (key=="motor_left_command" || key=="motor_right_command")) {changed=true;continue;}
+        if(section=="stage_1" && (key=="line_kp" || key=="line_kd" || key=="line_preview" || key=="line_filter_s" ||
+            key=="line_deadband_px" || key=="line_slew_per_s" || key=="line_target_x" || key=="line_crop_top" ||
+            key=="line_crop_bottom" || key=="line_min_contrast" || key=="line_max_width_px")) {changed=true;continue;}
         output<<raw<<'\n';
     }
     if(section=="session" && !hasTarget) {output<<"motor_target_rps=9\n";changed=true;}
     if(!changed) return source;
-    const auto upgraded=std::string("# 2026-10-10.3：快慢只调[session] motor_target_rps；阶段用motor_run_time_s启停。\n")+output.str();
+    const auto upgraded=std::string("# 2026-10-10.4：共用motor_target_rps调速；阶段1使用cc原7.25巡线，无旧PD调参。\n")+output.str();
     ParkingTuning::parse(upgraded,true);return upgraded;
 }
 inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory",bool ccSpeed=false) {
     out<<"VERSION "<<rehearsalVersion<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
     out<<"阶段1巡线="<<(tuning.stages[0].line.enabled ? "启用（电机时间为0时仅观察）" : "关闭")<<"；不含交点分支选择。\n";
+    if(ccSpeed) out<<"巡线=CC_725：80x60最近邻缩放，裁剪顶5%/底2%，HSV白色掩膜、轮廓补线、中心黑线优先；center_pratio=0.42，直接舵机误差，无旧PD滤波。\n";
     if(ccSpeed) out<<"电机控制=cc增量速度PID，每50ms更新；只调[session] motor_target_rps，两轮共用目标rps；阶段时间控制启停；PWM由PID计算。\n";
     else out<<(backend=="sysfs" ? "电机单位=duty_ns；3000=6%，50000=100%；无2000/12000人为上限。\n" : "电机单位=原始PWM；填2000就写2000，无2000人为上限；启动车辆前核对各电机duty_max。\n");
     for(size_t i=0;i<tuning.stages.size();++i) {

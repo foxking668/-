@@ -32,6 +32,7 @@ namespace ImageProcess
         int *left_line = nullptr;
         int *center_line = nullptr;
         int *right_line = nullptr;
+        bool missing_edge_proxy_enabled = true;
 
     public:
         /**
@@ -169,6 +170,7 @@ namespace ImageProcess
          * @return 返回整型结果，具体含义由函数功能决定，例如数量、状态码、文件描述符或字节数。
          */
         int *getLeftLine();
+        void setMissingEdgeProxyEnabled(bool enabled);
         /**
          * @brief 获取 getCenterLine 对应数据
          *

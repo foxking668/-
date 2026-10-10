@@ -59,6 +59,18 @@ int main() {
         upgradedTuning.stages[i].holdSeconds==oldSpeed.stages[i].holdSeconds && upgradedTuning.stages[i].motorSeconds==oldSpeed.stages[i].motorSeconds,
         "upgrade keeps every stage steering command and both duration types");
     check(normalizeCcSpeedSource(upgraded)==upgraded,"upgrade is idempotent and does not rewrite an already upgraded file");
+    auto oldPd=onlySpeedText;
+    oldPd.replace(oldPd.find("hold_time_s=5"),13,"hold_time_s=0");
+    oldPd.insert(oldPd.find("[stage_2]"),"line_kp=0.35\nline_kd=0.02\nline_target_x=79.5\nline_crop_top=0.30\nline_max_command=8\nline_follow_enable=1\n");
+    const auto ccLaneUpgrade=normalizeCcSpeedSource(oldPd);
+    check(ccLaneUpgrade.find("line_kp=")==std::string::npos && ccLaneUpgrade.find("line_kd=")==std::string::npos &&
+        ccLaneUpgrade.find("line_target_x=")==std::string::npos && ccLaneUpgrade.find("line_crop_top=")==std::string::npos,
+        "CC upgrade removes unused PD and old optical target parameters");
+    const auto ccLaneTuning=ParkingTuning::parse(ccLaneUpgrade,true);
+    check(ccLaneTuning.stages[0].line.enabled && ccLaneTuning.stages[0].line.maxCommand==8 &&
+        ccLaneTuning.stages[0].motorSeconds==7 && ccLaneTuning.referenceSpeed.leftRps==4,
+        "CC upgrade preserves line enable, mechanical limit, speed and successful stage duration");
+    check(normalizeCcSpeedSource(ccLaneUpgrade)==ccLaneUpgrade,"CC lane upgrade is idempotent");
     auto withoutTarget=oldSpeedText;withoutTarget.erase(withoutTarget.find("motor_target_rps=4\n"),19);
     rejects([&]{ParkingTuning::parse(withoutTarget,true);},"missing active speed key cannot silently fall back to a faster default");
     check(normalizeCcSpeedSource(withoutTarget).find("motor_target_rps=9")!=std::string::npos,"old file gets one visible default speed inside session");
