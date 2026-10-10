@@ -16,3 +16,5 @@ deploy/visual_*/*.jsonl
 deploy/visual_*/*.json
 
 deploy/parking_rehearsal_*_verified.zip
+*.startup_ready
+*.startup_ready.pending

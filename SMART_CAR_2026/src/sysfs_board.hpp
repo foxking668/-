@@ -4,6 +4,7 @@
 #include <chrono>
 #include <thread>
 #include <set>
+#include <iostream>
 namespace car2026 {
 // Text-only transport, independently testable without GPIO/PWM hardware.
 class SysfsNodes {
@@ -32,14 +33,14 @@ inline void sysfsExport(SysfsNodes& nodes,const std::string& marker,const std::s
     for(int retry=0;retry<50 && !nodes.exists(marker);++retry) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     if(!nodes.exists(marker)) throw std::runtime_error("Export did not create: "+marker);
 }
-inline void sysfsGpio(SysfsNodes& nodes,const std::string& valuePath,bool output) {
+inline void sysfsGpio(SysfsNodes& nodes,const std::string& valuePath,bool output,bool referenceDirection=false) {
     const std::string prefix="/sys/class/gpio/gpio",suffix="/value";
     if(valuePath.rfind(prefix,0)!=0 || valuePath.size()<=prefix.size()+suffix.size() || valuePath.substr(valuePath.size()-suffix.size())!=suffix)
         throw std::runtime_error("Invalid sysfs GPIO value path: "+valuePath);
     const auto number=valuePath.substr(prefix.size(),valuePath.size()-prefix.size()-suffix.size());
     if(number.find_first_not_of("0123456789")!=std::string::npos) throw std::runtime_error("Invalid GPIO number");
     sysfsExport(nodes,valuePath,"/sys/class/gpio/export",sysfsNumber(number));
-    nodes.write(valuePath.substr(0,valuePath.size()-suffix.size())+"/direction",output ? "low" : "in");
+    nodes.write(valuePath.substr(0,valuePath.size()-suffix.size())+"/direction",output ? (referenceDirection ? "out" : "low") : "in");
     const auto direction=capture::trimmed(nodes.read(valuePath.substr(0,valuePath.size()-suffix.size())+"/direction"));
     if(direction!=(output ? "out" : "in")) throw std::runtime_error("GPIO direction readback failed: "+valuePath);
 }
@@ -53,16 +54,25 @@ inline std::string sysfsPwmDirectory(const std::string& dutyPath) {
         throw std::runtime_error("Invalid PWM chip/channel: "+dutyPath);
     return dir;
 }
-inline void sysfsPreparePwm(SysfsNodes& nodes,const std::string& dutyPath,uint32_t period) {
+inline void referenceMotorPwmInit(SysfsNodes& nodes,const std::string& dutyPath,uint32_t period) {
     const auto dir=sysfsPwmDirectory(dutyPath);const auto split=dir.rfind("/pwm");
     sysfsExport(nodes,dutyPath,dir.substr(0,split)+"/export",sysfsNumber(dir.substr(split+4)));
-    // Zero before period changes; start from disabled regardless of previous owner.
-    sysfsWriteChecked(nodes,dir+"/enable",0);sysfsWriteChecked(nodes,dutyPath,0);
-    if(nodes.exists(dir+"/polarity")) {
-        nodes.write(dir+"/polarity","normal");
-        if(capture::trimmed(nodes.read(dir+"/polarity"))!="normal") throw std::runtime_error("PWM polarity readback failed: "+dir);
+    // cc/src/Contral/Motor/Motor.cpp: initialize -> enable -> period -> zero.
+    // No pre-period disable (which failed on the board) or added polarity write.
+    // The reference does not abort on the initial enable return value. Keep that
+    // behavior and order, but report a rejected write instead of hiding it.
+    try {sysfsWriteChecked(nodes,dir+"/enable",1);}
+    catch(const std::exception& error) {
+        std::cerr<<"REFERENCE_PWM_ENABLE "<<dir<<" requested=1: "<<error.what()<<"; continuing reference period/zero sequence\n";
     }
     sysfsWriteChecked(nodes,dir+"/period",period);sysfsWriteChecked(nodes,dutyPath,0);
+}
+inline void referenceServoPwmInit(SysfsNodes& nodes,const std::string& dutyPath,uint32_t period) {
+    const auto dir=sysfsPwmDirectory(dutyPath);const auto split=dir.rfind("/pwm");
+    sysfsExport(nodes,dutyPath,dir.substr(0,split)+"/export",sysfsNumber(dir.substr(split+4)));
+    // cc/src/Contral/Steer/Steer.cpp: period -> setAngle(90) -> enable.
+    sysfsWriteChecked(nodes,dir+"/period",period);
+    sysfsWriteChecked(nodes,dutyPath,1520000);
     sysfsWriteChecked(nodes,dir+"/enable",1);
 }
 inline uint32_t newCarServoNs(double adjustedCommand,double period) {
@@ -86,6 +96,7 @@ public:
         prepareMotors();sysfsWriteChecked(nodes_,config_.motor_enable_gpio,enabled ? 1 : 0);
     }
     bool nativeServo() const override {return true;}
+    void initializeReferenceServo() {prepareServo();}
     uint32_t writeServoCommand(double adjustedCommand) override {
         const auto duty=newCarServoNs(adjustedCommand,config_.servo_period_ns);
         prepareServo();sysfsWriteChecked(nodes_,config_.servo_pwm,duty);return duty;
@@ -120,13 +131,21 @@ private:
     }
     void prepareMotors() {
         if(motorsReady_) return;
-        sysfsGpio(nodes_,config_.motor_enable_gpio,true);sysfsWriteChecked(nodes_,config_.motor_enable_gpio,0);
-        sysfsPreparePwm(nodes_,config_.motor_left_pwm,uint32_t(config_.motor_period_ns));
-        sysfsPreparePwm(nodes_,config_.motor_right_pwm,uint32_t(config_.motor_period_ns));
-        sysfsGpio(nodes_,config_.motor_left_dir,true);sysfsGpio(nodes_,config_.motor_right_dir,true);
+        // Match the GPIO constructors in Motor.cpp: export left/right/nSLEEP
+        // before PWM initialization; set their output directions afterwards.
+        for(const auto& path:{config_.motor_left_dir,config_.motor_right_dir,config_.motor_enable_gpio}) {
+            const auto dir=path.substr(0,path.size()-6);
+            const auto number=dir.substr(std::string("/sys/class/gpio/gpio").size());
+            sysfsExport(nodes_,path,"/sys/class/gpio/export",sysfsNumber(number));
+        }
+        referenceMotorPwmInit(nodes_,config_.motor_left_pwm,uint32_t(config_.motor_period_ns));
+        referenceMotorPwmInit(nodes_,config_.motor_right_pwm,uint32_t(config_.motor_period_ns));
+        for(const auto& path:{config_.motor_left_dir,config_.motor_right_dir,config_.motor_enable_gpio}) {
+            sysfsGpio(nodes_,path,true,true);sysfsWriteChecked(nodes_,path,1);
+        }
         motorsReady_=true;
     }
-    void prepareServo() {if(!servoReady_) {sysfsPreparePwm(nodes_,config_.servo_pwm,uint32_t(config_.servo_period_ns));servoReady_=true;}}
+    void prepareServo() {if(!servoReady_) {referenceServoPwmInit(nodes_,config_.servo_pwm,uint32_t(config_.servo_period_ns));servoReady_=true;}}
     SysfsNodes& nodes_;HardwareConfig config_;bool motorsReady_=false,servoReady_=false;
 };
 }

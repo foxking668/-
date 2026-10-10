@@ -182,6 +182,28 @@ int main() {
     cumulative.add({true,100,int64_t(1.6e9)},{true,100,int64_t(1.6e9)});
     check(cumulative.stationaryAfter(1),"unchanged cumulative counts count as stationary");
     std::ostringstream out;timing.writeSummary(out,0);check(out.str().find("stage_duration_s")!=std::string::npos,"timing CSV declares measured scope");
+    {
+        RehearsalTiming bends("delta");
+        bends.begin(1,1,1,int64_t(1e9));bends.motorStart(int64_t(1.1e9));
+        bends.segmentBegin(1,1,0,int64_t(1.1e9));bends.segmentEnd(1,1,0,int64_t(6.1e9));
+        bends.segmentBegin(1,1,1,int64_t(6.2e9));bends.motorStop(int64_t(7.2e9),"MOTOR_STOP_STAGE");
+        bends.segmentEnd(1,1,1,int64_t(8e9));bends.motorStop(int64_t(9e9),"EXIT_ZERO");
+        const auto& row=bends.rows().front();
+        check(row.segmentEnd[0]-row.segmentStart[0]==int64_t(5e9),"first bend time measured independently of right correction");
+        check(row.segmentEnd[1]-row.segmentStart[1]==int64_t(1e9),"correction duration closes at output stop, excluding exit tail");
+        check(row.motorStop==int64_t(7.2e9),"repeated exit zero cannot inflate motor output duration");
+        check(!bends.elapsed(3,1,int64_t(10e9)),"previous timing is not displayed under a new stage");
+        check(bends.elapsed(1,1,int64_t(10e9)) && std::abs(*bends.elapsed(1,1,int64_t(10e9))-6.1)<1e-8,"completed stage duration stays frozen during save waiting");
+        std::ostringstream summary;bends.writeSummary(summary,0);
+        check(summary.str().find("primary_duration_s,correction_duration_s")!=std::string::npos,"timing declares both turn-segment durations");
+        check(summary.str().find("NOT_RUN,分支直退,,,")!=std::string::npos,"skipped branch stage is explicitly unknown rather than zero seconds");
+        std::istringstream csv(summary.str());std::string line;size_t lines=0;
+        while(std::getline(csv,line)) {check(std::count(line.begin(),line.end(),',')==16,"all timing summary rows match the CSV header");++lines;}
+        check(lines==7,"summary represents all six stages, including unexecuted stages");
+        bends.begin(5,1,1,int64_t(10e9));bends.segmentBegin(5,1,0,int64_t(10e9));bends.end(int64_t(12e9),"STAGE_END");
+        check(bends.rows().back().end-bends.rows().back().ready==int64_t(2e9),"stationary confirmation records its actual manual duration");
+        rejects([&] {bends.begin(6,1,1,int64_t(13e9));},"invalid stage index cannot corrupt the six-stage summary");
+    }
     std::cout<<checks<<" motor/timing checks passed\n";return 0;
  } catch(const std::exception& error) {std::cerr<<"FAIL "<<error.what()<<'\n';return 1;}
 }

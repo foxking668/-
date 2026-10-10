@@ -10,6 +10,7 @@
 #include "rehearsal_speed.hpp"
 #include "rehearsal_motor.hpp"
 #include "rehearsal_timing.hpp"
+#include "rehearsal_startup.hpp"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/videoio.hpp>
@@ -24,7 +25,7 @@ namespace fs=std::filesystem;
 using namespace car2026::capture;
 namespace {
 volatile std::sig_atomic_t interrupted=0;
-void signalHandler(int) {interrupted=1;}
+void signalHandler(int signal) {interrupted=signal;}
 int64_t monotonicNs() {return rehearsalMonotonicNs();}
 struct Options {
     std::string capture="manual_capture.ini",hardware="config/calibration_hardware.ini",vehicle="config/calibration_vehicle.ini",
@@ -231,13 +232,49 @@ void showStatus(const ParkingRehearsal& model,std::optional<double> written) {
         <<"s | 方向="<<(model.stage()==0 ? "前进" : model.stage()==5 ? "停止" : "倒退")
         <<(settings.powered() ? " | 已配置电机试验" : " | 电机禁用")<<std::endl;
 }
+void initializeReferenceHardware(car2026::SysfsNodes& nodes,car2026::SysfsBoardIo& motorIo,
+        car2026::SysfsBoardIo& servoIo,const car2026::HardwareConfig& hardware,const ParkingTuning& tuning,
+        std::unique_ptr<car2026::NewCarEncoders>& encoders) {
+    if(std::any_of(tuning.stages.begin(),tuning.stages.end(),[](const StageTuning& item) {return item.powered();})) {
+        motorIo.readPwmMetadata(hardware.motor_left_pwm);
+        motorIo.setMotorEnable(false);
+    }
+    encoders=std::make_unique<car2026::NewCarEncoders>(nodes,hardware);
+    servoIo.initializeReferenceServo();
+}
+void openCamera(cv::VideoCapture& camera,const Config& config,const car2026::HardwareConfig& hardware) {
+    if(!camera.open(hardware.camera_device,cv::CAP_V4L2)) throw std::runtime_error("Cannot open camera");
+    camera.set(cv::CAP_PROP_FRAME_WIDTH,config.width);camera.set(cv::CAP_PROP_FRAME_HEIGHT,config.height);
+    camera.set(cv::CAP_PROP_FPS,config.fps);camera.set(cv::CAP_PROP_BUFFERSIZE,1);
+}
+int prepareStartup(const Config& config,const car2026::HardwareConfig& hardware,const ParkingTuning& tuning,
+        const RehearsalStartupGate& gate) {
+    if(!isatty(STDIN_FILENO)) throw std::runtime_error("Interactive terminal required");
+    car2026::LinuxSysfsNodes nodes;
+    car2026::SysfsBoardIo motorIo(nodes,hardware),servoIo(nodes,hardware);
+    std::unique_ptr<car2026::NewCarEncoders> encoders;cv::VideoCapture camera;
+    initializeReferenceHardware(nodes,motorIo,servoIo,hardware,tuning,encoders);
+    openCamera(camera,config,hardware);
+    if(interrupted) {std::cout<<"PREPARE_INTERRUPTED: 初始化期间中断；下次仍需首次准备。"<<std::endl;return 1;}
+    std::cout<<"【第一次启动：阶段 "<<tuning.stage<<' '<<stageNames[tuning.stage-1]
+        <<"】硬件初始化完成；不执行阶段动作、不采集录像或CSV。请先关舵机开关，再按Ctrl+C结束；随后运行同一命令进入第二次启动。"<<std::endl;
+    while(!interrupted) {
+        pollfd input{STDIN_FILENO,POLLIN,0};const int ready=poll(&input,1,100);
+        if(ready<0 && errno!=EINTR) throw std::runtime_error("Preparation terminal poll failed");
+        if(ready>0 && (input.revents&(POLLHUP|POLLERR|POLLNVAL))) throw std::runtime_error("Preparation terminal disconnected");
+        if(ready>0 && (input.revents&POLLIN)) readTerminalLines();
+    }
+    if(interrupted!=SIGINT) {std::cout<<"PREPARE_CANCELLED: 本次未完成Ctrl+C准备顺序。"<<std::endl;return 1;}
+    gate.markPrepared();
+    std::cout<<"PREPARE_COMPLETE：第一次结束；现在再次运行同一命令。此次没有试验记录，无需选择Y/N。"<<std::endl;
+    return 0;
+}
 int run(const Options& options,const Config& config,const car2026::HardwareConfig& hardware,
         const car2026::Params& params,const ParkingTuning& tuning,bool partial) {
     if(!isatty(STDIN_FILENO)) throw std::runtime_error("Interactive terminal required; piped permissions are rejected");
     termios terminal{};
     if(tcgetattr(STDIN_FILENO,&terminal)!=0 || !(terminal.c_lflag&ICANON))
         throw std::runtime_error("Canonical terminal required (press keys then Enter)");
-    car2026::HardwareLock lock;
     const bool sysfs=hardware.motor_backend=="sysfs";
     car2026::LinuxDeviceIo factoryServoIo(hardware),factoryMotorIo(hardware);
     car2026::LinuxSysfsNodes nodes;
@@ -251,10 +288,9 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     std::unique_ptr<car2026::NewCarEncoders> nativeEncoders;
     std::unique_ptr<RehearsalServo> servo;
     std::unique_ptr<RehearsalMotor> motor;
-    cv::VideoCapture camera(hardware.camera_device,cv::CAP_V4L2);
-    if(!camera.isOpened()) throw std::runtime_error("Cannot open camera");
-    camera.set(cv::CAP_PROP_FRAME_WIDTH,config.width);camera.set(cv::CAP_PROP_FRAME_HEIGHT,config.height);
-    camera.set(cv::CAP_PROP_FPS,config.fps);camera.set(cv::CAP_PROP_BUFFERSIZE,1);
+    cv::VideoCapture camera;
+    if(sysfs) initializeReferenceHardware(nodes,*sysfsMotorIo,*sysfsServoIo,hardware,tuning,nativeEncoders);
+    openCamera(camera,config,hardware);
     const int64_t origin=monotonicNs();
     const fs::path directory=fs::path(options.output)/("rehearsal_"+std::to_string(std::time(nullptr))+"_"+std::to_string(getpid())+"_"+std::to_string(origin));
     fs::create_directories(directory.parent_path());
@@ -300,6 +336,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         for(const auto& event:events) {
             deferredEvents.push_back(event);
             const bool matches=event.stage==model.stage() && event.trial==model.trial() && event.segment==model.segment();
+            timing.segmentEnd(event.stage,event.trial,event.segment,event.endNs);
             const bool lastAction=event.segment==1 || !isBendStage(event.stage) || model.currentTuning().correction.holdSeconds==0;
             if(!final && event.error.empty() && matches && lastAction && motor && model.currentTuning().powered() &&
                model.state()==ParkingRehearsal::State::Running && !model.motorRestartRequired()) {
@@ -326,6 +363,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
              <<"可选两步修正；P暂停记录并停电机，C只恢复记录，Enter重新运动；Q提前结束。Y/N直接按键。\n"
              <<(sysfs ? "新车电机单位=duty_ns，period=50000ns；原生编码器速度=rps，不推断实际停稳。\n" : "速度默认counts/s；只有填写实测speed_*_cm_per_count后才输出cm/s。\n");
     try {
+        if(sysfs) std::cout<<"【第二次启动：正式试验】硬件初始化完成；现在打开舵机开关，准备好后Enter执行并记录阶段。结束先关舵机，再Q退出。"<<std::endl;
         while(!model.finished()) {
             collectMotorEvents();
             collectHoldEvents();
@@ -485,7 +523,10 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                         }
                         collectMotorEvents();
                     }
-                    if(!stopWait) beginTrialHold(correction ? "AUTO_CORRECTION" : "MOTION_READY");
+                    if(!stopWait) {
+                        timing.segmentBegin(model.stage(),model.trial(),model.segment(),monotonicNs());
+                        beginTrialHold(correction ? "AUTO_CORRECTION" : "MOTION_READY");
+                    }
                     recording.row(model,"MOTION_READY",before,monotonicNs(),origin,written);
                     std::cout<<(model.currentTuning().powered() ? "【电机开始执行】" : model.stage()==5 ? "【停止确认，请保持静止】" : "【开始推/拉】")<<std::endl;
                     pendingMotion=false;
@@ -537,6 +578,8 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
             if(lastState!=model.stateName() || elapsed-lastStatus>=1) {
                 if(servo) written=servo->written();
                 showStatus(model,written);
+                if(const auto measured=timing.elapsed(model.stage(),model.trial(),monotonicNs()))
+                    std::cout<<"当前阶段实际持续时间="<<*measured<<"s（旁路记录，不改变动作）"<<std::endl;
                 if(following) std::cout<<"巡线="<<(lineSession.waiting() ? "WAIT_LINE" : motor && motor->active() ? "ACTIVE" : "OBSERVE/STOPPED")
                     <<" | 黑线有效="<<lineObservation.reliable<<" | 真实点行="<<lineObservation.rows<<" | 目标x="<<lineObservation.target
                     <<"/160 | 滤波误差="<<lineSession.controller.error()<<std::endl;
@@ -601,8 +644,14 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
     closeText(speedSummary,directory/"stage_speed_summary.csv");
     auto timingSummary=outputFile(directory/"stage_timing_summary.csv");timing.writeSummary(timingSummary,origin);
     closeText(timingSummary,directory/"stage_timing_summary.csv");
-    for(const auto& row:timing.rows()) if(row.stage==0 && row.end)
-        std::cout<<"阶段1执行持续时间="<<double(row.end-row.ready)/1e9<<"s；不包含启动等待和Y/N确认。"<<std::endl;
+    for(const auto& row:timing.rows()) if(row.end) {
+        std::cout<<"阶段"<<row.stage+1<<' '<<stageNames[row.stage]<<" 实际持续时间="<<double(row.end-row.ready)/1e9<<"s";
+        if(row.motorStart && row.motorStop>=row.motorStart)
+            std::cout<<"；电机输出时间="<<double(row.motorStop-row.motorStart)/1e9<<"s";
+        for(unsigned segment=0;segment<2;++segment) if(row.segmentStarted[segment] && row.segmentEnded[segment])
+            std::cout<<"；"<<rehearsalSegmentTitle(row.stage,segment)<<'='<<double(row.segmentEnd[segment]-row.segmentStart[segment])/1e9<<"s";
+        std::cout<<"；不包含启动等待和Y/N确认。"<<std::endl;
+    }
     if(retention.decide()==SaveChoice::No) return failure.empty() ? (partial?2:0) : 1;
     auto metadata=outputFile(directory/"session.txt");
     metadata<<"version="<<rehearsalVersion<<"\nresult="<<(failure.empty()?model.outcome():"ERROR")
@@ -612,10 +661,28 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         <<"\nmotor_backend="<<hardware.motor_backend<<"\nmotor_units="<<(sysfs ? "duty_ns" : "raw_pwm")<<"\nmotor_limit=per_device_duty_max\nnormalized_motor_scale_used=0"
         <<"\nservo_zero_on_exit="<<(exitZeroAttempted ? (exitZeroSucceeded ? "software_write_completed":"failed") : "not_attempted")
         <<"\nmanual_parking_success=not_inferred\nvideo_timing=use_csv_monotonic_timestamps_not_nominal_fps\n"
-        <<"recording_start=one_enter_or_valid_file_save\nspeed_summary=stage_speed_summary.csv\nspeed_default_unit="<<(sysfs ? "rps" : "counts/s")<<"\ntiming_summary=stage_timing_summary.csv\n";
+        <<"recording_start=one_enter_or_valid_file_save\nstartup_sequence="<<(sysfs ? "second_invocation_after_preparation" : "single_invocation")
+        <<"\nspeed_summary=stage_speed_summary.csv\nspeed_default_unit="<<(sysfs ? "rps" : "counts/s")<<"\ntiming_summary=stage_timing_summary.csv\n";
     closeText(metadata,directory/"session.txt");retention.saved();
     std::cout<<"SAVED "<<directory<<" result="<<(failure.empty()?model.outcome():"ERROR")<<std::endl;
     return failure.empty() ? (partial?2:0) : 1;
+}
+std::string startupFile(const fs::path& path) {
+    std::ifstream input(path,std::ios::binary);
+    if(!input) throw std::runtime_error("Cannot read startup identity: "+path.string());
+    std::string result((std::istreambuf_iterator<char>(input)),{});
+    if(input.bad()) throw std::runtime_error("Cannot read startup identity: "+path.string());
+    return result;
+}
+std::string startupIdentity(const Options& options,const ParkingTuning& tuning) {
+    std::string identity=std::string(rehearsalVersion)+"\n"+std::to_string(tuning.stage)+"\n"+
+        std::to_string(tuning.single)+"\n"+std::to_string(tuning.stages[size_t(tuning.stage-1)].correctionOnly)+"\n";
+    for(const auto& path:{fs::path("/proc/sys/kernel/random/boot_id"),fs::path(options.hardware),fs::path(options.vehicle),fs::path(options.capture)}) {
+        const auto text=startupFile(path);
+        identity+=std::to_string(text.size())+":"+text;
+    }
+    identity+=fs::absolute(options.tuning).lexically_normal().string();
+    return identity;
 }
 }
 int main(int argc,char** argv) {
@@ -628,6 +695,7 @@ int main(int argc,char** argv) {
                 <<"Enter: record/set servo, settle, then start configured motor/timers. P: pause recording and stop motors; C: resume recording only; Enter required to move again. Q: finish.\n"
                 <<"auto_reload=save; powered settings settle before motor start; paused motors require fresh Enter. motor_run_time_s=0 disables motors.\n"
                 <<"motor_units=factory:raw_pwm/sysfs:duty_ns; integer amplitudes write verbatim. No tuning cap; device duty_max enforced.\n"
+                <<"sysfs_startup=two-pass: first initialize only, Ctrl+C to finish preparation; second invocation waits for Enter to execute/record. Applies to all six stages.\n"
                 <<"Saved timed trial ends after center; save_confirmation=single-key Y/N (no Enter, one prompt); restart=manual.\n"
                 <<"Stage 2: left bend then right correction; stage_2_step=right_correction selects correction-only tuning.\n"
                 <<"Stage 4: right bend then left correction; stage_4_step=left_correction selects correction-only tuning.\n"
@@ -652,6 +720,11 @@ int main(int argc,char** argv) {
         for(const auto& name:missing) std::cout<<"UNCONFIGURED "<<name<<'\n';
         if(options.check) {std::cout<<"Config checked without hardware access\n";return missing.empty()?0:2;}
         std::signal(SIGINT,signalHandler);std::signal(SIGTERM,signalHandler);
+        car2026::HardwareLock lock;
+        if(hardware.motor_backend=="sysfs") {
+            const RehearsalStartupGate gate(fs::path(options.tuning).string()+".startup_ready",startupIdentity(options,tuning));
+            if(!gate.consumePrepared()) return prepareStartup(config,hardware,tuning,gate);
+        }
         return run(options,config,hardware,params,tuning,!missing.empty());
     } catch(const std::exception& error) {std::cerr<<"parking_rehearsal: "<<error.what()<<'\n';return 1;}
 }

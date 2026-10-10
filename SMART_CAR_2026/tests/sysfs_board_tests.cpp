@@ -16,7 +16,7 @@ class MemoryNodes final:public SysfsNodes {
     std::vector<std::pair<std::string,std::string>> writes_;
 public:
     std::string failedPath,failedValue;
-    bool corruptPeriod=false;
+    bool corruptPeriod=false,rejectUnsetDisable=true;
     bool exists(const std::string& p) override {std::lock_guard<std::mutex> held(mutex_);return files_.count(p)!=0;}
     std::string read(const std::string& p) override {
         std::lock_guard<std::mutex> held(mutex_);
@@ -25,6 +25,8 @@ public:
     }
     void write(const std::string& p,const std::string& v) override {
         std::lock_guard<std::mutex> held(mutex_);writes_.emplace_back(p,v);
+        if(rejectUnsetDisable && v=="0" && p.find("/enable")!=std::string::npos && files_.at(p.substr(0,p.size()-7)+"/period")=="0")
+            throw std::runtime_error("Invalid argument: unset PWM period");
         if(p==failedPath && v==failedValue) throw std::runtime_error("Injected output failure");
         if(p=="/sys/class/gpio/export") {
             const auto dir="/sys/class/gpio/gpio"+v;
@@ -32,7 +34,7 @@ public:
         } else if(p.find("/export")!=std::string::npos) {
             const auto dir=p.substr(0,p.size()-7)+"/pwm"+v;
             for(const auto& name:{"period","duty_cycle","enable"}) files_[dir+"/"+name]="0";
-            files_[dir+"/polarity"]="inversed";
+            files_[dir+"/polarity"]="normal";
         } else if(p.find("/direction")!=std::string::npos) {
             files_.at(p)=v=="low" ? "out" : v;
             if(v=="low") files_[p.substr(0,p.size()-10)+"/value"]="0";
@@ -71,6 +73,10 @@ int main() {
         ServoOutput servo(io,hardware,params);
         check(nodes.writes().empty(),"servo metadata requires no GPIO/PWM outputs");
         check(servo.set(10)==1511556,"servo pulse remains uint32 and includes mechanical offset");
+        const auto initialization=nodes.writes();const std::string servoDir="/sys/class/pwm/pwmchip2/pwm0";
+        check(findWrite(initialization,servoDir+"/period","3040000")<findWrite(initialization,hardware.servo_pwm,"1520000"),"reference servo writes period before initial midpoint");
+        check(findWrite(initialization,hardware.servo_pwm,"1520000")<findWrite(initialization,servoDir+"/enable","1"),"reference servo writes initial midpoint before enabling output");
+        check(findWrite(initialization,servoDir+"/enable","0")==initialization.size(),"reference servo has no initial disable write");
         check(!nodes.exists(hardware.motor_enable_gpio),"servo-only writes do not initialize motors");
         servo.close();check(sysfsNumber(nodes.read(hardware.servo_pwm))==1494667,"shutdown uses new-car calibrated zero");
         rejects([&]{io.writePwmDuty(hardware.servo_pwm,100);},"servo cannot use uint16 motor output API");
@@ -80,12 +86,19 @@ int main() {
         check(nodes.read(hardware.motor_enable_gpio)=="0","motor initialization leaves nSLEEP off");
         check(nodes.read(hardware.motor_left_pwm)=="0" && nodes.read(hardware.motor_right_pwm)=="0","motor initialization zeros both channels");
         check(nodes.read("/sys/class/pwm/pwmchip8/pwm2/period")=="50000","period is reference 20kHz");
-        check(nodes.read("/sys/class/pwm/pwmchip8/pwm2/polarity")=="normal","prior inverted output polarity restored before starting");
-        motor.start(3000,4000,.04,0,1,1);
+        check(nodes.read("/sys/class/pwm/pwmchip8/pwm2/polarity")=="normal","reference PWM polarity left unchanged");
+        const auto initialization=nodes.writes();
+        const auto leftDir="/sys/class/pwm/pwmchip8/pwm2";
+        check(findWrite(initialization,std::string(leftDir)+"/enable","0")==initialization.size(),"reference initialization has no pre-period PWM disable");
+        check(findWrite(initialization,std::string(leftDir)+"/enable","1")<findWrite(initialization,std::string(leftDir)+"/period","50000"),"reference motor enables before period");
+        check(findWrite(initialization,std::string(leftDir)+"/period","50000")<findWrite(initialization,hardware.motor_left_pwm,"0"),"reference motor sets period before zero duty");
+        check(findWrite(initialization,hardware.motor_right_pwm,"0")<findWrite(initialization,"/sys/class/gpio/gpio12/direction","out"),"reference initializes both PWM channels before output GPIO directions");
+        const auto priorWrites=nodes.writes().size();motor.start(3000,4000,.04,0,1,1);
         const auto writes=nodes.writes();
         check(nodes.read(hardware.motor_left_pwm)=="3000" && nodes.read(hardware.motor_right_pwm)=="4000","tuning values written exactly, no old scaling");
         check(nodes.read(hardware.motor_left_dir)=="0" && nodes.read(hardware.motor_right_dir)=="0","forward GPIO is zero on both wheels");
-        check(findWrite(writes,hardware.motor_enable_gpio,"1")>findWrite(writes,hardware.motor_right_pwm,"4000"),"enable follows both configured PWM writes");
+        const std::vector<std::pair<std::string,std::string>> startWrites(writes.begin()+priorWrites,writes.end());
+        check(findWrite(startWrites,hardware.motor_enable_gpio,"1")>findWrite(startWrites,hardware.motor_right_pwm,"4000"),"motion release follows both configured PWM writes");
         std::this_thread::sleep_for(std::chrono::milliseconds(90));
         check(!motor.active(),"independent timer stops new-car motors");
         check(nodes.read(hardware.motor_left_pwm)=="0" && nodes.read(hardware.motor_right_pwm)=="0" && nodes.read(hardware.motor_enable_gpio)=="0","timer clears both duties and nSLEEP");
