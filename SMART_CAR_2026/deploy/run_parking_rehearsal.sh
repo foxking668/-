@@ -13,8 +13,8 @@ fi
 export LD_LIBRARY_PATH="/home/root/opencv-4.11-loongarch/install/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 program_help=$("$program" --help)
 case "$program_help" in
-    *'parking_rehearsal version=2026-10-10.4'*'--tuning-config'*) ;;
-    *) printf '%s\n' 'Wrong tuning program; require parking_rehearsal version=2026-10-10.4.' >&2; exit 1 ;;
+    *'parking_rehearsal version=2026-10-10.5'*'--tuning-config'*) ;;
+    *) printf '%s\n' 'Wrong tuning program; require parking_rehearsal version=2026-10-10.5.' >&2; exit 1 ;;
 esac
 # Install the template once. Never overwrite the user's tuning file.
 if [ ! -e config/parking_tuning.ini ]; then

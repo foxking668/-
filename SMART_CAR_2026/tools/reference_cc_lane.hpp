@@ -17,7 +17,7 @@ public:
     CcLaneObservation analyze(const cv::Mat& frame);
 };
 inline double ccLaneServoCommand(const CcLaneObservation& observation,double limit) {
-    if(!observation.line.reliable || !std::isfinite(observation.error) || !std::isfinite(limit) || limit<=0 || limit>15)
+    if(!observation.line.reliable || !std::isfinite(observation.error) || !std::isfinite(limit) || limit<=0 || limit>ccParkingSteerLimit)
         throw std::runtime_error("Invalid CC lane observation or servo limit");
     // cc sends angle=90+error. Our servo API receives the relative error;
     // its existing mechanical offset and native pulse conversion remain intact.

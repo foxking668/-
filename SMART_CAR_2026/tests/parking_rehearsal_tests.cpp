@@ -42,6 +42,33 @@ int main() {
     auto onlySpeedText=combinedText;
     onlySpeedText.insert(onlySpeedText.find("[stage_2]"),"motor_run_time_s=7\n");
     const auto onlySpeed=ParkingTuning::parse(onlySpeedText,true);
+    auto wideText=onlySpeedText;
+    wideText.replace(wideText.find("steer_command=-10"),17,"steer_command=-30");
+    wideText.insert(wideText.find("[stage_3]"),"correction_steer_command=30\ncorrection_hold_time_s=1\n");
+    const auto wide=ParkingTuning::parse(wideText,true);wide.validate(30);
+    check(wide.stages[1].command==-30 && wide.stages[1].correction.command==30,"CC primary and reverse correction accept signed 30 boundary");
+    ParkingRehearsal wideTrial(wide);start(wideTrial,0);
+    auto wideChange=wide;wideChange.stages[1].command=-25.5;
+    check(wideTrial.applySaved(wideChange,1)==-25.5,"expanded decimal command also passes saved-execution model validation");
+    rejects([&]{wide.validate(15);},"existing lower vehicle limit still rejects expanded commands");
+    for(double value:{-30.01,30.01}) {
+        auto invalid=wide;invalid.stages[1].command=value;
+        rejects([&]{invalid.validate(35);},"vehicle limit above 30 cannot bypass new-car command ceiling");
+    }
+    auto invalidWide=wide;invalidWide.stages[1].correction.command=30.01;
+    rejects([&]{invalidWide.validate();},"expanded correction still enforces 30 ceiling");
+    auto wideSecond=wide;wideSecond.stage=4;wideSecond.stages[3].command=30;wideSecond.stages[3].correction={-30,1};
+    wideSecond.validate(30);
+    check(wideSecond.stages[3].correction.command==-30,"second bend supports opposite signed 30 boundary");
+    SavedTuningWatcher wideWatcher(onlySpeed,30);
+    wideWatcher.observe(wideText,0);
+    check(wideWatcher.observe(wideText,.4).has_value(),"hot-save accepts expanded CC commands under configured 30 limit");
+    auto wideLine=wide;wideLine.stage=1;wideLine.stages[0].holdSeconds=0;wideLine.stages[0].line.enabled=true;wideLine.stages[0].line.maxCommand=30;
+    wideLine.validate(30);
+    check(wideLine.stages[0].line.maxCommand==30,"CC line limit can also use 30 when explicitly configured");
+    wideLine.stages[0].line.maxCommand=30.01;
+    rejects([&]{wideLine.validate(35);},"CC line cap cannot exceed expanded command ceiling");
+    for(double limit:{0.,std::numeric_limits<double>::quiet_NaN()}) rejects([&]{wide.validate(limit);},"invalid vehicle steering limit rejected");
     check(onlySpeed.ccSpeedControl && onlySpeed.stages[0].powered(),"CC duration alone enables both wheels without raw PWM keys");
     for(size_t i=0;i<5;++i) check(onlySpeed.stages[i].motorLeft==1 && onlySpeed.stages[i].motorRight==1 &&
         onlySpeed.stages[i].speed.leftRps==4 && onlySpeed.stages[i].speed.rightRps==4,"all driving stages share one speed and automatic wheel enable");

@@ -1,7 +1,24 @@
 # 新车入库直接调参
 
 使用 `run_new_car_parking.sh`，调参文件为 **config/parking_tuning.new_car.ini**。
-这是原入库调参程序的新车接口版本 **2026-10-10.4**，没有另建电机测试程序。
+这是原入库调参程序的新车接口版本 **2026-10-10.5**，没有另建电机测试程序。
+
+### 本版舵机范围
+
+新车 `steer_command`、两弯的 `correction_steer_command` 及可调巡线限幅统一支持±30命令；小数也可用。仍受车辆配置 `max_steer_deg` 限制，超出会拒绝，不静默截断调参值。旧Factory模式保持±15。默认转弯命令、保持时间和 `line_max_command=15` 不自动加大。
+
+初始化顺序、3040000ns周期、中位偏置和cc脉宽公式不变。偏置为-15时，命令-30输出1444000ns、命令+30输出1545333ns；这是计算值，不是实测轮角或机械安全行程。
+
+解压不会覆盖已调整的车辆配置。已有板子需在程序退出后保留其他参数，只将 `/home/root/smartcar/gy/config/new_car_vehicle.ini` 中的 `max_steer_deg` 改为30，例如：
+
+```sh
+cd /home/root/smartcar/gy
+cp config/new_car_vehicle.ini config/new_car_vehicle.ini.before_steer30
+sed -i 's/^max_steer_deg=.*/max_steer_deg=30/' config/new_car_vehicle.ini
+sh ./run_new_car_parking.sh
+```
+
+启动应显示 `VERSION 2026-10-10.5` 和 `STEER_COMMAND_LIMIT +/-30`。如仍显示15，检查脚本打印的配置路径及车辆限幅。更换车辆配置后重新走两次启动流程。
 旧可执行文件不能读写新车接口；首次须编译并替换，之后直接修改INI并运行。
 本版直接调用与用户提供的 `cc(1).zip` 相同的增量PID源码，而不是继续固定输出3000。
 只需修改 `[session]` 的 `motor_target_rps` 一个数，即可一起调节左右轮和各行驶阶段的快慢。
@@ -43,13 +60,13 @@ sh deploy/build_new_car_parking.sh
 
 ```sh
 cd /home/root/smartcar/gy
-unzip -o parking_rehearsal_20261010_4_verified.zip
+unzip -o parking_rehearsal_20261010_5_verified.zip
 sha256sum -c PARKING_TUNING_SHA256SUMS
 chmod +x parking_rehearsal_20261007
 sh ./run_new_car_parking.sh
 ```
 
-启动版本必须显示2026-10-10.4及cc速度PID，旧版会直接拒绝。必须替换编译后的程序，单改INI不能升级。
+启动版本必须显示2026-10-10.5及cc速度PID，旧版会直接拒绝。必须替换编译后的程序，单改INI不能升级。
 六个阶段的单阶段试验统一按以下顺序操作；两次都执行同一条 `sh ./run_new_car_parking.sh`：
 
 1. 先关闭舵机电源开关，启动第一次。程序按参考代码顺序初始化PWM/GPIO、编码器、舵机及相机，不执行阶段动作、不创建试验录像或CSV。
@@ -97,7 +114,7 @@ motor_run_time_s=1
 | motor_pid_kp / motor_pid_ki / motor_pid_kd | `[session]`高级参数，原cc为64/32/48；一般只调共用速度，不改它们 |
 | motor_pid_pwm_limit | `[session]`PWM限幅，原cc为12000ns，可调100..50000；并非目标速度 |
 | motor_run_time_s | 本阶段总运行上限0..120秒；大于0自动驱动两轮，0完全禁用电机；阶段6必须为0 |
-| steer_command | 舵机命令，负左正右，当前±15；并非前轮实际转角 |
+| steer_command | 舵机命令，负左正右，当前±30；并非前轮实际转角 |
 | hold_time_s | 主转向保持0..120秒；0不启用该转向计时 |
 | correction_steer_command | 阶段2的右修正/阶段4的左修正命令 |
 | correction_hold_time_s | 反向修正保持秒数，0关闭修正 |
@@ -153,11 +170,11 @@ motor_run_time_s=1
 本版本离线验证覆盖原cc PID计算和内存池复用、共用速度解析/保存执行、阶段状态机、独立PID更新/停机、PWM使能补写及失败清零、两次启动和部署脚本；原cc普通巡线源码/配置64项对照通过，相对舵机命令及限幅31项测试通过。Linux入口和图像模块使用实际OpenCV头文件完成目标文件编译，未链接目标板OpenCV，也未执行实车硬件验证。
 未在此Windows环境生成或运行LoongArch可执行文件，需按上面的虚拟机命令编译。
 
-## 阶段1原cc巡线（2026-10-10.4）
+## 阶段1原cc巡线（2026-10-10.5）
 
 直接复用cc(1).zip普通NewTrack/7.25巡线链路：相机帧先按原Camera最近邻缩放80×60，裁剪顶部5%、底部2%；原HandleImage用HSV范围(0,0,46)至(180,48,255)提取白色区域，11×1横向闭运算用于边界。原FindLine/FindStartPos/FixLine找边和补线，关闭图像边缘代理，原NewTrack逐行历史路宽补单边界。中心黑线可靠时用近区加权黑线，否则按原单边界偏置、局部黑线70%混合兜底。
 
-原center_pratio=0.42；舵机误差为4×atan2(目标x−宽×0.42,高/2)，转换为度并按原代码转float。原Steer接受90+误差，本程序相对角接口直接接收误差，沿用既有机械偏置和脉宽换算。只保留最后的line_max_command及车辆±15限制，没有原先的PD/滤波/预瞄/变化率限速。底层电机仍是cc原速度PID，motor_target_rps只控制轮速。
+原center_pratio=0.42；舵机误差为4×atan2(目标x−宽×0.42,高/2)，转换为度并按原代码转float。原Steer接受90+误差，本程序相对角接口直接接收误差，沿用既有机械偏置和脉宽换算。只保留最后的line_max_command及车辆±30限制，没有原先的PD/滤波/预瞄/变化率限速。底层电机仍是cc原速度PID，motor_target_rps只控制轮速。
 
 原有效边界也可在黑线暂时不可靠时巡线。现有连续3帧且0.1秒启动确认、持续丢线停车、时间上限、暂停和结束锁仍然保留。原比赛的发车右偏、蓝锥、环岛、斑马线、计圈及自动车库不在普通巡线范围内，也不会覆盖阶段1指定速度或持续时间。阶段2～5继续使用既有角度/时间倒车。
 

@@ -6,7 +6,7 @@
 #include <optional>
 #include <functional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-10.4";
+constexpr const char* rehearsalVersion="2026-10-10.5";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct BendCorrection {double command=0,holdSeconds=0;};
@@ -56,14 +56,16 @@ struct ParkingTuning {
                 throw std::runtime_error("Reference PID limit exceeds configured PWM period");
         }
     }
-    void validate(double limit=15) const {
+    void validate(double limit=ccParkingSteerLimit) const {
         referenceSpeed.validate();
+        if(!std::isfinite(limit) || limit<=0) throw std::runtime_error("Invalid vehicle steering limit");
+        const double commandLimit=std::min(ccSpeedControl ? ccParkingSteerLimit : legacyParkingSteerLimit,limit);
         if(stage<1 || stage>6) throw std::runtime_error("stage must be 1..6");
         for(double scale:{speedLeftCmPerCount,speedRightCmPerCount})
             if(!std::isfinite(scale) || scale<0 || scale>10)
                 throw std::runtime_error("speed_*_cm_per_count must be 0..10 (0=uncalibrated)");
         for(const auto& item:stages)
-            if(!std::isfinite(item.command) || std::abs(item.command)>std::min(15.,limit) ||
+            if(!std::isfinite(item.command) || std::abs(item.command)>commandLimit ||
                !std::isfinite(item.settleSeconds) || item.settleSeconds<.5 || item.settleSeconds>5 ||
                !std::isfinite(item.holdSeconds) || item.holdSeconds<0 || item.holdSeconds>120)
                 throw std::runtime_error("steer_command exceeds limit, settle_time_s outside 0.5..5, or hold_time_s outside 0..120");
@@ -71,7 +73,7 @@ struct ParkingTuning {
             const auto& item=stages[size_t(index)];const auto& correction=item.correction;
             const double direction=index==1 ? 1. : -1.;
             const auto label="stage_"+std::to_string(index+1);
-            if(!std::isfinite(correction.command) || correction.command*direction<0 || std::abs(correction.command)>std::min(15.,limit) ||
+            if(!std::isfinite(correction.command) || correction.command*direction<0 || std::abs(correction.command)>commandLimit ||
                !std::isfinite(correction.holdSeconds) || correction.holdSeconds<0 || correction.holdSeconds>120)
                 throw std::runtime_error(label+" correction has wrong direction, exceeds limit, or hold time outside 0..120");
             if(correction.holdSeconds>0 && (correction.command*direction<=0 || (!item.correctionOnly && (item.command*direction>=0 || item.holdSeconds<=0))))
@@ -87,7 +89,7 @@ struct ParkingTuning {
         for(size_t i=0;i<stages.size();++i) {
             const auto& item=stages[i];
             item.speed.validate();
-            item.line.validate(item.line.enabled ? limit : 15);
+            item.line.validate(item.line.enabled ? commandLimit : (ccSpeedControl ? ccParkingSteerLimit : legacyParkingSteerLimit));
             if(item.line.enabled && (i!=0 || !single || item.command!=0 || item.holdSeconds!=0 || item.motorLeft<=0 || item.motorRight<=0))
                 throw std::runtime_error("Line following requires single stage_1, steer_command=0, hold_time_s=0 and positive motor amplitudes (run time 0 may disable motors)");
             for(double command:{item.motorLeft,item.motorRight})
@@ -250,12 +252,14 @@ inline std::string normalizeCcSpeedSource(const std::string& source) {
     }
     if(section=="session" && !hasTarget) {output<<"motor_target_rps=9\n";changed=true;}
     if(!changed) return source;
-    const auto upgraded=std::string("# 2026-10-10.4：共用motor_target_rps调速；阶段1使用cc原7.25巡线，无旧PD调参。\n")+output.str();
+    const auto upgraded=std::string("# 2026-10-10.5：共用motor_target_rps调速；阶段1使用cc原7.25巡线，无旧PD调参。\n")+output.str();
     ParkingTuning::parse(upgraded,true);return upgraded;
 }
 inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory",bool ccSpeed=false) {
     out<<"VERSION "<<rehearsalVersion<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
+    out<<"舵机调参命令范围="<<(ccSpeed ? ccParkingSteerLimit : legacyParkingSteerLimit)
+        <<"以内（正右负左），实际还受车辆max_steer_deg限制；不是实测前轮角度。\n";
     out<<"阶段1巡线="<<(tuning.stages[0].line.enabled ? "启用（电机时间为0时仅观察）" : "关闭")<<"；不含交点分支选择。\n";
     if(ccSpeed) out<<"巡线=CC_725：80x60最近邻缩放，裁剪顶5%/底2%，HSV白色掩膜、轮廓补线、中心黑线优先；center_pratio=0.42，直接舵机误差，无旧PD滤波。\n";
     if(ccSpeed) out<<"电机控制=cc增量速度PID，每50ms更新；只调[session] motor_target_rps，两轮共用目标rps；阶段时间控制启停；PWM由PID计算。\n";

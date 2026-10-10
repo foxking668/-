@@ -56,6 +56,7 @@ int main() {
     check(hardware.motor_backend=="sysfs" && !hardware.factory_write_readback,"new-car decimal backend");
     check(hardware.encoder_left_sign==1 && hardware.encoder_right_sign==1,"native reference encoder signs");
     check(params.steer_offset_deg==-15 && !params.require_imu,"new-car steering offset without IMU");
+    check(params.max_steer_deg==30,"delivered new-car profile opens command range to 30");
     check(sysfsNumber("50000\n")==50000,"sysfs whitespace readback accepted");
     for(const auto& invalid:{"-1","+1","50000ns","1.5","4294967296",""}) rejects([&]{sysfsNumber(invalid);},"malformed integer rejected");
     rejects([]{sysfsPwmDirectory("/sys/class/pwm/pwmchip8/pwm2junk/duty_cycle");},"PWM channel traversal rejected");
@@ -78,6 +79,11 @@ int main() {
         check(findWrite(initialization,hardware.servo_pwm,"1520000")<findWrite(initialization,servoDir+"/enable","1"),"reference servo writes initial midpoint before enabling output");
         check(findWrite(initialization,servoDir+"/enable","0")==initialization.size(),"reference servo has no initial disable write");
         check(!nodes.exists(hardware.motor_enable_gpio),"servo-only writes do not initialize motors");
+        check(servo.set(-30)==1444000,"negative 30 retains exact cc pulse formula and offset");
+        check(servo.set(30)==1545333,"positive 30 retains exact cc pulse formula and offset");
+        const auto beforeRejected=nodes.writes().size();
+        for(double command:{-30.01,30.01}) rejects([&]{servo.set(command);},"expanded native servo still rejects commands beyond configured limit");
+        check(nodes.writes().size()==beforeRejected,"out-of-range steering cannot write a PWM value");
         servo.close();check(sysfsNumber(nodes.read(hardware.servo_pwm))==1494667,"shutdown uses new-car calibrated zero");
         rejects([&]{io.writePwmDuty(hardware.servo_pwm,100);},"servo cannot use uint16 motor output API");
     }

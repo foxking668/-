@@ -1,4 +1,5 @@
 #pragma once
+#include "rehearsal_steering_limits.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -12,10 +13,10 @@ struct LineFollowTuning {
     double maxCommand=8,slewPerSecond=30,targetX=79.5;
     double cropTop=.30,cropBottom=.95,lostSeconds=.35,acquireSeconds=3;
     int contrast=16,maxWidth=26;
-    void validate(double limit=15) const {
+    void validate(double limit=legacyParkingSteerLimit) const {
         const auto range=[](double v,double lo,double hi) {return std::isfinite(v) && v>=lo && v<=hi;};
         if(!range(kp,0,2) || !range(kd,0,.2) || !range(preview,0,1) || !range(filterSeconds,.02,1) ||
-           !range(deadbandPx,0,5) || !range(maxCommand,1,std::min(15.,limit)) || !range(slewPerSecond,1,100) ||
+           !range(deadbandPx,0,5) || !range(maxCommand,1,std::min(ccParkingSteerLimit,limit)) || !range(slewPerSecond,1,100) ||
            !range(targetX,40,120) || !range(cropTop,0,.75) || !range(cropBottom,.5,1) || cropBottom-cropTop<.2 ||
            !range(lostSeconds,.05,.5) || !range(acquireSeconds,.5,10) || contrast<8 || contrast>80 || maxWidth<4 || maxWidth>40)
             throw std::runtime_error("Invalid stage_1 line-follow parameters; see PARKING_TUNING.md");

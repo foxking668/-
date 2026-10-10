@@ -21,7 +21,7 @@ class PackageTests(unittest.TestCase):
         self.archive = self.directory / 'test.zip'
     def tearDown(self):
         shutil.rmtree(self.directory)
-    def elf(self, machine=258, marker=b'--tuning-config', version=b'2026-10-10.4'):
+    def elf(self, machine=258, marker=b'--tuning-config', version=b'2026-10-10.5'):
         data = bytearray(64)
         data[:6] = b'\x7fELF\x02\x01'
         data[18:20] = machine.to_bytes(2, 'little')
@@ -57,7 +57,7 @@ class PackageTests(unittest.TestCase):
         launcher = self.directory / 'run_parking_rehearsal.sh'
         launcher.write_bytes((ROOT / 'deploy/run_parking_rehearsal.sh').read_bytes())
         fake = self.directory / 'parking_rehearsal_20261007'
-        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-10.4 --tuning-config"; else printf "%s\\n" "$@" > received_args; fi\n', newline='\n')
+        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-10.5 --tuning-config"; else printf "%s\\n" "$@" > received_args; fi\n', newline='\n')
         fake.chmod(0o755)
         (self.directory / 'parking_tuning.example.ini').write_bytes(b'template')
         folder = self.directory / 'config'
@@ -79,7 +79,7 @@ class PackageTests(unittest.TestCase):
         if not shell or not Path(shell).exists(): self.skipTest('Bash unavailable')
         (self.directory / 'run_new_car_parking.sh').write_bytes((ROOT / 'deploy/run_new_car_parking.sh').read_bytes())
         fake = self.directory / 'parking_rehearsal_20261007'
-        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-10.4 --upgrade-cc-tuning --cc-motor-control sysfs:duty_ns"; else printf "%s\\n" "$@" > received_args; printf "%s\\n" "$@" >> all_args; fi\n', newline='\n')
+        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-10.5 --upgrade-cc-tuning --cc-motor-control sysfs:duty_ns"; else printf "%s\\n" "$@" > received_args; printf "%s\\n" "$@" >> all_args; fi\n', newline='\n')
         fake.chmod(0o755)
         folder = self.directory / 'config'; folder.mkdir()
         (self.directory / 'parking_tuning.new_car.example.ini').write_bytes(b'template')
@@ -117,7 +117,7 @@ class PackageTests(unittest.TestCase):
         if not shell or not Path(shell).exists(): self.skipTest('Bash unavailable')
         (self.directory / 'run_new_car_parking.sh').write_bytes((ROOT / 'deploy/run_new_car_parking.sh').read_bytes())
         fake=self.directory / 'parking_rehearsal_20261007'
-        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-10.4 --upgrade-cc-tuning --cc-motor-control sysfs:duty_ns"; elif [ "$1" = --cc-motor-control ]; then exit 1; else touch hardware_started; fi\n', newline='\n')
+        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-10.5 --upgrade-cc-tuning --cc-motor-control sysfs:duty_ns"; elif [ "$1" = --cc-motor-control ]; then exit 1; else touch hardware_started; fi\n', newline='\n')
         fake.chmod(0o755)
         folder=self.directory / 'config';folder.mkdir()
         (folder / 'parking_tuning.new_car.ini').write_bytes(b'invalid-user-config')
@@ -154,7 +154,7 @@ class PackageTests(unittest.TestCase):
         (bins / 'python3').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> package_calls\n', newline='\n')
         result = subprocess.run([shell, '-c', 'chmod +x bin/*; export PATH="$(pwd)/bin:$PATH"; export PARKING_BUILD_ROOT="$(pwd)/out"; sh deploy/build_new_car_parking.sh'], cwd=self.directory, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
-        self.assertIn(b'READY 2026-10-10.4', result.stdout)
+        self.assertIn(b'READY 2026-10-10.5', result.stdout)
         calls = (self.directory / 'build_calls').read_text().splitlines()
         self.assertEqual(len(calls), 2)
         self.assertIn('--target parking_rehearsal --parallel 2', calls[1])

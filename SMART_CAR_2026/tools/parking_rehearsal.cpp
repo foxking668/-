@@ -766,6 +766,7 @@ int main(int argc,char** argv) {
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);
         const auto params=car2026::Params::load(options.vehicle);const auto tuning=ParkingTuning::load(options.tuning,options.ccSpeed);
         tuning.validate(params.max_steer_deg);
+        std::cout<<"STEER_COMMAND_LIMIT +/-"<<std::min(options.ccSpeed ? ccParkingSteerLimit : legacyParkingSteerLimit,params.max_steer_deg)<<'\n';
         if(options.ccSpeed) {
             if(hardware.motor_backend!="sysfs") throw std::runtime_error("--cc-motor-control requires sysfs native rps encoders");
             tuning.validateReferenceSpeed(hardware.motor_period_ns);

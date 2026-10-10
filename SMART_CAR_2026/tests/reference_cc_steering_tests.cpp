@@ -10,7 +10,7 @@ int main() {
             const double raw=cc_detail::centerToError(x,56,80,.42);
             check(std::abs(raw-std::atan2(x-33.6,28.)*180/std::acos(-1.)*4)<1e-10);
             CcLaneObservation obs;obs.line.reliable=true;obs.error=float(raw);
-            for(double limit: {1.,8.,15.}) check(ccLaneServoCommand(obs,limit)==std::clamp(double(obs.error),-limit,limit));
+            for(double limit: {1.,8.,15.,20.,30.}) check(ccLaneServoCommand(obs,limit)==std::clamp(double(obs.error),-limit,limit));
         }
         check(cc_detail::centerToError(28,56,80,.42)<0);
         check(cc_detail::centerToError(39,56,80,.42)>0);
@@ -18,7 +18,7 @@ int main() {
         bool rejected=false;try {ccLaneServoCommand(invalid,15);} catch(...) {rejected=true;}
         check(rejected);
         invalid.line.reliable=true;
-        for(double limit: {0.,16.,std::numeric_limits<double>::quiet_NaN()}) {
+        for(double limit: {0.,30.01,std::numeric_limits<double>::quiet_NaN()}) {
             rejected=false;try {ccLaneServoCommand(invalid,limit);} catch(...) {rejected=true;}
             check(rejected);
         }

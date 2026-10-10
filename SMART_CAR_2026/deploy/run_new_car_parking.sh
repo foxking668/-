@@ -17,8 +17,8 @@ if [ ! -x "$program" ]; then
 fi
 program_help=$("$program" --help)
 case "$program_help" in
-    *'parking_rehearsal version=2026-10-10.4'*'--upgrade-cc-tuning'*'--cc-motor-control'*'sysfs:duty_ns'*) ;;
-    *) printf '%s\n' 'Old executable: require 2026-10-10.4 single-speed cc PID version; do not reuse the old binary.' >&2; exit 1 ;;
+    *'parking_rehearsal version=2026-10-10.5'*'--upgrade-cc-tuning'*'--cc-motor-control'*'sysfs:duty_ns'*) ;;
+    *) printf '%s\n' 'Old executable: require 2026-10-10.5 single-speed cc PID version; do not reuse the old binary.' >&2; exit 1 ;;
 esac
 mkdir -p config
 for profile in new_car_hardware.ini new_car_vehicle.ini; do
