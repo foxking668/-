@@ -21,7 +21,7 @@ class PackageTests(unittest.TestCase):
         self.archive = self.directory / 'test.zip'
     def tearDown(self):
         shutil.rmtree(self.directory)
-    def elf(self, machine=258, marker=b'--tuning-config', version=b'2026-10-10.2'):
+    def elf(self, machine=258, marker=b'--tuning-config', version=b'2026-10-10.3'):
         data = bytearray(64)
         data[:6] = b'\x7fELF\x02\x01'
         data[18:20] = machine.to_bytes(2, 'little')
@@ -57,7 +57,7 @@ class PackageTests(unittest.TestCase):
         launcher = self.directory / 'run_parking_rehearsal.sh'
         launcher.write_bytes((ROOT / 'deploy/run_parking_rehearsal.sh').read_bytes())
         fake = self.directory / 'parking_rehearsal_20261007'
-        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-10.2 --tuning-config"; else printf "%s\\n" "$@" > received_args; fi\n', newline='\n')
+        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-10.3 --tuning-config"; else printf "%s\\n" "$@" > received_args; fi\n', newline='\n')
         fake.chmod(0o755)
         (self.directory / 'parking_tuning.example.ini').write_bytes(b'template')
         folder = self.directory / 'config'
@@ -79,7 +79,7 @@ class PackageTests(unittest.TestCase):
         if not shell or not Path(shell).exists(): self.skipTest('Bash unavailable')
         (self.directory / 'run_new_car_parking.sh').write_bytes((ROOT / 'deploy/run_new_car_parking.sh').read_bytes())
         fake = self.directory / 'parking_rehearsal_20261007'
-        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-10.2 --cc-motor-control sysfs:duty_ns"; else printf "%s\\n" "$@" > received_args; fi\n', newline='\n')
+        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-10.3 --upgrade-cc-tuning --cc-motor-control sysfs:duty_ns"; else printf "%s\\n" "$@" > received_args; printf "%s\\n" "$@" >> all_args; fi\n', newline='\n')
         fake.chmod(0o755)
         folder = self.directory / 'config'; folder.mkdir()
         (self.directory / 'parking_tuning.new_car.example.ini').write_bytes(b'template')
@@ -100,6 +100,32 @@ class PackageTests(unittest.TestCase):
         self.assertIn('config/new_car_hardware.ini', args)
         self.assertIn('config/parking_tuning.new_car.ini', args)
         self.assertIn('--cc-motor-control', args)
+        all_args=(self.directory / 'all_args').read_text().splitlines()
+        self.assertEqual(all_args.count('--upgrade-cc-tuning'), 2)
+        self.assertLess(all_args.index('--upgrade-cc-tuning'), all_args.index('--config'))
+
+    def test_new_car_template_only_has_global_target_and_durations(self):
+        tuning=(ROOT / 'deploy/config/parking_tuning.new_car.ini').read_text(encoding='utf-8')
+        self.assertNotIn('motor_left_command=', tuning)
+        self.assertNotIn('motor_right_command=', tuning)
+        self.assertEqual(tuning.count('motor_target_rps='), 1)
+        self.assertEqual(tuning.count('motor_run_time_s='), 6)
+        self.assertEqual(tuning, (ROOT / 'deploy/parking_tuning.new_car.example.ini').read_text(encoding='utf-8'))
+
+    def test_new_car_launcher_aborts_if_upgrade_fails(self):
+        shell=r'C:\Program Files\Git\bin\bash.exe' if sys.platform=='win32' else shutil.which('bash')
+        if not shell or not Path(shell).exists(): self.skipTest('Bash unavailable')
+        (self.directory / 'run_new_car_parking.sh').write_bytes((ROOT / 'deploy/run_new_car_parking.sh').read_bytes())
+        fake=self.directory / 'parking_rehearsal_20261007'
+        fake.write_text('#!/bin/sh\nif [ "$1" = --help ]; then echo "parking_rehearsal version=2026-10-10.3 --upgrade-cc-tuning --cc-motor-control sysfs:duty_ns"; elif [ "$1" = --cc-motor-control ]; then exit 1; else touch hardware_started; fi\n', newline='\n')
+        fake.chmod(0o755)
+        folder=self.directory / 'config';folder.mkdir()
+        (folder / 'parking_tuning.new_car.ini').write_bytes(b'invalid-user-config')
+        for name in ('new_car_hardware.ini', 'new_car_vehicle.ini'): (folder / name).write_bytes(b'profile')
+        result=subprocess.run([shell,'-c','chmod +x parking_rehearsal_20261007; sh ./run_new_car_parking.sh'],cwd=self.directory,capture_output=True)
+        self.assertNotEqual(result.returncode,0)
+        self.assertFalse((self.directory / 'hardware_started').exists())
+        self.assertEqual((folder / 'parking_tuning.new_car.ini').read_bytes(),b'invalid-user-config')
 
     def test_new_car_launcher_rejects_old_binary(self):
         shell = r'C:\Program Files\Git\bin\bash.exe' if sys.platform == 'win32' else shutil.which('bash')

@@ -30,7 +30,7 @@ int64_t monotonicNs() {return rehearsalMonotonicNs();}
 struct Options {
     std::string capture="manual_capture.ini",hardware="config/calibration_hardware.ini",vehicle="config/calibration_vehicle.ini",
         tuning="config/parking_tuning.ini",output="captures/parking_tuning";
-    bool help=false,check=false,partial=false,ccSpeed=false;
+    bool help=false,check=false,partial=false,ccSpeed=false,upgradeCcTuning=false;
     static Options parse(int argc,char** argv) {
         Options result;std::set<std::string> seen;
         for(int i=1;i<argc;++i) {
@@ -40,6 +40,7 @@ struct Options {
             else if(key=="--check-config") result.check=true;
             else if(key=="--allow-partial") result.partial=true;
             else if(key=="--cc-motor-control") result.ccSpeed=true;
+            else if(key=="--upgrade-cc-tuning") result.upgradeCcTuning=true;
             else {
                 std::string* target=nullptr;
                 if(key=="--config") target=&result.capture;
@@ -55,6 +56,25 @@ struct Options {
         return result;
     }
 };
+void upgradeCcTuning(const Options& options) {
+    if(!options.ccSpeed) throw std::runtime_error("--upgrade-cc-tuning requires --cc-motor-control");
+    const fs::path path=fs::absolute(options.tuning).lexically_normal();
+    const auto source=ParkingTuning::readSource(path.string());
+    const auto upgraded=normalizeCcSpeedSource(source);
+    if(upgraded==source) return;
+    const auto suffix=std::to_string(std::time(nullptr))+"_"+std::to_string(monotonicNs());
+    const fs::path backup=path.string()+".before_single_speed_"+suffix+".bak";
+    const fs::path temporary=path.string()+".speed_upgrade_"+std::to_string(getpid())+".tmp";
+    fs::copy_file(path,backup);
+    try {
+        auto output=outputFile(temporary);output<<upgraded;closeText(output,temporary);
+        // Revalidate bytes actually saved, and never replace a concurrently edited file.
+        ParkingTuning::load(temporary.string(),true);
+        if(ParkingTuning::readSource(path.string())!=source) throw std::runtime_error("Tuning changed during upgrade; retry after editing stops");
+        fs::rename(temporary,path);
+    } catch(...) {std::error_code error;fs::remove(temporary,error);throw;}
+    std::cout<<"SPEED_CONFIG_UPGRADED "<<path<<" | BACKUP "<<backup<<"；角度与时间保留，仅清理旧电机字段并补共用速度。\n";
+}
 std::vector<std::string> readTerminalLines() {
     std::vector<std::string> lines;pollfd input{STDIN_FILENO,POLLIN,0};
     for(unsigned count=0;count<32;++count) {
@@ -229,7 +249,9 @@ void showStatus(const ParkingRehearsal& model,std::optional<double> written,bool
     }
     std::cout<<std::endl;
     const auto& settings=model.currentTuning();
-    std::cout<<(ccSpeed ? "电机兼容轮使能字段 左=" : "电机原始PWM 左=")<<settings.motorLeft<<" 右="<<settings.motorRight<<" | 运行上限="<<settings.motorSeconds
+    if(ccSpeed) std::cout<<"共用目标速度="<<settings.speed.leftRps<<"rps";
+    else std::cout<<"电机原始PWM 左="<<settings.motorLeft<<" 右="<<settings.motorRight;
+    std::cout<<" | 运行上限="<<settings.motorSeconds
         <<"s | 方向="<<(model.stage()==0 ? "前进" : model.stage()==5 ? "停止" : "倒退")
         <<(settings.powered() ? " | 已配置电机试验" : " | 电机禁用")<<std::endl;
 }
@@ -719,6 +741,7 @@ int main(int argc,char** argv) {
             std::cout<<"parking_rehearsal version="<<rehearsalVersion<<"\n"
                 <<"--config file --hardware-config file --vehicle-config file --tuning-config file --output directory\n"
                 <<"--allow-partial --check-config (no hardware access)\n"
+                <<"--upgrade-cc-tuning: no hardware access; back up and remove legacy motor commands, preserve steering/timing, add one common motor_target_rps.\n"
                 <<"--cc-motor-control: sysfs native encoder speed PID, reused cc source; 50ms; default targets 9 rps, gains 64/32/48, configurable PWM limit 12000 ns.\n"
                 <<"Enter: record/set servo, settle, then start configured motor/timers. P: pause recording and stop motors; C: resume recording only; Enter required to move again. Q: finish.\n"
                 <<"auto_reload=save; powered settings settle before motor start; paused motors require fresh Enter. motor_run_time_s=0 disables motors.\n"
@@ -730,8 +753,9 @@ int main(int argc,char** argv) {
                 <<"Stage 1: optional line_follow_enable=1; acquire reliable black line before powered motion, dt-filtered PD steering, timed stop/center or sustained lost-line stop. No branch selection.\n"
                 <<"Single-stage motor tuning. Six stage CSV files plus stage_speed_summary.csv and stage_timing_summary.csv. No IMU. Speed: factory counts/s; sysfs native rps; native period registers do not prove standstill.\n";return 0;
         }
+        if(options.upgradeCcTuning) {upgradeCcTuning(options);return 0;}
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);
-        const auto params=car2026::Params::load(options.vehicle);const auto tuning=ParkingTuning::load(options.tuning);
+        const auto params=car2026::Params::load(options.vehicle);const auto tuning=ParkingTuning::load(options.tuning,options.ccSpeed);
         tuning.validate(params.max_steer_deg);
         if(options.ccSpeed) {
             if(hardware.motor_backend!="sysfs") throw std::runtime_error("--cc-motor-control requires sysfs native rps encoders");

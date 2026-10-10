@@ -51,7 +51,7 @@ int main() {
  try {
     const auto hardware=HardwareConfig::load("deploy/config/new_car_hardware.ini");
     const auto params=Params::load("deploy/config/new_car_vehicle.ini");
-    const auto tuning=ParkingTuning::load("deploy/config/parking_tuning.new_car.ini");tuning.validate(params.max_steer_deg);
+    const auto tuning=ParkingTuning::load("deploy/config/parking_tuning.new_car.ini",true);tuning.validate(params.max_steer_deg);
     check(tuning.stages[0].motorLeft==1 && tuning.stages[0].speed.leftRps==9 && tuning.stages[0].motorSeconds==1,"initial stage enables cc reference speed for one second");
     check(hardware.motor_backend=="sysfs" && !hardware.factory_write_readback,"new-car decimal backend");
     check(hardware.encoder_left_sign==1 && hardware.encoder_right_sign==1,"native reference encoder signs");

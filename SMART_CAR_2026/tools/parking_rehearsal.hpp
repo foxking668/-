@@ -6,7 +6,7 @@
 #include <optional>
 #include <functional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-10.2";
+constexpr const char* rehearsalVersion="2026-10-10.3";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct BendCorrection {double command=0,holdSeconds=0;};
@@ -45,6 +45,7 @@ inline const char* rehearsalSegmentTitle(int stageIndex,unsigned segment) {
 }
 struct ParkingTuning {
     bool single=true;int stage=2;std::array<StageTuning,6> stages{};std::string source;
+    bool ccSpeedControl=false;
     ReferenceMotorTuning referenceSpeed{};
     // Zero means uncalibrated: report counts/s without inventing cm/s.
     double speedLeftCmPerCount=0,speedRightCmPerCount=0;
@@ -99,9 +100,9 @@ struct ParkingTuning {
             if(item.powered() && !single) throw std::runtime_error("Powered tuning requires mode=single");
         }
     }
-    static ParkingTuning parse(const std::string& text) {
+    static ParkingTuning parse(const std::string& text,bool ccSpeedControl=false,bool allowMissingCcTarget=false) {
         if(text.size()>16384) throw std::runtime_error("Tuning file too large");
-        ParkingTuning result;result.source=text;
+        ParkingTuning result;result.source=text;result.ccSpeedControl=ccSpeedControl;
         std::istringstream input(text);std::string line,section;std::set<std::string> sections,keys;unsigned lineNumber=0;
         while(std::getline(input,line)) {
             if(++lineNumber==1 && line.compare(0,3,"\xef\xbb\xbf")==0) line.erase(0,3);
@@ -117,6 +118,9 @@ struct ParkingTuning {
             if(equal==std::string::npos || section.empty()) throw std::runtime_error("Expected [section] and key=value at line "+std::to_string(lineNumber));
             const auto key=trimmed(line.substr(0,equal)),value=trimmed(line.substr(equal+1));
             if(!keys.insert(section+"."+key).second) throw std::runtime_error("Duplicate tuning key: "+key);
+            if(ccSpeedControl && ((section!="session" && key=="motor_target_rps") ||
+                key=="motor_left_target_rps" || key=="motor_right_target_rps"))
+                throw std::runtime_error("CC speed mode uses only [session] motor_target_rps for both wheels and all stages");
             if(section=="session") {
                 if(key=="mode") {
                     if(value!="single" && value!="full") throw std::runtime_error("mode must be single or full");
@@ -171,6 +175,8 @@ struct ParkingTuning {
             }
         }
         if(!keys.count("session.mode") || !keys.count("session.stage")) throw std::runtime_error("All session keys are required");
+        if(ccSpeedControl && !allowMissingCcTarget && !keys.count("session.motor_target_rps"))
+            throw std::runtime_error("CC speed mode requires [session] motor_target_rps; use the new-car launcher to upgrade an older file");
         if(keys.count("session.motor_target_rps") && (keys.count("session.motor_left_target_rps") || keys.count("session.motor_right_target_rps")))
             throw std::runtime_error("Do not mix combined and separate motor speed keys in session");
         for(int stage=1;stage<=6;++stage)
@@ -183,7 +189,17 @@ struct ParkingTuning {
         for(int stage=1;stage<=6;++stage) {
             const auto prefix="stage_"+std::to_string(stage)+".";
             const auto count=keys.count(prefix+"motor_left_command")+keys.count(prefix+"motor_right_command")+keys.count(prefix+"motor_run_time_s");
-            if(count!=0 && count!=3) throw std::runtime_error(prefix+"motor keys are required together");
+            if(!ccSpeedControl && count!=0 && count!=3) throw std::runtime_error(prefix+"motor keys are required together");
+            if(ccSpeedControl) {
+                // Raw PWM fields from older files never set a speed or wheel mask
+                // in CC mode. Duration enables both wheels; stage 6 stays stopped.
+                auto& item=result.stages[size_t(stage-1)];
+                if(!validRehearsalRawPwm(item.motorLeft) || !validRehearsalRawPwm(item.motorRight))
+                    throw std::runtime_error("Legacy motor commands must be integer raw PWM 0..65535");
+                if(stage==6 && (item.motorLeft!=0 || item.motorRight!=0))
+                    throw std::runtime_error("stage_6 motor settings must all be zero");
+                item.motorLeft=item.motorRight=stage==6 ? 0 : 1;
+            }
             auto& speed=result.stages[size_t(stage-1)].speed;
             if(keys.count(prefix+"motor_target_rps") && (keys.count(prefix+"motor_left_target_rps") || keys.count(prefix+"motor_right_target_rps")))
                 throw std::runtime_error("Do not mix combined and separate motor speed keys in one stage");
@@ -208,17 +224,43 @@ struct ParkingTuning {
         if(file.bad()) throw std::runtime_error("Cannot read tuning file");
         return text;
     }
-    static ParkingTuning load(const std::string& path) {return parse(readSource(path));}
+    static ParkingTuning load(const std::string& path,bool ccSpeedControl=false) {return parse(readSource(path),ccSpeedControl);}
 };
+// Upgrade only the old motor fields, leaving successful steering/timing values
+// untouched. Parsing first prevents a malformed file from being silently repaired.
+inline std::string normalizeCcSpeedSource(const std::string& source) {
+    ParkingTuning::parse(source,true,true);
+    std::istringstream input(source);std::ostringstream output;std::string raw,section;
+    bool hasTarget=false,changed=false;unsigned number=0;
+    while(std::getline(input,raw)) {
+        if(++number==1 && raw.compare(0,3,"\xef\xbb\xbf")==0) raw.erase(0,3);
+        const auto line=trimmed(raw.substr(0,raw.find('#')));
+        if(!line.empty() && line.front()=='[' && line.back()==']') {
+            if(section=="session" && !hasTarget) {output<<"motor_target_rps=9\n";changed=true;}
+            section=line.substr(1,line.size()-2);
+        }
+        const auto equal=line.find('=');
+        const auto key=equal==std::string::npos ? std::string{} : trimmed(line.substr(0,equal));
+        if(section=="session" && key=="motor_target_rps") hasTarget=true;
+        if(section!="session" && (key=="motor_left_command" || key=="motor_right_command")) {changed=true;continue;}
+        output<<raw<<'\n';
+    }
+    if(section=="session" && !hasTarget) {output<<"motor_target_rps=9\n";changed=true;}
+    if(!changed) return source;
+    const auto upgraded=std::string("# 2026-10-10.3：快慢只调[session] motor_target_rps；阶段用motor_run_time_s启停。\n")+output.str();
+    ParkingTuning::parse(upgraded,true);return upgraded;
+}
 inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory",bool ccSpeed=false) {
     out<<"VERSION "<<rehearsalVersion<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
     out<<"阶段1巡线="<<(tuning.stages[0].line.enabled ? "启用（电机时间为0时仅观察）" : "关闭")<<"；不含交点分支选择。\n";
-    if(ccSpeed) out<<"电机控制=cc增量速度PID，每50ms更新；目标单位rps；PWM单位ns。旧motor_*_command只作轮使能，幅值不再固定输出。\n";
+    if(ccSpeed) out<<"电机控制=cc增量速度PID，每50ms更新；只调[session] motor_target_rps，两轮共用目标rps；阶段时间控制启停；PWM由PID计算。\n";
     else out<<(backend=="sysfs" ? "电机单位=duty_ns；3000=6%，50000=100%；无2000/12000人为上限。\n" : "电机单位=原始PWM；填2000就写2000，无2000人为上限；启动车辆前核对各电机duty_max。\n");
     for(size_t i=0;i<tuning.stages.size();++i) {
         const auto& item=tuning.stages[i];
-        out<<"阶段"<<i+1<<" 电机左="<<item.motorLeft<<" 右="<<item.motorRight<<" 时间="<<item.motorSeconds<<"s"
+        out<<"阶段"<<i+1;
+        if(!ccSpeed) out<<" 电机左="<<item.motorLeft<<" 右="<<item.motorRight;
+        out<<" 时间="<<item.motorSeconds<<"s"
             <<(item.powered() ? " 启用" : " 禁用")<<'\n';
         if(ccSpeed) out<<"  目标速度 左="<<(item.motorLeft>0 ? item.speed.leftRps : 0)<<" 右="<<(item.motorRight>0 ? item.speed.rightRps : 0)
             <<" rps | PID="<<item.speed.kp<<'/'<<item.speed.ki<<'/'<<item.speed.kd<<" | 可调PWM限幅="<<item.speed.pwmLimit<<"ns\n";
@@ -398,7 +440,7 @@ public:
         if(source!=observed_) {observed_=source;stableSince_=now;return {};}
         if(source==handled_ || now-stableSince_<.3) return {};
         handled_=source; // A rejected save is reported once; the next save can recover.
-        auto candidate=ParkingTuning::parse(source);candidate.validate(limit_);
+        auto candidate=ParkingTuning::parse(source,accepted_.ccSpeedControl);candidate.validate(limit_);
         if(modeValidator_) modeValidator_(candidate); // Rejected saves never replace the last accepted parameters.
         bool same=candidate.single==accepted_.single && candidate.stage==accepted_.stage &&
             candidate.referenceSpeed==accepted_.referenceSpeed &&

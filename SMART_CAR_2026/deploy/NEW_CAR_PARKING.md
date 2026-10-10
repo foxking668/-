@@ -1,7 +1,7 @@
 # 新车入库直接调参
 
 使用 `run_new_car_parking.sh`，调参文件为 **config/parking_tuning.new_car.ini**。
-这是原入库调参程序的新车接口版本 **2026-10-10.2**，没有另建电机测试程序。
+这是原入库调参程序的新车接口版本 **2026-10-10.3**，没有另建电机测试程序。
 旧可执行文件不能读写新车接口；首次须编译并替换，之后直接修改INI并运行。
 本版直接调用与用户提供的 `cc(1).zip` 相同的增量PID源码，而不是继续固定输出3000。
 只需修改 `[session]` 的 `motor_target_rps` 一个数，即可一起调节左右轮和各行驶阶段的快慢。
@@ -39,17 +39,17 @@ sh deploy/build_new_car_parking.sh
 上传新程序、启动脚本、`manual_capture.new_car.ini`、`parking_tuning.new_car.example.ini`、
 `config/new_car_hardware.ini`、`config/new_car_vehicle.ini`到 `/home/root/smartcar/gy`。
 若使用部署ZIP，解压后执行 `sha256sum -c PARKING_TUNING_SHA256SUMS`。
-无需上传额外电机测试程序。已有 `config/parking_tuning.new_car.ini` 不会被启动脚本覆盖。
+无需上传额外电机测试程序。已有 `config/parking_tuning.new_car.ini` 会由新版程序先备份，再移除旧左右电机字段；角度、持续时间、巡线参数保留，缺少共用速度时补9。升级不访问硬件、不消费准备标记；格式错误会拒绝替换。已升级文件不会反复改写或生成备份。
 
 ```sh
 cd /home/root/smartcar/gy
-unzip -o parking_rehearsal_20261010_2_verified.zip
+unzip -o parking_rehearsal_20261010_3_verified.zip
 sha256sum -c PARKING_TUNING_SHA256SUMS
 chmod +x parking_rehearsal_20261007
 sh ./run_new_car_parking.sh
 ```
 
-启动版本必须显示2026-10-10.2及cc速度PID，旧版会直接拒绝。必须替换编译后的程序，单改INI不能升级。
+启动版本必须显示2026-10-10.3及cc速度PID，旧版会直接拒绝。必须替换编译后的程序，单改INI不能升级。
 六个阶段的单阶段试验统一按以下顺序操作；两次都执行同一条 `sh ./run_new_car_parking.sh`：
 
 1. 先关闭舵机电源开关，启动第一次。程序按参考代码顺序初始化PWM/GPIO、编码器、舵机及相机，不执行阶段动作、不创建试验录像或CSV。
@@ -82,8 +82,6 @@ stage=1
 motor_target_rps=9
 
 [stage_1]
-motor_left_command=1
-motor_right_command=1
 motor_run_time_s=1
 ```
 
@@ -91,15 +89,14 @@ motor_run_time_s=1
 快慢只改 `motor_target_rps`：数值增大加快、减小减慢、0保持两路PWM为零。
 这是轮转速（转/秒），不是PWM也不是厘米/秒。先沿用cc的9；需要慢速入库就只减小此值。
 保存同一个参数会让当前段按已有授权规则重新执行；不改变任何阶段的角度或持续时间。
-旧调参文件只需在原 `[session]` 内加这一行；缺省仍是9。旧3000不会解释为3000rps。
+首次使用新版启动脚本，会自动备份旧配置、清理左右电机参数并补上共用速度。无需手动删除3000；已有共用速度值会保留。运行中重载也只认这个共用速度，旧左右PWM不再参与控制。
 
 | 参数 | 意义及范围 |
 |---|---|
 | motor_target_rps | `[session]`共用速度，0..100转/秒，左右同步；方向由阶段决定；0使PWM输出为零 |
-| motor_left_command / motor_right_command | 兼容轮使能字段，0禁用、非零启用；新模板填1，旧3000同样表示启用，不固定输出3000 |
 | motor_pid_kp / motor_pid_ki / motor_pid_kd | `[session]`高级参数，原cc为64/32/48；一般只调共用速度，不改它们 |
 | motor_pid_pwm_limit | `[session]`PWM限幅，原cc为12000ns，可调100..50000；并非目标速度 |
-| motor_run_time_s | 本阶段总运行上限0..120秒；0完全禁用电机 |
+| motor_run_time_s | 本阶段总运行上限0..120秒；大于0自动驱动两轮，0完全禁用电机；阶段6必须为0 |
 | steer_command | 舵机命令，负左正右，当前±15；并非前轮实际转角 |
 | hold_time_s | 主转向保持0..120秒；0不启用该转向计时 |
 | correction_steer_command | 阶段2的右修正/阶段4的左修正命令 |
@@ -110,7 +107,7 @@ motor_run_time_s=1
 周期50000ns，即20kHz。PID输出3000=6%、10000=20%、20000=40%、50000=100%。
 2000在新车是4%，不能沿用旧车“2000=20%”的理解。12000仅为原cc的可调默认限幅，没有锁死2000或12000。
 程序根据原生速度误差更新PWM；同一目标转速下，左右PWM可以不同。
-为兼容已有文件，解析器支持阶段内独立速度覆盖，但精简模板没有这些字段，统一调速使用上面的一个参数。
+新车速度模式只允许 `[session] motor_target_rps` 作为目标速度；左右独立目标或阶段目标覆盖会报错，避免“改了全局值却没有生效”。原cc的左右独立编码器反馈和PID输出仍然保留，两轮PWM不必相同。旧车factory模式继续使用原始PWM配置。
 电机运行时间和舵机最后一步结束时间，哪个先到就先停。
 想完整执行“主转向5秒＋修正1秒”，电机运行时间至少覆盖两步；修正时间必须大于0。
 新车主转向与反向修正需重新调，旧车-10/+12及各5秒只是配置起点。
@@ -148,7 +145,7 @@ motor_run_time_s=1
 五项检查：共用原阶段逻辑避免复制；sysfs/nativeRps命名区分单位；
 控制和I/O分层；电机PWM恢复参考顺序export→enable=1→period→duty=0，随后设置方向GPIO和总使能；舵机恢复period→初始脉宽1520000→enable=1。不再前置写enable=0或强制polarity；初始enable若被驱动拒绝会明确打印并按参考顺序继续，不能据此认定硬件已生效。正常阶段输出和独立定时停车线程保持原样；
 速度控制复用已有legacy/Contral/PID/PID.c；同原cc逐轮计算，Kp/Ki/Kd=64/32/48，每50ms更新。
-共用速度只解析一次并继承给各段；正常转弯修正不重置控制器，重新授权/保存重执行才清空PID历史。
+共用速度只解析一次并继承给各段；新车阶段启停仅由运行时间决定，不依赖旧左右PWM；正常转弯修正不重置控制器，重新授权/保存重执行才清空PID历史。
 独立停车锁阻止超时、暂停后产生新的PID输出；初始PWM使能失败后，在正式电机启动前再次检查和补写。
 新车物理转向和阶段时长需在实车调。硬件/车辆安装配置改变后须重新启动；运行中只重载调参INI。
 离线模拟能验证输出顺序和错误路径，不能代替实车跑动确认。

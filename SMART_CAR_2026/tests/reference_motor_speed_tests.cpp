@@ -1,4 +1,5 @@
 #include "../tools/reference_motor_speed.hpp"
+#include "../tools/parking_rehearsal.hpp"
 #include <iostream>
 #include <limits>
 using namespace car2026::capture;
@@ -9,6 +10,22 @@ template<class F> void rejects(F action,const char* name) {bool failed=false;try
 }
 int main() {
     try {
+        // Exercise the actual new-car config through parser -> target -> original
+        // PID. 9 rps must produce computed PWM, never a literal duty of 9.
+        const auto configured=ParkingTuning::load("deploy/config/parking_tuning.new_car.ini",true);
+        for(size_t stage=0;stage<5;++stage) {
+            ReferenceMotorSpeed controller;const auto& tuning=configured.stages[stage];
+            const double direction=stage==0 ? 1 : -1;
+            controller.reset(tuning.speed,direction,tuning.motorLeft>0,tuning.motorRight>0);
+            check(controller.targets()==std::array<double,2>{direction*9,direction*9},"actual config maps shared rps into signed native encoder target");
+            const int expected=stage==0 ? 1296 : -1296;
+            check(controller.update(0,0)==std::array<int,2>{expected,expected},"9 rps uses original PID and becomes computed PWM in both stage directions");
+        }
+        auto zeroSource=configured.source;
+        zeroSource.replace(zeroSource.find("motor_target_rps=9"),18,"motor_target_rps=0");
+        const auto zero=ParkingTuning::parse(zeroSource,true);
+        ReferenceMotorSpeed stopped;stopped.reset(zero.stages[0].speed,1,true,true);
+        check(stopped.update(80,-80)==std::array<int,2>{0,0},"single zero speed config forces both PWM zero even with stale signed encoder feedback");
         // Repeated lifetime/reset exercises the original fixed pool without leaks.
         for(int lifetime=0;lifetime<30;++lifetime) {
             ReferenceMotorSpeed speed;ReferenceMotorTuning tuning;

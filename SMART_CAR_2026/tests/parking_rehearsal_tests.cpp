@@ -39,6 +39,47 @@ int main() {
     auto combinedText=config();combinedText.insert(combinedText.find("[stage_1]"),"motor_target_rps=4\n");
     const auto combined=ParkingTuning::parse(combinedText);
     check(combined.stages[0].speed.leftRps==4 && combined.stages[0].speed.rightRps==4 && combined.stages[4].speed.leftRps==4,"one session speed parameter controls both wheels in all stages");
+    auto onlySpeedText=combinedText;
+    onlySpeedText.insert(onlySpeedText.find("[stage_2]"),"motor_run_time_s=7\n");
+    const auto onlySpeed=ParkingTuning::parse(onlySpeedText,true);
+    check(onlySpeed.ccSpeedControl && onlySpeed.stages[0].powered(),"CC duration alone enables both wheels without raw PWM keys");
+    for(size_t i=0;i<5;++i) check(onlySpeed.stages[i].motorLeft==1 && onlySpeed.stages[i].motorRight==1 &&
+        onlySpeed.stages[i].speed.leftRps==4 && onlySpeed.stages[i].speed.rightRps==4,"all driving stages share one speed and automatic wheel enable");
+    check(!onlySpeed.stages[1].powered() && !onlySpeed.stages[5].powered(),"zero duration and stop-confirmation cannot start motors");
+    rejects([&]{ParkingTuning::parse(onlySpeedText);},"duration-only speed file cannot accidentally activate raw PWM mode");
+    auto oldSpeedText=onlySpeedText;
+    oldSpeedText.insert(oldSpeedText.find("[stage_2]"),"motor_left_command=3000\nmotor_right_command=0\n");
+    const auto oldSpeed=ParkingTuning::parse(oldSpeedText,true);
+    check(oldSpeed.stages[0].motorLeft==1 && oldSpeed.stages[0].motorRight==1,"legacy raw values cannot set CC speed or disable one wheel");
+    const auto upgraded=normalizeCcSpeedSource(oldSpeedText);
+    check(upgraded.find("motor_left_command=")==std::string::npos && upgraded.find("motor_right_command=")==std::string::npos,"upgrade removes all legacy wheel keys");
+    check(upgraded.find("motor_target_rps=4")!=std::string::npos && upgraded.find("motor_run_time_s=7")!=std::string::npos,"upgrade preserves common speed and successful duration");
+    const auto upgradedTuning=ParkingTuning::parse(upgraded,true);
+    for(size_t i=0;i<6;++i) check(upgradedTuning.stages[i].command==oldSpeed.stages[i].command &&
+        upgradedTuning.stages[i].holdSeconds==oldSpeed.stages[i].holdSeconds && upgradedTuning.stages[i].motorSeconds==oldSpeed.stages[i].motorSeconds,
+        "upgrade keeps every stage steering command and both duration types");
+    check(normalizeCcSpeedSource(upgraded)==upgraded,"upgrade is idempotent and does not rewrite an already upgraded file");
+    auto withoutTarget=oldSpeedText;withoutTarget.erase(withoutTarget.find("motor_target_rps=4\n"),19);
+    rejects([&]{ParkingTuning::parse(withoutTarget,true);},"missing active speed key cannot silently fall back to a faster default");
+    check(normalizeCcSpeedSource(withoutTarget).find("motor_target_rps=9")!=std::string::npos,"old file gets one visible default speed inside session");
+    check(ParkingTuning::parse(normalizeCcSpeedSource("\xef\xbb\xbf"+withoutTarget),true).referenceSpeed.leftRps==9,"BOM upgrade remains valid");
+    SavedTuningWatcher oneSpeedWatcher(onlySpeed,15);
+    auto oneSpeedChanged=onlySpeedText;oneSpeedChanged.replace(oneSpeedChanged.find("motor_target_rps=4"),18,"motor_target_rps=6");
+    oneSpeedWatcher.observe(oneSpeedChanged,0);const auto oneSpeedReload=oneSpeedWatcher.observe(oneSpeedChanged,.4);
+    check(oneSpeedReload && oneSpeedReload->ccSpeedControl && oneSpeedReload->stages[0].powered() &&
+        oneSpeedReload->stages[4].speed.leftRps==6,"file reload retains CC parsing mode and updates all stages together");
+    for(const auto& extra:{"motor_left_target_rps=2\n","motor_right_target_rps=2\n"}) {
+        auto mixed=onlySpeedText;mixed.insert(mixed.find("[stage_1]"),extra);
+        rejects([&]{ParkingTuning::parse(mixed,true);},"CC mode rejects competing separate speed knobs");
+    }
+    auto stageOverride=onlySpeedText;stageOverride.insert(stageOverride.find("[stage_2]"),"motor_target_rps=2\n");
+    rejects([&]{ParkingTuning::parse(stageOverride,true);},"CC mode rejects stage override of global speed");
+    auto stoppedTime=onlySpeedText;stoppedTime+="motor_run_time_s=1\n";
+    rejects([&]{ParkingTuning::parse(stoppedTime,true);},"stop-confirmation positive duration is forbidden in CC mode");
+    rejects([&]{normalizeCcSpeedSource(oldSpeedText+"unknown=1\n");},"invalid old configuration is rejected before upgrade");
+    auto oneSpeedLine=onlySpeedText;oneSpeedLine.replace(oneSpeedLine.find("hold_time_s=5"),13,"hold_time_s=0");
+    oneSpeedLine.insert(oneSpeedLine.find("[stage_2]"),"line_follow_enable=1\n");
+    check(ParkingTuning::parse(oneSpeedLine,true).stages[0].line.enabled,"line following works without wheel PWM fields");
     auto combinedChange=combinedText;combinedChange.replace(combinedChange.find("motor_target_rps=4"),18,"motor_target_rps=5");
     ParkingRehearsal combinedTrial(combined);
     check(combinedTrial.applySaved(ParkingTuning::parse(combinedChange),0).has_value(),"one global speed save re-authorizes current stage");
