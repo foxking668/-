@@ -42,6 +42,35 @@ int main() {
     auto onlySpeedText=combinedText;
     onlySpeedText.insert(onlySpeedText.find("[stage_2]"),"motor_run_time_s=7\n");
     const auto onlySpeed=ParkingTuning::parse(onlySpeedText,true);
+    auto rightOnlyText=onlySpeedText;
+    rightOnlyText.insert(rightOnlyText.find("[stage_1]"),"reverse_right_only=1\n");
+    rightOnlyText.insert(rightOnlyText.find("[stage_3]"),"motor_run_time_s=5.5\n");
+    const auto rightOnlyDrive=ParkingTuning::parse(rightOnlyText,true);
+    check(rightOnlyDrive.reverseRightOnly && rightOnlyDrive.stages[0].motorLeft==1 && rightOnlyDrive.stages[0].motorRight==1,"right-only reverse leaves forward wheel mask unchanged");
+    for(size_t i=1;i<5;++i) check(rightOnlyDrive.stages[i].motorLeft==0 && rightOnlyDrive.stages[i].motorRight==1,"all four reverse stages disable left wheel while retaining right");
+    check(rightOnlyDrive.stages[1].powered() && rightOnlyDrive.stages[1].motorSeconds==5.5,"single right wheel supports powered decimal motor duration");
+    check(rightOnlyDrive.stages[5].motorLeft==0 && rightOnlyDrive.stages[5].motorRight==0 && !rightOnlyDrive.stages[5].powered(),"right-only switch cannot activate stop stage");
+    auto dualText=rightOnlyText;dualText.replace(dualText.find("reverse_right_only=1"),20,"reverse_right_only=0");
+    const auto dual=ParkingTuning::parse(dualText,true);
+    for(size_t i=0;i<5;++i) check(dual.stages[i].motorLeft==1 && dual.stages[i].motorRight==1,"explicit switch off restores both wheels");
+    ParkingRehearsal driveMaskTrial(dual);start(driveMaskTrial,0);
+    check(driveMaskTrial.applySaved(rightOnlyDrive,1).has_value() && driveMaskTrial.currentTuning().motorLeft==0,"changing reverse mask reauthorizes active reverse trial rather than leaving old left PWM intent");
+    auto forwardMask=rightOnlyDrive;forwardMask.stage=1;
+    ParkingRehearsal forwardMaskTrial(forwardMask);start(forwardMaskTrial,0);
+    auto forwardDual=dual;forwardDual.stage=1;
+    check(!forwardMaskTrial.applySaved(forwardDual,1),"changing only future reverse mask does not restart forward trial");
+    SavedTuningWatcher driveMaskWatcher(dual,30);driveMaskWatcher.observe(rightOnlyText,0);
+    const auto driveMaskReload=driveMaskWatcher.observe(rightOnlyText,.4);
+    check(driveMaskReload && driveMaskReload->reverseRightOnly && driveMaskReload->stages[1].motorLeft==0,"hot reload retains reverse wheel selection");
+    for(const auto& value:{"2","-1","true","1.0"}) {
+        auto invalid=rightOnlyText;invalid.replace(invalid.find("reverse_right_only=1"),20,"reverse_right_only="+std::string(value));
+        rejects([&]{ParkingTuning::parse(invalid,true);},"reverse wheel switch accepts only exact 0 or 1");
+    }
+    auto invalidFactory=config();invalidFactory.insert(invalidFactory.find("[stage_1]"),"reverse_right_only=1\n");
+    rejects([&]{ParkingTuning::parse(invalidFactory);},"factory raw PWM cannot silently use new-car reverse switch");
+    check(ParkingTuning::parse(normalizeCcSpeedSource(onlySpeedText),true).reverseRightOnly,"launcher upgrade installs requested right-only reverse for missing key");
+    check(normalizeCcSpeedSource(rightOnlyText)==rightOnlyText,"explicit right-only config is not rewritten");
+    check(normalizeCcSpeedSource(dualText)==dualText,"explicit dual-wheel selection is preserved on upgrade");
     auto wideText=onlySpeedText;
     wideText.replace(wideText.find("steer_command=-10"),17,"steer_command=-30");
     wideText.insert(wideText.find("[stage_3]"),"correction_steer_command=30\ncorrection_hold_time_s=1\n");
@@ -82,6 +111,7 @@ int main() {
     check(upgraded.find("motor_left_command=")==std::string::npos && upgraded.find("motor_right_command=")==std::string::npos,"upgrade removes all legacy wheel keys");
     check(upgraded.find("motor_target_rps=4")!=std::string::npos && upgraded.find("motor_run_time_s=7")!=std::string::npos,"upgrade preserves common speed and successful duration");
     const auto upgradedTuning=ParkingTuning::parse(upgraded,true);
+    check(upgradedTuning.reverseRightOnly && upgradedTuning.stages[1].motorLeft==0,"legacy left PWM field cannot override requested unpowered reverse wheel");
     for(size_t i=0;i<6;++i) check(upgradedTuning.stages[i].command==oldSpeed.stages[i].command &&
         upgradedTuning.stages[i].holdSeconds==oldSpeed.stages[i].holdSeconds && upgradedTuning.stages[i].motorSeconds==oldSpeed.stages[i].motorSeconds,
         "upgrade keeps every stage steering command and both duration types");

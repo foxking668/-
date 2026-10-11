@@ -1,7 +1,7 @@
 # 新车入库直接调参
 
 使用 `run_new_car_parking.sh`，调参文件为 **config/parking_tuning.new_car.ini**。
-这是原入库调参程序的新车接口版本 **2026-10-10.5**，没有另建电机测试程序。
+这是原入库调参程序的新车接口版本 **2026-10-10.6**，没有另建电机测试程序。
 
 ### 本版舵机范围
 
@@ -18,10 +18,20 @@ sed -i 's/^max_steer_deg=.*/max_steer_deg=30/' config/new_car_vehicle.ini
 sh ./run_new_car_parking.sh
 ```
 
-启动应显示 `VERSION 2026-10-10.5` 和 `STEER_COMMAND_LIMIT +/-30`。如仍显示15，检查脚本打印的配置路径及车辆限幅。更换车辆配置后重新走两次启动流程。
+启动应显示 `VERSION 2026-10-10.6` 和 `STEER_COMMAND_LIMIT +/-30`。如仍显示15，检查脚本打印的配置路径及车辆限幅。更换车辆配置后重新走两次启动流程。
 旧可执行文件不能读写新车接口；首次须编译并替换，之后直接修改INI并运行。
 本版直接调用与用户提供的 `cc(1).zip` 相同的增量PID源码，而不是继续固定输出3000。
-只需修改 `[session]` 的 `motor_target_rps` 一个数，即可一起调节左右轮和各行驶阶段的快慢。
+只需修改 `[session]` 的 `motor_target_rps` 一个数，即可调节各行驶阶段已启用轮的快慢。
+
+## 右轮单独倒车
+
+本版新增 `[session] reverse_right_only=1`：阶段1仍双轮前进，阶段2～5只驱动右轮倒车，左轮目标为0，每次启动及PID更新都明确写左轮PWM为0，阶段6关闭两路输出。设为0恢复双轮倒车。只在新车cc接口生效，旧Factory接口不接受开启此功能。
+
+原cc速度PID源码、舵机换算公式、硬件初始化顺序保持原样；复用已有的轮使能选择，不增加另一套速度控制公式。右轮目标是共用速度的负值，左轮随动速度仍记录，但不会触发左轮PID输出。终端显示“仅右轮（左轮PWM=0）”，配置快照同时记录该开关。
+
+启动脚本先备份旧调参文件；缺少此开关时补1，已有0或1保留。只改其他参数不会悄悄重新启用左轮。左右共享GPIO73，因此PWM为0表示不输出左轮驱动命令，不等于物理断开左轮电源，也不保证驱动板处于自由滑行状态。
+
+左轮已有机械阻力，单轮驱动后的轨迹和速度可能与双轮不同。调参先固定一个能缓慢连续倒退的共用速度，再分别调主转向、反向修正的角度和时间；每次只改一项。原成功的角度/时间保留作起点，但需要重新观察结果。
 
 ## 首次编译和启动
 
@@ -56,17 +66,17 @@ sh deploy/build_new_car_parking.sh
 上传新程序、启动脚本、`manual_capture.new_car.ini`、`parking_tuning.new_car.example.ini`、
 `config/new_car_hardware.ini`、`config/new_car_vehicle.ini`到 `/home/root/smartcar/gy`。
 若使用部署ZIP，解压后执行 `sha256sum -c PARKING_TUNING_SHA256SUMS`。
-无需上传额外电机测试程序。已有 `config/parking_tuning.new_car.ini` 会由新版程序先备份，再移除旧左右电机字段及阶段1旧PD字段；角度、持续时间、线路启用和最终舵机限幅保留，缺少共用速度时补9。升级不访问硬件、不消费准备标记；格式错误会拒绝替换。已升级文件不会反复改写或生成备份。
+无需上传额外电机测试程序。已有 `config/parking_tuning.new_car.ini` 会由新版程序先备份，再移除旧左右电机字段及阶段1旧PD字段；角度、持续时间、线路启用和最终舵机限幅保留，缺少共用速度时补9，缺少右轮单独倒车开关时补1。升级不访问硬件、不消费准备标记；格式错误会拒绝替换。已升级文件不会反复改写或生成备份。
 
 ```sh
 cd /home/root/smartcar/gy
-unzip -o parking_rehearsal_20261010_5_verified.zip
+unzip -o parking_rehearsal_20261010_6_verified.zip
 sha256sum -c PARKING_TUNING_SHA256SUMS
 chmod +x parking_rehearsal_20261007
 sh ./run_new_car_parking.sh
 ```
 
-启动版本必须显示2026-10-10.5及cc速度PID，旧版会直接拒绝。必须替换编译后的程序，单改INI不能升级。
+启动版本必须显示2026-10-10.6及cc速度PID，旧版会直接拒绝。必须替换编译后的程序，单改INI不能升级。
 六个阶段的单阶段试验统一按以下顺序操作；两次都执行同一条 `sh ./run_new_car_parking.sh`：
 
 1. 先关闭舵机电源开关，启动第一次。程序按参考代码顺序初始化PWM/GPIO、编码器、舵机及相机，不执行阶段动作、不创建试验录像或CSV。
@@ -97,6 +107,7 @@ sh ./run_new_car_parking.sh
 mode=single
 stage=1
 motor_target_rps=9
+reverse_right_only=1
 
 [stage_1]
 motor_run_time_s=1
@@ -110,10 +121,11 @@ motor_run_time_s=1
 
 | 参数 | 意义及范围 |
 |---|---|
-| motor_target_rps | `[session]`共用速度，0..100转/秒，左右同步；方向由阶段决定；0使PWM输出为零 |
+| motor_target_rps | `[session]`共用速度，0..100转/秒，已启用轮共用；方向由阶段决定；0使PWM输出为零 |
+| reverse_right_only | `[session]` 1：阶段2..5仅右轮倒车、左轮PWM为0；0：双轮倒车；阶段1仍双轮前进 |
 | motor_pid_kp / motor_pid_ki / motor_pid_kd | `[session]`高级参数，原cc为64/32/48；一般只调共用速度，不改它们 |
 | motor_pid_pwm_limit | `[session]`PWM限幅，原cc为12000ns，可调100..50000；并非目标速度 |
-| motor_run_time_s | 本阶段总运行上限0..120秒；大于0自动驱动两轮，0完全禁用电机；阶段6必须为0 |
+| motor_run_time_s | 本阶段总运行上限0..120秒，支持5.5等小数；大于0驱动已启用轮，0完全禁用电机；阶段6必须为0 |
 | steer_command | 舵机命令，负左正右，当前±30；并非前轮实际转角 |
 | hold_time_s | 主转向保持0..120秒；0不启用该转向计时 |
 | correction_steer_command | 阶段2的右修正/阶段4的左修正命令 |
@@ -123,8 +135,8 @@ motor_run_time_s=1
 
 周期50000ns，即20kHz。PID输出3000=6%、10000=20%、20000=40%、50000=100%。
 2000在新车是4%，不能沿用旧车“2000=20%”的理解。12000仅为原cc的可调默认限幅，没有锁死2000或12000。
-程序根据原生速度误差更新PWM；同一目标转速下，左右PWM可以不同。
-新车速度模式只允许 `[session] motor_target_rps` 作为目标速度；左右独立目标或阶段目标覆盖会报错，避免“改了全局值却没有生效”。原cc的左右独立编码器反馈和PID输出仍然保留，两轮PWM不必相同。旧车factory模式继续使用原始PWM配置。
+程序根据原生速度误差更新已启用轮的PWM；双轮驱动时，同一目标转速下左右PWM可以不同；单右轮倒车时左轮PWM恒为0。
+新车速度模式只允许 `[session] motor_target_rps` 作为共用目标速度；左右独立目标或阶段目标覆盖会报错，避免“改了全局值却没有生效”。原cc的左右独立编码器反馈和PID源码保留，仅在外层选择要驱动的轮子。旧车factory模式继续使用原始PWM配置。
 电机运行时间和舵机最后一步结束时间，哪个先到就先停。
 想完整执行“主转向5秒＋修正1秒”，电机运行时间至少覆盖两步；修正时间必须大于0。
 新车主转向与反向修正需重新调，旧车-10/+12及各5秒只是配置起点。
@@ -170,7 +182,7 @@ motor_run_time_s=1
 本版本离线验证覆盖原cc PID计算和内存池复用、共用速度解析/保存执行、阶段状态机、独立PID更新/停机、PWM使能补写及失败清零、两次启动和部署脚本；原cc普通巡线源码/配置64项对照通过，相对舵机命令及限幅31项测试通过。Linux入口和图像模块使用实际OpenCV头文件完成目标文件编译，未链接目标板OpenCV，也未执行实车硬件验证。
 未在此Windows环境生成或运行LoongArch可执行文件，需按上面的虚拟机命令编译。
 
-## 阶段1原cc巡线（2026-10-10.5）
+## 阶段1原cc巡线（2026-10-10.6）
 
 直接复用cc(1).zip普通NewTrack/7.25巡线链路：相机帧先按原Camera最近邻缩放80×60，裁剪顶部5%、底部2%；原HandleImage用HSV范围(0,0,46)至(180,48,255)提取白色区域，11×1横向闭运算用于边界。原FindLine/FindStartPos/FixLine找边和补线，关闭图像边缘代理，原NewTrack逐行历史路宽补单边界。中心黑线可靠时用近区加权黑线，否则按原单边界偏置、局部黑线70%混合兜底。
 

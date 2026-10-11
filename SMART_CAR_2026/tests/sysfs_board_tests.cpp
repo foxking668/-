@@ -121,6 +121,49 @@ int main() {
     }
     {
         MemoryNodes nodes;SysfsBoardIo io(nodes,hardware);RehearsalMotor motor(io,hardware,params);
+        nodes.write(hardware.motor_left_pwm,"3000"); // Simulate a stale output from an earlier trial.
+        const auto beforeStart=nodes.writes().size();
+        motor.start(0,-3000,.4,1,1,1);
+        check(nodes.read(hardware.motor_left_pwm)=="0" && nodes.read(hardware.motor_right_pwm)=="3000","right-only start clears stale left PWM and powers right wheel");
+        check(nodes.read(hardware.motor_right_dir)=="1","right-only reverse retains configured native direction mapping");
+        auto writes=nodes.writes();const std::vector<std::pair<std::string,std::string>> startWrites(writes.begin()+beforeStart,writes.end());
+        check(findWrite(startWrites,hardware.motor_left_pwm,"0")<findWrite(startWrites,hardware.motor_right_pwm,"3000"),"disabled left wheel explicitly cleared before right output");
+        check(findWrite(startWrites,hardware.motor_left_pwm,"0")<findWrite(startWrites,hardware.motor_enable_gpio,"1"),"disabled wheel cleared before releasing shared enable");
+        check(findWrite(startWrites,hardware.motor_left_dir,"1")==startWrites.size(),"zero PWM does not change disabled wheel direction");
+        motor.stop("MOTOR_STOP_PAUSE");
+        motor.setSpeedController([](double,double) {return std::array<int,2>{{0,-3000}};});
+        motor.submitSpeedFeedback(27,-7);
+        const auto beforePid=nodes.writes().size();
+        motor.start(0,-3000,.8,1,1,2,true);
+        bool sawPid=false;
+        const auto limit=std::chrono::steady_clock::now()+std::chrono::milliseconds(400);
+        do {
+            motor.heartbeat();
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            for(const auto& event:motor.takeEvents()) if(event.event=="MOTOR_PID_UPDATE") {
+                sawPid=true;
+                check(event.writtenRaw[0]==0 && event.writtenRaw[1]==3000,"PID update logs zero disabled output and active right output");
+                check(event.measuredRps[0]==27,"passive left wheel feedback still recorded");
+            }
+        } while(!sawPid && std::chrono::steady_clock::now()<limit);
+        check(sawPid,"right-only speed worker performed a PID update");
+        motor.stop("MOTOR_STOP_PAUSE");
+        writes=nodes.writes();bool leftStayedZero=true;
+        for(size_t i=beforePid;i<writes.size();++i) if(writes[i].first==hardware.motor_left_pwm && writes[i].second!="0") leftStayedZero=false;
+        check(leftStayedZero,"right-only start, PID update and pause never write nonzero left PWM");
+        check(nodes.read(hardware.motor_left_pwm)=="0" && nodes.read(hardware.motor_right_pwm)=="0" && nodes.read(hardware.motor_enable_gpio)=="0","right-only pause zeros both channels and shared enable");
+    }
+    {
+        MemoryNodes nodes;SysfsBoardIo io(nodes,hardware);RehearsalMotor motor(io,hardware,params);
+        nodes.failedPath=hardware.motor_left_pwm;nodes.failedValue="0";
+        const auto beforeStart=nodes.writes().size();
+        rejects([&]{motor.start(0,-3000,.2,1,1,1);},"disabled left wheel zero failure rejects right-only start");
+        const auto writes=nodes.writes();const std::vector<std::pair<std::string,std::string>> startWrites(writes.begin()+beforeStart,writes.end());
+        check(findWrite(startWrites,hardware.motor_enable_gpio,"1")==startWrites.size(),"failed disabled-wheel zero cannot release shared driver");
+        check(nodes.read(hardware.motor_right_pwm)=="0" && nodes.read(hardware.motor_enable_gpio)=="0","right wheel and driver still cleared when left zero fails");
+    }
+    {
+        MemoryNodes nodes;SysfsBoardIo io(nodes,hardware);RehearsalMotor motor(io,hardware,params);
         nodes.write("/sys/class/pwm/pwmchip8/pwm2/enable","0");
         nodes.write("/sys/class/pwm/pwmchip8/pwm1/enable","0");
         motor.start(3000,3000,.2,0,1,1);

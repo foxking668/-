@@ -68,9 +68,10 @@ public:
         context_={stage,revision,trial,rehearsalMonotonicNs(),0,left,right,"MOTOR_START",""};
         try {
             io_.setMotorEnable(false);
-            // A stationary wheel stays PWM-zero without changing its direction GPIO.
-            if(left!=0) writeRawLocked(0,left);
-            if(right!=0) writeRawLocked(1,right);
+            // Explicitly clear a disabled wheel, including stale prior output.
+            // writeRawLocked(0) leaves that wheel's direction GPIO unchanged.
+            writeRawLocked(0,left);
+            writeRawLocked(1,right);
             io_.setMotorEnable(true); // Both PWM/direction writes completed before releasing nSLEEP.
         } catch(const std::exception& error) {
             fault_=error.what();try {zeroLocked();}catch(const std::exception& zero) {fault_+="; "+std::string(zero.what());}

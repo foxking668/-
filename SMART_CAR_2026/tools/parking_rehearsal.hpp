@@ -6,7 +6,7 @@
 #include <optional>
 #include <functional>
 namespace car2026 { namespace capture {
-constexpr const char* rehearsalVersion="2026-10-10.5";
+constexpr const char* rehearsalVersion="2026-10-10.6";
 constexpr const char* stageNames[]={"前移","第一倒弯","分支直退","第二倒弯","库内直退","停止确认"};
 constexpr const char* stageFiles[]={"01_advance.csv","02_reverse_first.csv","03_reverse_branch.csv","04_reverse_second.csv","05_reverse_straight.csv","06_stop_confirmation.csv"};
 struct BendCorrection {double command=0,holdSeconds=0;};
@@ -45,7 +45,7 @@ inline const char* rehearsalSegmentTitle(int stageIndex,unsigned segment) {
 }
 struct ParkingTuning {
     bool single=true;int stage=2;std::array<StageTuning,6> stages{};std::string source;
-    bool ccSpeedControl=false;
+    bool ccSpeedControl=false,reverseRightOnly=false;
     ReferenceMotorTuning referenceSpeed{};
     // Zero means uncalibrated: report counts/s without inventing cm/s.
     double speedLeftCmPerCount=0,speedRightCmPerCount=0;
@@ -58,6 +58,7 @@ struct ParkingTuning {
     }
     void validate(double limit=ccParkingSteerLimit) const {
         referenceSpeed.validate();
+        if(reverseRightOnly && !ccSpeedControl) throw std::runtime_error("reverse_right_only requires --cc-motor-control");
         if(!std::isfinite(limit) || limit<=0) throw std::runtime_error("Invalid vehicle steering limit");
         const double commandLimit=std::min(ccSpeedControl ? ccParkingSteerLimit : legacyParkingSteerLimit,limit);
         if(stage<1 || stage>6) throw std::runtime_error("stage must be 1..6");
@@ -137,6 +138,9 @@ struct ParkingTuning {
                     const auto correction=index==1 ? "right_correction" : "left_correction";
                     if(value!=primary && value!=correction) throw std::runtime_error(key+" must be "+primary+" or "+correction);
                     result.stages[size_t(index)].correctionOnly=value==correction;
+                } else if(key=="reverse_right_only") {
+                    if(value!="0" && value!="1") throw std::runtime_error("reverse_right_only must be 0 or 1");
+                    result.reverseRightOnly=value=="1";
                 } else if(key=="speed_left_cm_per_count") result.speedLeftCmPerCount=finiteNumber(value);
                 else if(key=="speed_right_cm_per_count") result.speedRightCmPerCount=finiteNumber(value);
                 else if(setReferenceSpeedKey(result.referenceSpeed,key,value)) {}
@@ -194,13 +198,15 @@ struct ParkingTuning {
             if(!ccSpeedControl && count!=0 && count!=3) throw std::runtime_error(prefix+"motor keys are required together");
             if(ccSpeedControl) {
                 // Raw PWM fields from older files never set a speed or wheel mask
-                // in CC mode. Duration enables both wheels; stage 6 stays stopped.
+                // in CC mode. Forward keeps both wheels; optional reverse mask
+                // leaves the left wheel unpowered; stage 6 stays stopped.
                 auto& item=result.stages[size_t(stage-1)];
                 if(!validRehearsalRawPwm(item.motorLeft) || !validRehearsalRawPwm(item.motorRight))
                     throw std::runtime_error("Legacy motor commands must be integer raw PWM 0..65535");
                 if(stage==6 && (item.motorLeft!=0 || item.motorRight!=0))
                     throw std::runtime_error("stage_6 motor settings must all be zero");
-                item.motorLeft=item.motorRight=stage==6 ? 0 : 1;
+                item.motorRight=stage==6 ? 0 : 1;
+                item.motorLeft=stage==6 || (result.reverseRightOnly && stage>=2) ? 0 : 1;
             }
             auto& speed=result.stages[size_t(stage-1)].speed;
             if(keys.count(prefix+"motor_target_rps") && (keys.count(prefix+"motor_left_target_rps") || keys.count(prefix+"motor_right_target_rps")))
@@ -233,26 +239,31 @@ struct ParkingTuning {
 inline std::string normalizeCcSpeedSource(const std::string& source) {
     ParkingTuning::parse(source,true,true);
     std::istringstream input(source);std::ostringstream output;std::string raw,section;
-    bool hasTarget=false,changed=false;unsigned number=0;
+    bool hasTarget=false,hasReverseMode=false,changed=false;unsigned number=0;
+    const auto finishSession=[&] {
+        if(!hasTarget) {output<<"motor_target_rps=9\n";changed=true;}
+        if(!hasReverseMode) {output<<"reverse_right_only=1\n";changed=true;}
+    };
     while(std::getline(input,raw)) {
         if(++number==1 && raw.compare(0,3,"\xef\xbb\xbf")==0) raw.erase(0,3);
         const auto line=trimmed(raw.substr(0,raw.find('#')));
         if(!line.empty() && line.front()=='[' && line.back()==']') {
-            if(section=="session" && !hasTarget) {output<<"motor_target_rps=9\n";changed=true;}
+            if(section=="session") finishSession();
             section=line.substr(1,line.size()-2);
         }
         const auto equal=line.find('=');
         const auto key=equal==std::string::npos ? std::string{} : trimmed(line.substr(0,equal));
         if(section=="session" && key=="motor_target_rps") hasTarget=true;
+        if(section=="session" && key=="reverse_right_only") hasReverseMode=true;
         if(section!="session" && (key=="motor_left_command" || key=="motor_right_command")) {changed=true;continue;}
         if(section=="stage_1" && (key=="line_kp" || key=="line_kd" || key=="line_preview" || key=="line_filter_s" ||
             key=="line_deadband_px" || key=="line_slew_per_s" || key=="line_target_x" || key=="line_crop_top" ||
             key=="line_crop_bottom" || key=="line_min_contrast" || key=="line_max_width_px")) {changed=true;continue;}
         output<<raw<<'\n';
     }
-    if(section=="session" && !hasTarget) {output<<"motor_target_rps=9\n";changed=true;}
+    if(section=="session") finishSession();
     if(!changed) return source;
-    const auto upgraded=std::string("# 2026-10-10.5：共用motor_target_rps调速；阶段1使用cc原7.25巡线，无旧PD调参。\n")+output.str();
+    const auto upgraded=std::string("# 2026-10-10.6：共用motor_target_rps调速；缺省仅右轮倒车，左轮PWM为零；cc原公式不变。\n")+output.str();
     ParkingTuning::parse(upgraded,true);return upgraded;
 }
 inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory",bool ccSpeed=false) {
@@ -264,6 +275,8 @@ inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,con
     if(ccSpeed) out<<"巡线=CC_725：80x60最近邻缩放，裁剪顶5%/底2%，HSV白色掩膜、轮廓补线、中心黑线优先；center_pratio=0.42，直接舵机误差，无旧PD滤波。\n";
     if(ccSpeed) out<<"电机控制=cc增量速度PID，每50ms更新；只调[session] motor_target_rps，两轮共用目标rps；阶段时间控制启停；PWM由PID计算。\n";
     else out<<(backend=="sysfs" ? "电机单位=duty_ns；3000=6%，50000=100%；无2000/12000人为上限。\n" : "电机单位=原始PWM；填2000就写2000，无2000人为上限；启动车辆前核对各电机duty_max。\n");
+    if(ccSpeed) out<<"reverse_right_only="<<tuning.reverseRightOnly
+        <<(tuning.reverseRightOnly ? "：阶段2..5仅右轮倒车，左轮PWM持续为0；阶段1仍双轮前进。\n" : "：前进和倒车均双轮驱动。\n");
     for(size_t i=0;i<tuning.stages.size();++i) {
         const auto& item=tuning.stages[i];
         out<<"阶段"<<i+1;

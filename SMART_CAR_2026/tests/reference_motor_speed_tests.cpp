@@ -13,13 +13,26 @@ int main() {
         // Exercise the actual new-car config through parser -> target -> original
         // PID. 9 rps must produce computed PWM, never a literal duty of 9.
         const auto configured=ParkingTuning::load("deploy/config/parking_tuning.new_car.ini",true);
+        check(configured.reverseRightOnly,"delivered config selects requested right-wheel-only reverse");
         for(size_t stage=0;stage<5;++stage) {
             ReferenceMotorSpeed controller;const auto& tuning=configured.stages[stage];
             const double direction=stage==0 ? 1 : -1;
             controller.reset(tuning.speed,direction,tuning.motorLeft>0,tuning.motorRight>0);
-            check(controller.targets()==std::array<double,2>{direction*9,direction*9},"actual config maps shared rps into signed native encoder target");
+            check(controller.targets()==std::array<double,2>{stage==0 ? 9. : 0.,direction*9},"actual config maps reverse target only to the powered right wheel");
             const int expected=stage==0 ? 1296 : -1296;
-            check(controller.update(0,0)==std::array<int,2>{expected,expected},"9 rps uses original PID and becomes computed PWM in both stage directions");
+            check(controller.update(0,0)==std::array<int,2>{stage==0 ? expected : 0,expected},"9 rps uses original PID with zero left output in reverse");
+        }
+        {
+            ReferenceMotorSpeed single,baseline;const auto& tuning=configured.stages[1];
+            single.reset(tuning.speed,-1,false,true);baseline.reset(tuning.speed,-1,true,true);
+            for(int i=0;i<80;++i) {
+                const double passiveLeft=i%2==0 ? 27. : -20.,rightFeedback=-double(i%13);
+                const auto selected=single.update(passiveLeft,rightFeedback),original=baseline.update(passiveLeft,rightFeedback);
+                check(selected[0]==0,"passive left feedback cannot produce left driving or braking PID output");
+                check(selected[1]==original[1],"right PID calculation remains exactly equal to original dual-wheel formula");
+            }
+            single.reset(tuning.speed,1,true,true);
+            check(single.update(0,0)==std::array<int,2>{1296,1296},"returning to forward restores unchanged two-wheel original PID");
         }
         auto zeroSource=configured.source;
         zeroSource.replace(zeroSource.find("motor_target_rps=9"),18,"motor_target_rps=0");

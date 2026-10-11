@@ -74,7 +74,7 @@ void upgradeCcTuning(const Options& options) {
         if(ParkingTuning::readSource(path.string())!=source) throw std::runtime_error("Tuning changed during upgrade; retry after editing stops");
         fs::rename(temporary,path);
     } catch(...) {std::error_code error;fs::remove(temporary,error);throw;}
-    std::cout<<"SPEED_CONFIG_UPGRADED "<<path<<" | BACKUP "<<backup<<"；角度与时间保留，清理旧电机与旧PD字段，补共用速度。\n";
+    std::cout<<"SPEED_CONFIG_UPGRADED "<<path<<" | BACKUP "<<backup<<"；角度与时间保留，清理旧电机与旧PD字段，补共用速度；缺少reverse_right_only时补1。\n";
 }
 std::vector<std::string> readTerminalLines() {
     std::vector<std::string> lines;pollfd input{STDIN_FILENO,POLLIN,0};
@@ -254,7 +254,8 @@ void showStatus(const ParkingRehearsal& model,std::optional<double> written,bool
     }
     std::cout<<std::endl;
     const auto& settings=model.currentTuning();
-    if(ccSpeed) std::cout<<"共用目标速度="<<settings.speed.leftRps<<"rps";
+    if(ccSpeed) std::cout<<"共用目标速度="<<settings.speed.leftRps<<"rps | 驱动轮="
+        <<(settings.motorLeft==0 && settings.motorRight>0 ? "仅右轮（左轮PWM=0）" : model.stage()==5 ? "均关闭" : "双轮");
     else std::cout<<"电机原始PWM 左="<<settings.motorLeft<<" 右="<<settings.motorRight;
     std::cout<<" | 运行上限="<<settings.motorSeconds
         <<"s | 方向="<<(model.stage()==0 ? "前进" : model.stage()==5 ? "停止" : "倒退")
@@ -717,6 +718,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         <<"\nencoder_stop_confirmed="<<stopConfirmed<<"\nimu_initialized=0\npartial="<<partial
         <<"\nmotor_backend="<<hardware.motor_backend<<"\nmotor_units="<<(sysfs ? "duty_ns" : "raw_pwm")<<"\nmotor_limit=per_device_duty_max\nnormalized_motor_scale_used=0"
         <<"\nmotor_control="<<(options.ccSpeed ? "cc_incremental_speed_pid" : "fixed_raw_pwm")<<"\nmotor_pid_period_ms="<<(options.ccSpeed ? 50 : 0)
+        <<"\nreverse_right_only="<<model.tuning().reverseRightOnly
         <<"\nservo_zero_on_exit="<<(exitZeroAttempted ? (exitZeroSucceeded ? "software_write_completed":"failed") : "not_attempted")
         <<"\nmanual_parking_success=not_inferred\nvideo_timing=use_csv_monotonic_timestamps_not_nominal_fps\n"
         <<"recording_start=one_enter_or_valid_file_save\nstartup_sequence="<<(sysfs ? "second_invocation_after_preparation" : "single_invocation")
@@ -750,7 +752,7 @@ int main(int argc,char** argv) {
             std::cout<<"parking_rehearsal version="<<rehearsalVersion<<"\n"
                 <<"--config file --hardware-config file --vehicle-config file --tuning-config file --output directory\n"
                 <<"--allow-partial --check-config (no hardware access)\n"
-                <<"--upgrade-cc-tuning: no hardware access; back up and remove legacy motor/PD fields, preserve steering/timing/servo limits, add one common motor_target_rps.\n"
+                <<"--upgrade-cc-tuning: no hardware access; back up and remove legacy motor/PD fields, preserve steering/timing/servo limits, add one common motor_target_rps and missing reverse_right_only=1.\n"
                 <<"--cc-motor-control: sysfs native encoder speed PID, reused cc source; 50ms; default targets 9 rps, gains 64/32/48, configurable PWM limit 12000 ns.\n"
                 <<"Enter: record/set servo, settle, then start configured motor/timers. P: pause recording and stop motors; C: resume recording only; Enter required to move again. Q: finish.\n"
                 <<"auto_reload=save; powered settings settle before motor start; paused motors require fresh Enter. motor_run_time_s=0 disables motors.\n"
