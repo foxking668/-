@@ -21,6 +21,6 @@ inline double ccLaneServoCommand(const CcLaneObservation& observation,double lim
         throw std::runtime_error("Invalid CC lane observation or servo limit");
     // cc sends angle=90+error. Our servo API receives the relative error;
     // its existing mechanical offset and native pulse conversion remain intact.
-    return std::clamp(double(observation.error),-limit,limit);
+    return std::clamp(double(observation.error),std::max(ccParkingSteerMin,-limit),limit);
 }
 }}

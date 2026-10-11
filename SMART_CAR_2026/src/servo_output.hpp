@@ -1,5 +1,6 @@
 #pragma once
 #include "hardware.hpp"
+#include "steering_command_limits.hpp"
 #include <iostream>
 
 namespace car2026 {
@@ -19,7 +20,8 @@ public:
     ServoOutput& operator=(const ServoOutput&)=delete;
     uint32_t set(double commandDeg) {
         if(closed_) throw std::runtime_error("Servo output already closed");
-        if(!std::isfinite(commandDeg) || std::abs(commandDeg)>params_.max_steer_deg)
+        if(!std::isfinite(commandDeg) || std::abs(commandDeg)>params_.max_steer_deg ||
+           (io_.nativeServo() && (commandDeg<nativeServoCommandMin || commandDeg>nativeServoCommandMax)))
             throw std::runtime_error("Steering command outside configured command limit");
         attempted_=true; // A failed write may already have changed the output.
         if(io_.nativeServo()) return io_.writeServoCommand(params_.steer_sign*commandDeg+params_.steer_offset_deg);

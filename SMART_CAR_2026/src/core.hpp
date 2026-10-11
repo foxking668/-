@@ -32,7 +32,7 @@ inline double wrapDegrees(double x) {
  X(ring_speed, 0.10, 0.02, 0.5) \
  X(cross_speed, 0.08, 0.02, 0.3) \
  X(parking_speed, 0.06, 0.01, 0.2) \
- X(max_steer_deg, 22, 5, 35) \
+ X(max_steer_deg, 22, 5, 105) \
  X(steer_rate_deg_s, 100, 10, 300) \
  X(lateral_gain, 26, 0, 100) \
  X(heading_gain, 12, 0, 100) \

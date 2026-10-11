@@ -10,4 +10,4 @@ python3 "$source_root/tools/package_parking_rehearsal.py" --program "$build_root
 # Only a checked real LoongArch binary is copied; existing custom tuning remains.
 cp "$build_root/parking_rehearsal" "$source_root/deploy/parking_rehearsal_20261007"
 chmod +x "$source_root/deploy/parking_rehearsal_20261007"
-printf '%s\n' 'READY 2026-10-10.6: deploy/parking_rehearsal_20261007; start with sh deploy/run_new_car_parking.sh on the car.'
+printf '%s\n' 'READY 2026-10-11.1: deploy/parking_rehearsal_20261007; start with sh deploy/run_new_car_parking.sh on the car.'
