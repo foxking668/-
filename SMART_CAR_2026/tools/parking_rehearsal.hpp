@@ -3,6 +3,7 @@
 #include "rehearsal_line.hpp"
 #include "rehearsal_motor_units.hpp"
 #include "reference_motor_speed.hpp"
+#include "sysfs_pwm_tuning.hpp"
 #include <optional>
 #include <functional>
 namespace car2026 { namespace capture {
@@ -45,7 +46,7 @@ inline const char* rehearsalSegmentTitle(int stageIndex,unsigned segment) {
 }
 struct ParkingTuning {
     bool single=true;int stage=2;std::array<StageTuning,6> stages{};std::string source;
-    bool ccSpeedControl=false,reverseRightOnly=false;
+    bool ccSpeedControl=false,reverseRightOnly=false,sysfsPwmControl=false;
     ReferenceMotorTuning referenceSpeed{};
     // Zero means uncalibrated: report counts/s without inventing cm/s.
     double speedLeftCmPerCount=0,speedRightCmPerCount=0;
@@ -60,8 +61,9 @@ struct ParkingTuning {
         referenceSpeed.validate();
         if(reverseRightOnly && !ccSpeedControl) throw std::runtime_error("reverse_right_only requires --cc-motor-control");
         if(!std::isfinite(limit) || limit<=0) throw std::runtime_error("Invalid vehicle steering limit");
-        const double commandLimit=std::min(ccSpeedControl ? ccParkingSteerLimit : legacyParkingSteerLimit,limit);
-        const double commandMinimum=ccSpeedControl ? std::max(ccParkingSteerMin,-limit) : -commandLimit;
+        const double commandLimit=sysfsPwmControl ? parkingPwmCenter-parkingPwmRight : std::min(ccSpeedControl ? ccParkingSteerLimit : legacyParkingSteerLimit,limit);
+        const double commandMinimum=sysfsPwmControl ? parkingPwmCenter-parkingPwmLeft : ccSpeedControl ? std::max(ccParkingSteerMin,-limit) : -commandLimit;
+        if(sysfsPwmControl && (!ccSpeedControl || reverseRightOnly)) throw std::runtime_error("PWM compatibility requires cc speed control and both wheels");
         if(stage<1 || stage>6) throw std::runtime_error("stage must be 1..6");
         for(double scale:{speedLeftCmPerCount,speedRightCmPerCount})
             if(!std::isfinite(scale) || scale<0 || scale>10)
@@ -75,6 +77,8 @@ struct ParkingTuning {
             const auto& item=stages[size_t(index)];const auto& correction=item.correction;
             const double direction=index==1 ? 1. : -1.;
             const auto label="stage_"+std::to_string(index+1);
+            if(sysfsPwmControl && item.command*direction>0 && (item.holdSeconds>0 || item.powered()))
+                throw std::runtime_error(label+" primary servo_pwm points in wrong direction");
             if(!std::isfinite(correction.command) || correction.command*direction<0 || correction.command<commandMinimum || correction.command>commandLimit ||
                !std::isfinite(correction.holdSeconds) || correction.holdSeconds<0 || correction.holdSeconds>120)
                 throw std::runtime_error(label+" correction has wrong direction, exceeds limit, or hold time outside 0..120");
@@ -91,7 +95,9 @@ struct ParkingTuning {
         for(size_t i=0;i<stages.size();++i) {
             const auto& item=stages[i];
             item.speed.validate();
-            item.line.validate(item.line.enabled ? commandLimit : (ccSpeedControl ? ccParkingSteerLimit : legacyParkingSteerLimit));
+            item.line.validate(sysfsPwmControl ? legacyParkingSteerLimit : item.line.enabled ? commandLimit : (ccSpeedControl ? ccParkingSteerLimit : legacyParkingSteerLimit));
+            if(sysfsPwmControl) {parkingPwmValue(item.command);parkingPwmValue(item.correction.command);}
+            if(sysfsPwmControl && i==5 && item.command!=0) throw std::runtime_error("stage_6 requires servo_pwm=4470");
             if(item.line.enabled && (i!=0 || !single || item.command!=0 || item.holdSeconds!=0 || item.motorLeft<=0 || item.motorRight<=0))
                 throw std::runtime_error("Line following requires single stage_1, steer_command=0, hold_time_s=0 and positive motor amplitudes (run time 0 may disable motors)");
             for(double command:{item.motorLeft,item.motorRight})
@@ -104,7 +110,13 @@ struct ParkingTuning {
             if(item.powered() && !single) throw std::runtime_error("Powered tuning requires mode=single");
         }
     }
-    static ParkingTuning parse(const std::string& text,bool ccSpeedControl=false,bool allowMissingCcTarget=false) {
+    static ParkingTuning parse(const std::string& text,bool ccSpeedControl=false,bool allowMissingCcTarget=false,bool pwmControl=false) {
+        if(pwmControl) {
+            const auto converted=convertPwmTuning(text);
+            auto result=parse(converted.normalized,true);result.sysfsPwmControl=true;result.source=text;
+            for(size_t i=0;i<6;++i) {result.stages[i].command=converted.primary[i];result.stages[i].correction.command=converted.correction[i];}
+            result.validate();return result;
+        }
         if(text.size()>16384) throw std::runtime_error("Tuning file too large");
         ParkingTuning result;result.source=text;result.ccSpeedControl=ccSpeedControl;
         std::istringstream input(text);std::string line,section;std::set<std::string> sections,keys;unsigned lineNumber=0;
@@ -159,6 +171,10 @@ struct ParkingTuning {
                     if(value!="0" && value!="1") throw std::runtime_error("line_follow_enable must be 0 or 1");
                     item.line.enabled=value=="1";
                 }
+                else if(index==0 && key=="line_pwm_kp") item.line.pwmKp=finiteNumber(value);
+                else if(index==0 && key=="line_pwm_kd") item.line.pwmKd=finiteNumber(value);
+                else if(index==0 && key=="line_pwm_deadband") item.line.pwmDeadband=finiteNumber(value);
+                else if(index==0 && key=="line_pwm_step") {const double v=finiteNumber(value);if(v<10 || v>400 || v!=std::floor(v)) throw std::runtime_error("Invalid PWM line step");item.line.pwmStep=int(v);}
                 else if(index==0 && key=="line_kp") item.line.kp=finiteNumber(value);
                 else if(index==0 && key=="line_kd") item.line.kd=finiteNumber(value);
                 else if(index==0 && key=="line_preview") item.line.preview=finiteNumber(value);
@@ -233,7 +249,7 @@ struct ParkingTuning {
         if(file.bad()) throw std::runtime_error("Cannot read tuning file");
         return text;
     }
-    static ParkingTuning load(const std::string& path,bool ccSpeedControl=false) {return parse(readSource(path),ccSpeedControl);}
+    static ParkingTuning load(const std::string& path,bool ccSpeedControl=false,bool pwmControl=false) {return parse(readSource(path),ccSpeedControl,false,pwmControl);}
 };
 // Upgrade only the old motor fields, leaving successful steering/timing values
 // untouched. Parsing first prevents a malformed file from being silently repaired.
@@ -268,15 +284,17 @@ inline std::string normalizeCcSpeedSource(const std::string& source) {
     ParkingTuning::parse(upgraded,true);return upgraded;
 }
 inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory",bool ccSpeed=false) {
-    out<<"VERSION "<<rehearsalVersion<<" | TUNING_FILE "<<path<<'\n'
+    out<<"VERSION "<<(tuning.sysfsPwmControl ? sysfsPwmVersion : rehearsalVersion)<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
-    out<<"舵机调参命令范围="<<(ccSpeed ? ccParkingSteerMin : -legacyParkingSteerLimit)<<".."
+    if(tuning.sysfsPwmControl) out<<"SYSFS_PWM_COMPAT：servo_pwm=3370右/4470中/5170左；逻辑标度10000；300Hz；counts/5ms按7.25 PPR1024换算rps。\n";
+    else out<<"舵机调参命令范围="<<(ccSpeed ? ccParkingSteerMin : -legacyParkingSteerLimit)<<".."
         <<(ccSpeed ? ccParkingSteerLimit : legacyParkingSteerLimit)
         <<"（正右负左），实际还受车辆max_steer_deg限制；不是实测前轮角度或机械安全范围。\n";
     out<<"阶段1巡线="<<(tuning.stages[0].line.enabled ? "启用（电机时间为0时仅观察）" : "关闭")<<"；不含交点分支选择。\n";
-    if(ccSpeed) out<<"巡线=CC_725：80x60最近邻缩放，裁剪顶5%/底2%，HSV白色掩膜、轮廓补线、中心黑线优先；center_pratio=0.42，直接舵机误差，无旧PD滤波。\n";
-    if(ccSpeed) out<<"电机控制=cc增量速度PID，每50ms更新；只调[session] motor_target_rps，两轮共用目标rps；阶段时间控制启停；PWM由PID计算。\n";
-    else out<<(backend=="sysfs" ? "电机单位=duty_ns；3000=6%，50000=100%；无2000/12000人为上限。\n" : "电机单位=原始PWM；填2000就写2000，无2000人为上限；启动车辆前核对各电机duty_max。\n");
+    if(ccSpeed && !tuning.sysfsPwmControl) out<<"巡线=CC_725：80x60最近邻缩放，裁剪顶5%/底2%，HSV白色掩膜、轮廓补线、中心黑线优先；center_pratio=0.42，直接舵机误差，无旧PD滤波。\n";
+    if(tuning.sysfsPwmControl) out<<"巡线=7.25图像识别 + PWM转向；电机=7.25原速度PID64/32/48、50ms；motor_target_counts是等效目标，不是假装读取delta。\n";
+    if(ccSpeed && !tuning.sysfsPwmControl) out<<"电机控制=cc增量速度PID，每50ms更新；只调[session] motor_target_rps，两轮共用目标rps；阶段时间控制启停；PWM由PID计算。\n";
+    else if(!tuning.sysfsPwmControl) out<<(backend=="sysfs" ? "电机单位=duty_ns；3000=6%，50000=100%；无2000/12000人为上限。\n" : "电机单位=原始PWM；填2000就写2000，无2000人为上限；启动车辆前核对各电机duty_max。\n");
     if(ccSpeed) out<<"reverse_right_only="<<tuning.reverseRightOnly
         <<(tuning.reverseRightOnly ? "：阶段2..5仅右轮倒车，左轮PWM持续为0；阶段1仍双轮前进。\n" : "：前进和倒车均双轮驱动。\n");
     for(size_t i=0;i<tuning.stages.size();++i) {
@@ -290,9 +308,9 @@ inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,con
     }
     for(int index:{1,3}) {
         const auto& item=tuning.stages[size_t(index)];const auto& correction=item.correction;
-        out<<"阶段"<<index+1<<' '<<stageNames[index]<<" | 主转弯="<<item.command<<"/"<<item.holdSeconds<<"s"
+        out<<"阶段"<<index+1<<' '<<stageNames[index]<<" | 主转弯="<<(tuning.sysfsPwmControl ? parkingPwmValue(item.command) : item.command)<<"/"<<item.holdSeconds<<"s"
             <<" | "<<(index==1 ? "右" : "左")<<"修正="<<(correction.holdSeconds>0 ? "启用" : "关闭")
-            <<" "<<correction.command<<"/"<<correction.holdSeconds<<"s"
+            <<" "<<(tuning.sysfsPwmControl ? parkingPwmValue(correction.command) : correction.command)<<"/"<<correction.holdSeconds<<"s"
             <<" | 入口="<<(item.correctionOnly ? "只测修正" : "完整弯道")<<'\n';
         if(correction.holdSeconds==0)
             out<<"提示：该弯道不会自动反向修正；旧文件缺少correction字段时默认关闭，请在对应区段补入参数。\n";
@@ -463,7 +481,7 @@ public:
         if(source!=observed_) {observed_=source;stableSince_=now;return {};}
         if(source==handled_ || now-stableSince_<.3) return {};
         handled_=source; // A rejected save is reported once; the next save can recover.
-        auto candidate=ParkingTuning::parse(source,accepted_.ccSpeedControl);candidate.validate(limit_);
+        auto candidate=ParkingTuning::parse(source,accepted_.ccSpeedControl,false,accepted_.sysfsPwmControl);candidate.validate(limit_);
         if(modeValidator_) modeValidator_(candidate); // Rejected saves never replace the last accepted parameters.
         bool same=candidate.single==accepted_.single && candidate.stage==accepted_.stage &&
             candidate.referenceSpeed==accepted_.referenceSpeed &&

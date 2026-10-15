@@ -9,20 +9,22 @@ namespace car2026 { namespace capture {
 // two-sided contrast and near-weighted black-line target. No race/IMU logic.
 struct LineFollowTuning {
     bool enabled=false;
+    double pwmKp=16,pwmKd=4,pwmDeadband=1;int pwmStep=120;
     double kp=.35,kd=.02,preview=.25,filterSeconds=.15,deadbandPx=1;
     double maxCommand=8,slewPerSecond=30,targetX=79.5;
     double cropTop=.30,cropBottom=.95,lostSeconds=.35,acquireSeconds=3;
     int contrast=16,maxWidth=26;
     void validate(double limit=legacyParkingSteerLimit) const {
         const auto range=[](double v,double lo,double hi) {return std::isfinite(v) && v>=lo && v<=hi;};
-        if(!range(kp,0,2) || !range(kd,0,.2) || !range(preview,0,1) || !range(filterSeconds,.02,1) ||
+        if(!range(pwmKp,0,100) || !range(pwmKd,0,100) || !range(pwmDeadband,0,10) || pwmStep<10 || pwmStep>400 ||
+           !range(kp,0,2) || !range(kd,0,.2) || !range(preview,0,1) || !range(filterSeconds,.02,1) ||
            !range(deadbandPx,0,5) || !range(maxCommand,1,std::min(ccParkingSteerLimit,limit)) || !range(slewPerSecond,1,100) ||
            !range(targetX,40,120) || !range(cropTop,0,.75) || !range(cropBottom,.5,1) || cropBottom-cropTop<.2 ||
            !range(lostSeconds,.05,.5) || !range(acquireSeconds,.5,10) || contrast<8 || contrast>80 || maxWidth<4 || maxWidth>40)
             throw std::runtime_error("Invalid stage_1 line-follow parameters; see PARKING_TUNING.md");
     }
     bool operator==(const LineFollowTuning& o) const {
-        return enabled==o.enabled && kp==o.kp && kd==o.kd && preview==o.preview && filterSeconds==o.filterSeconds &&
+        return pwmKp==o.pwmKp && pwmKd==o.pwmKd && pwmDeadband==o.pwmDeadband && pwmStep==o.pwmStep && enabled==o.enabled && kp==o.kp && kd==o.kd && preview==o.preview && filterSeconds==o.filterSeconds &&
             deadbandPx==o.deadbandPx && maxCommand==o.maxCommand && slewPerSecond==o.slewPerSecond && targetX==o.targetX &&
             cropTop==o.cropTop && cropBottom==o.cropBottom && lostSeconds==o.lostSeconds && acquireSeconds==o.acquireSeconds &&
             contrast==o.contrast && maxWidth==o.maxWidth;

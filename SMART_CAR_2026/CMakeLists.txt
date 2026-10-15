@@ -147,3 +147,8 @@ if(BUILD_VEHICLE)
   target_include_directories(SMART_CAR_2026 PRIVATE legacy ${OpenCV_INCLUDE_DIRS})
   target_link_libraries(SMART_CAR_2026 PRIVATE car_linux_devices reference_pid ${OpenCV_LIBS} Threads::Threads m)
 endif()
+
+add_executable(sysfs_pwm_tuning_tests tests/sysfs_pwm_tuning_tests.cpp)
+target_include_directories(sysfs_pwm_tuning_tests PRIVATE src)
+add_test(NAME sysfs_pwm_tuning_tests COMMAND sysfs_pwm_tuning_tests)
+set_tests_properties(sysfs_pwm_tuning_tests PROPERTIES WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")

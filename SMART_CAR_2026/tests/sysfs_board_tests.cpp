@@ -224,6 +224,25 @@ int main() {
         output.str("");recorder.writeSummary(output);
         check(output.str().find(",rps,3,1,1.5,20,3,1,-3,30")!=std::string::npos,"paused recording gap not integrated into speed average");
     }
+    {
+        const auto direct=HardwareConfig::load("deploy/sysfs_pwm_hardware.ini");
+        const auto directParams=Params::load("deploy/sysfs_pwm_vehicle.ini");
+        MemoryNodes nodes;SysfsBoardIo io(nodes,direct,true);
+        ServoOutput servo(io,direct,directParams);
+        check(nodes.writes().empty(),"direct PWM servo metadata never moves hardware");
+        check(io.compatibilityPwmServo() && servo.info().freq==300,"explicit direct compatibility mode reports300Hz");
+        check(servo.set(parkingPwmDelta(5000))==1666667,"PWM5000 becomes1666667ns without angleoffset");
+        const auto writes=nodes.writes();const std::string dir="/sys/class/pwm/pwmchip2/pwm0";
+        check(findWrite(writes,dir+"/period","3333333")<findWrite(writes,direct.servo_pwm,"1490000"),"direct initialization period precedes4470center pulse");
+        check(findWrite(writes,direct.servo_pwm,"1490000")<findWrite(writes,dir+"/enable","1"),"direct center pulse precedesenable, same reference order");
+        check(!nodes.exists(direct.motor_enable_gpio),"servo conversion never initializes motor GPIO");
+        const auto before=nodes.writes().size();
+        rejects([&]{servo.set(-701);},"direct left stop cannot be exceeded");
+        rejects([&]{servo.set(1101);},"direct right stop cannot be exceeded");
+        check(nodes.writes().size()==before,"invalid direct input makes no hardware write");
+        servo.close();check(nodes.read(direct.servo_pwm)=="1490000","shutdown direct zero means4470 rather than PWM0");
+        rejects([&]{SysfsBoardIo wrong(nodes,hardware,true);},"legacy3040000period refused before direct output");
+    }
     std::cout<<checks<<" new-car sysfs checks passed (mock hardware only)\n";
     return 0;
  }catch(const std::exception& error) {std::cerr<<"FAIL "<<error.what()<<'\n';return 1;}

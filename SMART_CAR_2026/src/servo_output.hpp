@@ -1,5 +1,6 @@
 #pragma once
 #include "hardware.hpp"
+#include "sysfs_pwm_units.hpp"
 #include "steering_command_limits.hpp"
 #include <iostream>
 
@@ -20,6 +21,9 @@ public:
     ServoOutput& operator=(const ServoOutput&)=delete;
     uint32_t set(double commandDeg) {
         if(closed_) throw std::runtime_error("Servo output already closed");
+        if(io_.compatibilityPwmServo()) {
+            parkingPwmValue(commandDeg);attempted_=true;return io_.writeServoCommand(commandDeg);
+        }
         if(!std::isfinite(commandDeg) || std::abs(commandDeg)>params_.max_steer_deg ||
            (io_.nativeServo() && (commandDeg<nativeServoCommandMin || commandDeg>nativeServoCommandMax)))
             throw std::runtime_error("Steering command outside configured command limit");
@@ -31,7 +35,8 @@ public:
     void close() {
         if(closed_) return;
         closed_=true; // A failed shutdown is reported, never silently retried.
-        if(attempted_ && io_.nativeServo()) io_.writeServoCommand(params_.steer_offset_deg);
+        if(attempted_ && io_.compatibilityPwmServo()) io_.writeServoCommand(0);
+        else if(attempted_ && io_.nativeServo()) io_.writeServoCommand(params_.steer_offset_deg);
         else if(attempted_)
             io_.writePwmDuty(config_.servo_pwm,servoDuty(params_.steer_offset_deg,config_,info_));
     }

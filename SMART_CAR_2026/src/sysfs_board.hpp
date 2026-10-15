@@ -1,5 +1,6 @@
 #pragma once
 #include "hardware.hpp"
+#include "sysfs_pwm_units.hpp"
 #include "capture_data.hpp"
 #include <chrono>
 #include <thread>
@@ -67,12 +68,12 @@ inline void referenceMotorPwmInit(SysfsNodes& nodes,const std::string& dutyPath,
     }
     sysfsWriteChecked(nodes,dir+"/period",period);sysfsWriteChecked(nodes,dutyPath,0);
 }
-inline void referenceServoPwmInit(SysfsNodes& nodes,const std::string& dutyPath,uint32_t period) {
+inline void referenceServoPwmInit(SysfsNodes& nodes,const std::string& dutyPath,uint32_t period,uint32_t initialDuty=1520000) {
     const auto dir=sysfsPwmDirectory(dutyPath);const auto split=dir.rfind("/pwm");
     sysfsExport(nodes,dutyPath,dir.substr(0,split)+"/export",sysfsNumber(dir.substr(split+4)));
     // cc/src/Contral/Steer/Steer.cpp: period -> setAngle(90) -> enable.
     sysfsWriteChecked(nodes,dir+"/period",period);
-    sysfsWriteChecked(nodes,dutyPath,1520000);
+    sysfsWriteChecked(nodes,dutyPath,initialDuty);
     sysfsWriteChecked(nodes,dir+"/enable",1);
 }
 inline uint32_t newCarServoNs(double adjustedCommand,double period) {
@@ -88,8 +89,10 @@ inline double newCarEncoderRps(uint32_t periodTicks,uint32_t direction) {
 }
 class SysfsBoardIo final:public DeviceIo {
 public:
-    SysfsBoardIo(SysfsNodes& nodes,const HardwareConfig& config):nodes_(nodes),config_(config) {
-        config_.validate();if(config_.motor_backend!="sysfs") throw std::runtime_error("Sysfs board requires sysfs profile");
+    SysfsBoardIo(SysfsNodes& nodes,const HardwareConfig& config,bool compatibilityPwm=false):nodes_(nodes),config_(config),compatibilityPwm_(compatibilityPwm) {
+        config_.validate();
+        if(compatibilityPwm_) parkingPwmServoNs(0,uint32_t(config_.servo_period_ns));
+        if(config_.motor_backend!="sysfs") throw std::runtime_error("Sysfs board requires sysfs profile");
         sysfsPwmDirectory(config_.motor_left_pwm);sysfsPwmDirectory(config_.motor_right_pwm);sysfsPwmDirectory(config_.servo_pwm);
     }
     void setMotorEnable(bool enabled) override {
@@ -105,9 +108,10 @@ public:
         sysfsWriteChecked(nodes_,config_.motor_enable_gpio,enabled ? 1 : 0);
     }
     bool nativeServo() const override {return true;}
+    bool compatibilityPwmServo() const override {return compatibilityPwm_;}
     void initializeReferenceServo() {prepareServo();}
     uint32_t writeServoCommand(double adjustedCommand) override {
-        const auto duty=newCarServoNs(adjustedCommand,config_.servo_period_ns);
+        const auto duty=compatibilityPwm_ ? parkingPwmServoNs(adjustedCommand,uint32_t(config_.servo_period_ns)) : newCarServoNs(adjustedCommand,config_.servo_period_ns);
         prepareServo();sysfsWriteChecked(nodes_,config_.servo_pwm,duty);return duty;
     }
     PwmInfo readPwmMetadata(const std::string& path) override {
@@ -154,7 +158,7 @@ private:
         }
         motorsReady_=true;
     }
-    void prepareServo() {if(!servoReady_) {referenceServoPwmInit(nodes_,config_.servo_pwm,uint32_t(config_.servo_period_ns));servoReady_=true;}}
-    SysfsNodes& nodes_;HardwareConfig config_;bool motorsReady_=false,servoReady_=false;
+    void prepareServo() {if(!servoReady_) {referenceServoPwmInit(nodes_,config_.servo_pwm,uint32_t(config_.servo_period_ns),compatibilityPwm_ ? parkingPwmServoNs(0,uint32_t(config_.servo_period_ns)) : 1520000);servoReady_=true;}}
+    SysfsNodes& nodes_;HardwareConfig config_;bool compatibilityPwm_=false,motorsReady_=false,servoReady_=false;
 };
 }
