@@ -71,52 +71,6 @@ int main(int argc,char** argv) {
     NewTrack::reset();frame.setTo(cv::Scalar(0,0,0));const auto invalid=NewTrack::processFrame(frame,true);
     assert(!invalid.valid && !invalid.debugFrame.empty());
     assert(split(invalid.diagnosticCsv).size()==header.size());
-    // Full production pipeline with the independent tuning file and real capture timestamps.
-    std::ofstream tuning("cone_avoidance.ini");
-    tuning<<"left_pratio=0.65\nleft_min_error=30\nleft_duration_ms=500\nleft_speed=1\n"
-          <<"wait_duration_ms=200\nwait_speed=7\nright_min_error=58\nright_duration_ms=700\nright_speed=3\n"
-          <<"post_duration_ms=5500\npost_speed=7\ntrigger_y_percent=45\n";tuning.close();
-    params.open("image_params.txt",std::ios::app);
-    params<<"new_track_cone_sequence_enable=1\nnew_track_ring_side_enable=0\nnew_track_ring_entry_cue_enable=0\n"
-          <<"new_track_zebra_enable=0\nnew_track_crossing_enable=0\n";params.close();
-    frame=cv::Mat(60,80,CV_8UC3,cv::Scalar(0,0,0));
-    cv::rectangle(frame,{10,0,60,60},{230,230,230},-1);
-    cv::line(frame,{40,0},{40,59},{0,0,0},2);
-    points={{54,28},{50,43},{58,43}};cv::fillConvexPoly(frame,points,{255,0,0});
-    auto column=[&](const NewTrack::FrameResult& result,const char* key) {
-        const auto names=split(NewTrack::diagnosticCsvHeader()),data=split(result.diagnosticCsv);
-        assert(names.size()==data.size());const auto it=std::find(names.begin(),names.end(),key);
-        assert(it!=names.end());return data[it-names.begin()];
-    };
-    NewTrack::reset();NewTrack::processFrameAt(frame,true,1000);
-    auto timed=NewTrack::processFrameAt(frame,true,1033);
-    assert(column(timed,"cone_phase")=="LEFT" && timed.steerError<=-30 && column(timed,"speed_command")=="1");
-    assert(column(timed,"center_black_used")=="0" && column(timed,"source")=="CONE_LEFT");
-    for(int t=1133;t<=1533;t+=100) timed=NewTrack::processFrameAt(frame,true,t);
-    assert(column(timed,"cone_phase")=="WAIT" && column(timed,"speed_command")=="7");
-    for(int t=1633;t<=1733;t+=100) timed=NewTrack::processFrameAt(frame,true,t);
-    assert(column(timed,"cone_phase")=="RIGHT" && timed.steerError>=58 && column(timed,"speed_command")=="3");
-    for(int t=1833;t<=2433;t+=100) timed=NewTrack::processFrameAt(frame,true,t);
-    assert(column(timed,"cone_phase")=="POST" && column(timed,"speed_command")=="7");
-    cv::Mat clearFrame(60,80,CV_8UC3,cv::Scalar(0,0,0));
-    cv::rectangle(clearFrame,{10,0,60,60},{230,230,230},-1);
-    cv::line(clearFrame,{40,0},{40,59},{0,0,0},2);
-    Other::testMotorSpeed=5;
-    NewTrack::processFrameAt(clearFrame,true,2533);timed=NewTrack::processFrameAt(clearFrame,true,2633);
-    assert(column(timed,"cone_phase")=="POST" && column(timed,"speed_command")=="5");
-    Other::testMotorSpeed=9;
-    // Motor stop freezes action time; resuming never charges the paused wall-clock gap.
-    NewTrack::reset();NewTrack::processFrameAt(frame,true,3000);NewTrack::processFrameAt(frame,true,3033);
-    Other::gMotorStop=true;timed=NewTrack::processFrameAt(frame,true,3133);
-    const auto remaining=column(timed,"cone_remaining_ms");assert(column(timed,"stop_command")=="1");
-    timed=NewTrack::processFrameAt(frame,true,5000);assert(column(timed,"cone_remaining_ms")==remaining);
-    Other::gMotorStop=false;timed=NewTrack::processFrameAt(frame,true,5033);
-    assert(column(timed,"cone_remaining_ms")==remaining && column(timed,"stop_command")=="0");
-    NewTrack::processFrameAt(cv::Mat(),false,5100);timed=NewTrack::processFrameAt(frame,true,6000);
-    assert(column(timed,"cone_remaining_ms")==remaining);
-    // An incomplete deployment is explicitly stopped instead of silently using compiled defaults.
-    std::remove("cone_avoidance.ini");NewTrack::reset();timed=NewTrack::processFrameAt(frame,true,7000);
-    assert(column(timed,"cone_tuning_valid")=="0" && column(timed,"stop_command")=="1");
     std::remove("image_params.txt");
-    std::cout<<"PASS actual live pipeline: cone/black priority, locked timed LEFT/WAIT/RIGHT/POST speeds, pause/camera recovery, missing-file stop, exact CSV\n";
+    std::cout<<"PASS legacy visual pipeline (fixed route disabled): contour/HSV boundary, black priority, exact CSV, rendering independence\n";
 }

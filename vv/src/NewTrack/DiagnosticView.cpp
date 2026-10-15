@@ -43,7 +43,9 @@ cv::Mat render(const cv::Mat& bgr,const cv::Mat& raw,const cv::Mat& closed,const
         enlarged.copyTo(canvas(cv::Rect(px+(480-size.width)/2,py+24+(316-size.height)/2,size.width,size.height)));
     };
     cv::putText(canvas,"VV: ONE FRAME / LIVE CONTROL SNAPSHOT",{8,17},cv::FONT_HERSHEY_SIMPLEX,.48,{240,240,240},1);
-    panel(bgr,0,0,"COLOR (camera crop)");
+    cv::Mat cameraPreview;
+    if(bgr.channels()==1) cv::cvtColor(bgr,cameraPreview,cv::COLOR_GRAY2BGR);else cameraPreview=bgr;
+    panel(cameraPreview,0,0,"CAMERA CROP (gray / color source)");
     // No diagnostic guides are drawn into RAW: these pixels are exactly the detector input.
     cv::Mat untouchedRaw;cv::cvtColor(raw,untouchedRaw,cv::COLOR_GRAY2BGR);
     panel(untouchedRaw,1,0,"RAW BINARY (black line retained)");

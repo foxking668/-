@@ -2,6 +2,10 @@
 /build/
 /video/
 /vv
+/VV_VERSION
+/VV_SHA256SUMS
+/image_params.reference.txt
+/*.zip
 *.o
 *.obj
 *.exe

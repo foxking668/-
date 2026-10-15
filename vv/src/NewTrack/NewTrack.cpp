@@ -6,6 +6,7 @@
 #include "EntranceProbe.hpp"
 #include "ConeBoundary.hpp"
 #include "ConeSequence.hpp"
+#include "GrayCone.hpp"
 #include "DiagnosticView.hpp"
 #include "Binarization.hpp"
 
@@ -58,7 +59,7 @@ namespace
         double startupRightSpeed = 7.0;
 
         // 蓝锥避障沿用最新版7.25自动排期里的蓝色目标检测器；只在人行横道前普通道路启用。
-        int blueConeEnable = 1;
+        int blueConeEnable = 0;
         double blueConeSpeed = 7.0;
         ConeBoundary::Settings coneSettings;
         ConeSequence::Settings coneSequenceSettings;
@@ -138,7 +139,7 @@ namespace
         //              -> 强制左转 ringSideLeftError（-60度）持续 ringSideLeftMs（默认2s）
         //              -> 全程速度压到 ringSideSpeed（默认2）
         // 匹配在【原生 80x56 灰度图】上做（不是 452x316 诊断面板），模板文件直接可用。
-        int ringSideEnable = 1;
+        int ringSideEnable = 0;
         std::string ringSideTmplPrefix = "ring_side_";
         int ringSideTmplCount = 7;
         // 模板中央裁剪尺寸。80x56=整帧原样匹配（零平移容忍）；60x44=允许横向±10/纵向±6像素平移。
@@ -164,7 +165,7 @@ namespace
         // mode=3：检出虚线后等最大暗块变成「竖直窄条」(高>=narrowH 宽<=narrowW) 停车
         //         （对应 f041 附近，16x56）
         // ringEntryStopMs=0 表示停下来就不走了（给你走过去判断位置）。
-        int ringEntryCueEnable = 1;          // 1=启用
+        int ringEntryCueEnable = 0;          // 1=启用
         int ringEntryCueMode = 2;            // 2=延时定位  3=窄条定位
         int ringEntryDashMinBlocks = 2;      // 至少几个共线小暗块才算"虚线"
         int ringEntryDashTolPx = 6;          // 共线容差(像素)
@@ -305,7 +306,7 @@ namespace
         TrackPolicy::ProbeResult probeResult;
         bool attemptedThisLap=false;
         long long taskAtMs=0, entryAssistUntilMs=0;
-        long long lastFrameMs=0;
+        long long lastFrameMs=0,routePausedMs=0;
         bool gateOpen=false, pausedPreviously=false, physicalPausePreviously=false;
         bool observationPaused=false;   // 【修正6】本帧环岛观测是否因暂停/证据无效被冻结
         TrackPolicy::MarkerLatch marker;
@@ -355,6 +356,7 @@ namespace
     // 使用最新版7.25自动排期源码中的蓝色障碍检测器，硬件/HSV接口不另造一套。
     ConeBoundary::Detector coneDetector;
     ConeSequence::Controller coneSequence;
+    long long coneLaunchAtMs=-1;
     std::atomic<bool> coneInputStop{false},coneSequenceActive{false};
     std::atomic<long long> coneLastFrameNs{-1};
 
@@ -679,7 +681,7 @@ namespace
         if (!configPrinted || changed)
         {
             configPrinted = true;
-            std::cout << "[NewTrack] revision=VV_CONE_SEQUENCE_20261015 enable=" << config.enable
+            std::cout << "[NewTrack] revision=VV_WINDOW_CONE_20261015_4 enable=" << config.enable
                       << " binary=" << (config.binarySettings.mode?"ROAD_ROI_OTSU":"LEGACY_HSV")
                       << " binary_roi=" << config.binarySettings.roiTopPercent << "/" << config.binarySettings.roiBottomPercent
                       << " lane=" << (config.workMode==0 && config.laneMethod==3 ? "M3-8neighborhood" : "7.25-contour")
@@ -701,6 +703,11 @@ namespace
                       << " start_right=" << config.startupRightEnable << "/" << config.startupRightDurationMs << "ms"
                       << " blue_cone=" << config.blueConeEnable
                       << " cone_sequence=" << config.coneSequenceSettings.enabled
+                      << " cone_mode=" << (config.coneSequenceSettings.enabled?"WINDOW_GRAY_PASS":"LEGACY_VISUAL")
+                      << " cone_entry=" << config.coneSequenceSettings.entryTimeMs << "-" << config.coneSequenceSettings.entryEarlyMs
+                      << "+" << config.coneSequenceSettings.entryLateMs << "ms"
+                      << " cone_zone_speed=" << config.coneSequenceSettings.zoneSpeed
+                      << " ring_entry_stop=" << config.ringEntryCueEnable
                       << " cone_tuning_valid=" << config.coneTuningValid
                       << " cone_confirm=" << config.coneSettings.confirmFrames
                       << " work_mode=" << (config.workMode==1?"ROUNDABOUT":"NORMAL")
@@ -1566,13 +1573,17 @@ namespace
     {
         const auto now=frameNow();
         const long long ms=std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-        const bool enabled=c.workMode==1 && c.ringEnable;
+        const bool routeReady=!c.coneSequenceSettings.enabled || coneSequence.routeComplete();
+        const bool enabled=c.workMode==1 && c.ringEnable && routeReady;
         const bool physicalPause=finishStopped || coneStopForced.load() || ms*1000000<zebraStopUntilNs.load();
-        const bool paused=physicalPause || !lane.valid || !binaryQuality;
+        const bool paused=physicalPause || !lane.valid || !binaryQuality ||
+            (c.coneSequenceSettings.enabled && (gMotorStop || coneInputStop.load()));
         // 【修正6】把"暂停/证据无效"状态暴露给 FrameResult 和 CSV，
         // 这样上层能区分"观测被冻结"和"本帧真实检测结果"。
         ring.observationPaused=paused;
         const long long delta=ring.lastFrameMs>0?std::max(0LL,ms-ring.lastFrameMs):0;
+        if(c.coneSequenceSettings.enabled && routeReady && (paused || ring.pausedPreviously))
+            ring.routePausedMs+=delta;
         ring.lastFrameMs=ms;
         if(paused || ring.pausedPreviously)
         {
@@ -1581,7 +1592,9 @@ namespace
         }
         if(physicalPause || ring.physicalPausePreviously) lapEpoch+=std::chrono::milliseconds(delta);
         ring.pausedPreviously=paused;ring.physicalPausePreviously=physicalPause;
-        const long long lapMs=std::chrono::duration_cast<std::chrono::milliseconds>(now-lapEpoch).count();
+        const long long lapMs=c.coneSequenceSettings.enabled && coneSequence.releaseAtMs()>=0?
+            c.ringStartupBlockMs+std::max(0LL,ms-coneSequence.releaseAtMs()-ring.routePausedMs):
+            std::chrono::duration_cast<std::chrono::milliseconds>(now-lapEpoch).count();
         const bool candidateWindow=lapMs<=c.ringMarkerWindowMs || ring.markerResult.armed || ring.probe.phase()==2;
         const bool canSeek=lapCounter.load()<2 && lapMs>=c.ringStartupBlockMs && candidateWindow &&
             !zebra.seenThisLap && !zebra.sequence.farArmed() && !ring.attemptedThisLap && !paused && !coneVisible;
@@ -1989,7 +2002,7 @@ namespace
 
 std::string diagnosticCsvHeader()
 {
-    return "valid,ring_stage,ring_complete,probe_phase,probe_dx,probe_rows,probe_border,probe_width_delta,probe_width_rows,marker_blocks,marker_armed,left_down_y,left_mid_y,left_up_y,right_out_y,source,target_x,steer_error,speed_command,stop_command,center_black_used,black_rows,cone_side,cone_active,cone_detected,cone_held,cone_blocked,cone_x,cone_y,cone_w,cone_h,cone_changed_rows,zebra_far,zebra_seen,zebra_triggered,zebra_stopping,fork_far,near_fork_rows,crossing_confirmed,lap,lap_ms,garage_stage,left_by_y,right_by_y,center_by_y,black_by_y,binary_threshold,binary_white_percent,binary_quality,ring_gate_open,low_camera_candidate,low_camera_confirmed,virtual_down_x,virtual_down_y,right_entry_x,right_entry_y,left_down_x,left_mid_x,left_up_x,right_out_x,raw_left_by_y,raw_right_by_y,ring_observation_paused,cone_confirmed,cone_confirmation_count,cone_blue_pixels,cone_components,cone_rejected_size,cone_rejected_road,cone_reason,cone_phase,cone_remaining_ms,cone_sequence_used,cone_tuning_valid,stop_reason";
+    return "valid,ring_stage,ring_complete,probe_phase,probe_dx,probe_rows,probe_border,probe_width_delta,probe_width_rows,marker_blocks,marker_armed,left_down_y,left_mid_y,left_up_y,right_out_y,source,target_x,steer_error,speed_command,stop_command,center_black_used,black_rows,cone_side,cone_active,cone_detected,cone_held,cone_blocked,cone_x,cone_y,cone_w,cone_h,cone_changed_rows,zebra_far,zebra_seen,zebra_triggered,zebra_stopping,fork_far,near_fork_rows,crossing_confirmed,lap,lap_ms,garage_stage,left_by_y,right_by_y,center_by_y,black_by_y,binary_threshold,binary_white_percent,binary_quality,ring_gate_open,low_camera_candidate,low_camera_confirmed,virtual_down_x,virtual_down_y,right_entry_x,right_entry_y,left_down_x,left_mid_x,left_up_x,right_out_x,raw_left_by_y,raw_right_by_y,ring_observation_paused,cone_confirmed,cone_confirmation_count,cone_blue_pixels,cone_components,cone_rejected_size,cone_rejected_road,cone_reason,cone_phase,cone_remaining_ms,cone_sequence_used,cone_tuning_valid,stop_reason,lane_valid,cone_route_complete,cone_entry_reason,cone_visual_reason,cone_near_seen,cone_gray_base_threshold";
 }
 
 // ============================================================================
@@ -2006,7 +2019,7 @@ namespace
 {
     struct CsvRow
     {
-        bool valid=false;
+        bool valid=false,laneValid=false;
         int ringStage=0, garageStage=0;
         bool ringComplete=false;
         int probePhase=0, probeDx=0, probeRows=0, probeBorder=0, probeWidthDelta=0, probeWidthRows=0;
@@ -2014,7 +2027,7 @@ namespace
         int leftDownY=-1, leftMidY=-1, leftUpY=-1, rightOutY=-1;
         std::string source="NONE", coneSide="NONE";
         double targetX=0.0, speedCommand=0.0; float steerError=0.0f;
-        bool stopCommand=false, centerBlackUsed=false; int blackRows=0;
+        bool stopCommand=false, centerBlackUsed=false; int blackRows=0,coneGrayThreshold=0;
         bool coneActive=false, coneDetected=false, coneHeld=false, coneBlocked=false;
         int coneX=0, coneY=0, coneW=0, coneH=0, coneChangedRows=0;
         bool zebraFar=false, zebraSeen=false, zebraTriggered=false, zebraStopping=false;
@@ -2068,11 +2081,11 @@ namespace
            <<','<<ConeSequence::name(coneSequence.phase())<<','<<coneSequence.remainingMs()
            <<','<<coneSequence.used()<<','<<r.coneTuningValid;
         const char* stopReason=!r.stopCommand?"NONE":!r.coneTuningValid?"CONE_TUNING_INVALID":
-            coneStopForced.load()?"CONE_CORRIDOR_BLOCKED":gMotorStop?"OPERATOR_STOP":
+            coneSequence.needsStop()?"CONE_VISUAL_TIMEOUT":coneStopForced.load()?"CONE_CORRIDOR_BLOCKED":gMotorStop?"OPERATOR_STOP":
             coneInputStop.load()?"CONE_INPUT_OR_PAUSE":lostLaneStopForced.load()?"LANE_LOST":
             ringSideStopForced.load()?"RING_SIDE_STOP":ringEntryStopForced.load()?"RING_ENTRY_STOP":
             motorStopForced.load()?"TASK_STOP":"ZEBRA_OR_STALE_CAMERA";
-        csv<<','<<stopReason;   // 【A1】末尾追加，前面顺序不动
+        csv<<','<<stopReason<<','<<r.laneValid<<','<<coneSequence.routeComplete()<<','<<coneSequence.entryReason()<<','<<coneSequence.reason()<<','<<coneSequence.nearSeen()<<','<<r.coneGrayThreshold;   // 【A1】末尾追加，前面顺序不动
         return csv.str();
     }
 }
@@ -2085,11 +2098,12 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
     if(!c.enable) return out;
     const long long coneNowMs=std::chrono::duration_cast<std::chrono::milliseconds>(frameNow().time_since_epoch()).count();
     coneLastFrameNs.store(coneNowMs*1000000);
-    const bool coneSequenceEnabled=c.coneSequenceSettings.enabled && c.blueConeEnable;
+    const bool coneSequenceEnabled=c.coneSequenceSettings.enabled;
+    if(coneLaunchAtMs<0) coneLaunchAtMs=coneNowMs;
     if(frameBlock.empty())
     {
         coneDetector.reset();
-        coneSequence.update(coneNowMs,lapCounter.load(),coneSequenceEnabled,false,false,c.coneSequenceSettings);
+        coneSequence.update(coneNowMs,lapCounter.load(),coneSequenceEnabled,0,false,c.coneSequenceSettings,{});
         coneSequenceActive.store(coneSequence.active());
         coneInputStop.store(coneSequenceEnabled);
         if(processStarted)
@@ -2097,6 +2111,7 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
             const auto now=frameNow();
             const long long ms=std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
             const long long delta=ring.lastFrameMs>0?std::max(0LL,ms-ring.lastFrameMs):0;
+            if(c.coneSequenceSettings.enabled && coneSequence.routeComplete()) ring.routePausedMs+=delta;
             const bool physicalPause=finishStopped || coneStopForced.load() || ms*1000000<zebraStopUntilNs.load();
             if(ring.taskAtMs>0) ring.taskAtMs+=delta;
             if(ring.entryAssistUntilMs>0) ring.entryAssistUntilMs+=delta;
@@ -2127,7 +2142,11 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
         processStarted=true;
         processStart=frameNow();
         lapEpoch=processStart;
-        std::cout << "【发车】先寻找起点倒Y交叉口；若未识别，约" << c.startupCrossingFallbackMs/1000.0
+        if(coneSequenceEnabled)
+            std::cout << "[ConeRoute] WINDOW_GRAY_PASS entry=" << c.coneSequenceSettings.entryTimeMs
+                      << "-" << c.coneSequenceSettings.entryEarlyMs << "+" << c.coneSequenceSettings.entryLateMs
+                      << "ms from first control frame after START; L/R/L/R, visual pass, wait=0" << std::endl;
+        if(!coneSequenceEnabled) std::cout << "【发车】先寻找起点倒Y交叉口；若未识别，约" << c.startupCrossingFallbackMs/1000.0
                   << "秒后自动按已通过起点交叉口处理。同步后：" << c.ringStartupBlockMs/1000.0
                   << "秒开放环岛门控，" << c.zebraStartupBlockMs/1000.0
                   << "秒开放人行横道，" << c.crossingStartupBlockMs/1000.0
@@ -2139,36 +2158,48 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
     ConeBoundary::Result blueResult;
     LaneLines coneLane=lane;
     bool blueAvoidActive=false;
-    if(ring.stage==RingStage::NORMAL && !ring.markerResult.armed && !ring.probe.controlsSteering() && !zebra.seenThisLap)
+    if(!coneSequenceEnabled && ring.stage==RingStage::NORMAL && !ring.markerResult.armed && !ring.probe.controlsSteering() && !zebra.seenThisLap)
         blueAvoidActive=applyBlueObstacleToLane(frame,coneLane,c,blueResult);
-    else {coneDetector.reset();blueResult.reason=c.blueConeEnable?"TASK_GATE":"DISABLED";}
+    else {coneDetector.reset();blueResult.reason=coneSequenceEnabled?"GRAY_SHAPE":c.blueConeEnable?"TASK_GATE":"DISABLED";}
     coneStopForced.store(blueResult.blocked);
-    const bool startupRunning=c.startupRightEnable && lapCounter.load()==0 &&
-        std::chrono::duration_cast<std::chrono::milliseconds>(frameNow()-processStart).count()<c.startupRightDurationMs;
-    const bool taskOwns=ring.result.active || ring.probe.controlsSteering() || ring.markerResult.armed ||
-        ringSide.phase==1 || ringSide.phase==2 || ringEntryCue.phase==2 || garage.stage!=GarageStage::IDLE;
+    GrayCone::Result grayCone;
+    if(coneSequenceEnabled) {
+        const auto& settings=coneSequence.used()?coneSequence.settings():c.coneSequenceSettings;
+        grayCone=GrayCone::detect(frame,settings);
+        grayCone.observation.roadValid=lane.valid && binary.quality && lane.bilateralRows>=rawMask.rows/3;
+        grayCone.observation.roadCenter=lane.aggregateCenter*100.0/rawMask.cols;
+        blueResult.detected=!grayCone.observation.candidates.empty();
+        blueResult.components=grayCone.components;blueResult.rejectedSize=grayCone.rejected;
+        blueResult.reason=grayCone.observation.valid?"GRAY_SHAPE":"GRAY_FRAME_INVALID";
+        if(blueResult.detected) {
+            const auto& candidate=grayCone.observation.candidates.front();
+            blueResult.box=cv::Rect(int(candidate.x*rawMask.cols/100),int(candidate.y*rawMask.rows/100),
+                int(candidate.w*rawMask.cols/100),int(candidate.h*rawMask.rows/100));
+            blueResult.side=candidate.center()<45?ConeBoundary::Side::LEFT:candidate.center()>55?ConeBoundary::Side::RIGHT:ConeBoundary::Side::CENTER;
+        }
+    }
+    const long long routeOrigin=lapCounter.load()==0?coneLaunchAtMs:
+        std::chrono::duration_cast<std::chrono::milliseconds>(lapEpoch.time_since_epoch()).count();
+    const long long routeMs=coneNowMs-routeOrigin;
     const bool externallyStopped=gMotorStop || finishStopped || motorStopForced.load() ||
-        coneStopForced.load() || lostLaneStopForced.load() || ringSideStopForced.load() ||
-        ringEntryStopForced.load() || coneNowMs*1000000<zebraStopUntilNs.load();
-    const bool routeMismatch=coneSequence.phase()==ConeSequence::Phase::LEFT &&
-        blueResult.confirmed && blueResult.side==ConeBoundary::Side::LEFT;
-    if(routeMismatch) blueResult.reason="LEFT_ROUTE_MISMATCH";
-    const bool sequenceAllowed=lane.valid && binary.quality && c.coneTuningValid && !externallyStopped &&
-        !routeMismatch && (!blueResult.confirmed || blueResult.roadValid) &&
-        (!taskOwns || coneSequence.phase()==ConeSequence::Phase::POST);
-    const bool sequenceStart=blueResult.detected && blueResult.confirmed && blueResult.roadValid &&
-        !blueResult.held && !blueResult.blocked && blueResult.side!=ConeBoundary::Side::LEFT &&
-        blueResult.box.y+blueResult.box.height-1>=frame.rows*c.coneSequenceSettings.triggerYPercent/100 &&
-        !startupRunning && !zebra.seenThisLap && lapCounter.load()<2;
-    coneSequence.update(coneNowMs,lapCounter.load(),coneSequenceEnabled,sequenceStart,sequenceAllowed,c.coneSequenceSettings);
+        coneStopForced.load() || ringSideStopForced.load() || ringEntryStopForced.load() ||
+        coneNowMs*1000000<zebraStopUntilNs.load();
+    const bool sequenceAllowed=c.coneTuningValid && !externallyStopped && (!coneSequenceEnabled || grayCone.observation.valid) &&
+        !(coneSequence.routeComplete() && !lane.valid);
+    const auto previousConePhase=coneSequence.phase();
+    coneSequence.update(coneNowMs,lapCounter.load(),coneSequenceEnabled,routeMs,sequenceAllowed,c.coneSequenceSettings,grayCone.observation);
+    if(coneSequence.steering()) {
+        lostLaneStopForced.store(false);lostLaneStopActive=false;lostLaneCount=0;lostLaneRecover=0;
+    }
+    if(previousConePhase!=coneSequence.phase())
+        std::cout<<"[ConeRoute] phase="<<ConeSequence::name(coneSequence.phase())<<" entry="<<coneSequence.entryReason()
+                 <<" reason="<<coneSequence.reason()<<" route_ms="<<routeMs<<std::endl;
     coneSequenceActive.store(coneSequence.active());
-    coneInputStop.store(coneSequenceEnabled && (!c.coneTuningValid ||
-        (!lane.valid && (blueResult.detected || blueResult.held || coneSequence.steering())) ||
-        (blueResult.confirmed && !blueResult.roadValid) ||
-        (coneSequence.steering() && !sequenceAllowed)));
+    coneInputStop.store(coneSequenceEnabled && (!c.coneTuningValid || coneSequence.needsStop() ||
+        (coneSequence.steering() && !sequenceAllowed) || (coneSequence.routeComplete() && !lane.valid)));
     const bool coneControls=blueResult.confirmed || coneSequence.steering();
-    // A current cone is observed before arming the marker: black fragments in the obstacle zone cannot steal control.
-    updateRing(rawMask,lane,rawMask.cols,c,blueResult.detected || blueResult.held || coneSequence.steering(),binary.quality,frame);
+    const bool ringRouteBlocked=coneSequenceEnabled && !coneSequence.routeComplete();
+    updateRing(rawMask,lane,rawMask.cols,c,(!coneSequenceEnabled && (blueResult.detected || blueResult.held)) || coneSequence.steering(),binary.quality,frame);
     // 【环岛右侧多模板触发】在原生 80x56 灰度图上匹配 f033~f039 那 7 张模板。
     // 触发后进入 完全断电停车 -> 强制左转 的固定序列，并全程把速度压到 ringSideSpeed。
     {
@@ -2177,13 +2208,13 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
         else if(frame.channels()==3) cv::cvtColor(frame,grey80,cv::COLOR_BGR2GRAY);
         const long long sideMs=std::chrono::duration_cast<std::chrono::milliseconds>(frameNow().time_since_epoch()).count();
         const long long sideLapMs=std::chrono::duration_cast<std::chrono::milliseconds>(frameNow()-lapEpoch).count();
-        if(!grey80.empty()) ringSideUpdate(grey80,c,sideLapMs,sideMs,!coneControls);
+        if(!grey80.empty()) ringSideUpdate(grey80,c,sideLapMs,sideMs,!coneControls && !ringRouteBlocked);
     }
     // 【环岛入口定位·虚线段判据】用运行时原始二值图（和 diagnostics 的 RAW BINARY 同源）。
     {
         const long long cueMs=std::chrono::duration_cast<std::chrono::milliseconds>(frameNow().time_since_epoch()).count();
         const long long cueLapMs=std::chrono::duration_cast<std::chrono::milliseconds>(frameNow()-lapEpoch).count();
-        ringEntryCueUpdate(rawMask,c,cueLapMs,cueMs,!coneControls);
+        ringEntryCueUpdate(rawMask,c,cueLapMs,cueMs,!coneControls && !ringRouteBlocked);
     }
     // 【修正6】lowCameraCandidate / lowCameraConfirmed / virtualDown / ringGateOpen
     // 不再在这里写进 out。原因见交接文档：
@@ -2202,8 +2233,15 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
         out.ringStage=ring.stage;out.garageStage=garage.stage;
         out.valid=false;
 
-        CsvRow row;row.cone=blueResult;row.coneTuningValid=c.coneTuningValid;
-        row.valid=false;
+        CsvRow row;row.cone=blueResult;row.coneTuningValid=c.coneTuningValid;row.coneGrayThreshold=grayCone.threshold;
+        const bool routeSteering=coneSequence.steering();
+        out.valid=routeSteering;out.steerError=routeSteering?(float)coneSequence.error():0.0f;
+        row.valid=routeSteering;row.laneValid=false;
+        row.stopCommand=forceMotorStop() || gMotorStop;
+        if(routeSteering) {
+            speedOverrideValue.store(coneSequence.speed());speedOverrideActive.store(true);
+            row.targetX=-1;row.steerError=out.steerError;row.speedCommand=row.stopCommand?0:coneSequence.speed();
+        }
         row.ringStage=static_cast<int>(ring.stage);
         row.garageStage=static_cast<int>(garage.stage);
         row.ringComplete=ring.result.completed;
@@ -2215,7 +2253,7 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
         row.probeWidthRows=ring.probeResult.widthRows;
         row.markerBlocks=ring.markerEvidence.blocks;
         row.markerArmed=ring.markerResult.armed;
-        row.source="INVALID_LANE";
+        row.source=routeSteering?std::string("CONE_VISUAL_")+ConeSequence::name(coneSequence.phase()):"INVALID_LANE";
         row.coneSide=ConeBoundary::sideName(blueResult.side);
         row.coneX=blueResult.box.x;row.coneY=blueResult.box.y;
         row.coneW=blueResult.box.width;row.coneH=blueResult.box.height;
@@ -2261,7 +2299,7 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
         {
             DiagnosticView::Snapshot snapshot;snapshot.left=lane.left;snapshot.right=lane.right;snapshot.center=lane.center;
             snapshot.blueMask=blueResult.blueMask;snapshot.coneBox=blueResult.box;snapshot.coneHeld=blueResult.held;
-            snapshot.lines={"INVALID LANE: steering result=0; task observations were not updated",
+            snapshot.lines={routeSteering?std::string("VISUAL PASS: ")+ConeSequence::name(coneSequence.phase())+"; no visual lane":"INVALID LANE: steering result=0; task observations were not updated",
                 "ring="+std::to_string(static_cast<int>(ring.stage))+" marker="+std::to_string(ring.markerResult.armed),
                 "cone="+std::string(blueResult.reason)+" count="+std::to_string(blueResult.confirmations)+" blue="+std::to_string(blueResult.bluePixels),
                 "This is the current camera frame, not a cached successful result."};
@@ -2329,15 +2367,6 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
     lastTargetX=targetX;
 
     float error=(float)centerToError(targetX,rawMask.rows,rawMask.cols,RuntimeConfig::getCenterPratio());
-    if(coneSequence.phase()==ConeSequence::Phase::LEFT) {
-        error=(float)std::min(centerToError(targetX,rawMask.rows,rawMask.cols,coneSequence.settings().leftPratio),
-                             -coneSequence.settings().leftError);
-    } else if(coneSequence.phase()==ConeSequence::Phase::RIGHT) {
-        error=(float)std::max(double(error),coneSequence.settings().rightError);
-    }
-    if(coneSequence.steering()) {
-        speedOverrideValue.store(coneSequence.speed());speedOverrideActive.store(true);
-    }
     // 仅第一次发车出库：短时右偏。正误差在这辆旧车代码里对应右转。
     const auto startupNow=frameNow();
     const long long startupElapsed=std::chrono::duration_cast<std::chrono::milliseconds>(startupNow-processStart).count();
@@ -2485,6 +2514,9 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
                   << "!!!【第二圈结束自动停车】已停车并将转向命令归零。请先关闭车上的舵机电源开关，再按 Ctrl+C 退出程序!!!"
                   << ANSI_RESET << std::endl;
     }
+    if(coneSequence.steering()) {
+        error=(float)coneSequence.error();speedOverrideValue.store(coneSequence.speed());speedOverrideActive.store(true);
+    }
     if(finishStopped)
     {
         motorStopForced.store(true);
@@ -2519,7 +2551,7 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
             lastStatus = now;
             std::ostringstream status;
             status << "[NewTrack][STATUS] lane=" << (laneMethod==3?"M3":"725")
-                   << " source=" << (ringActive?"RING":(startupRightActive?"START_RIGHT":(blueAvoidActive?"BLUE_CONE":((c.centerBlackEnable && black.reliable)?"CENTER_BLACK":"BOUNDARY"))))
+                   << " source=" << (coneSequence.steering()?std::string("CONE_VISUAL_")+ConeSequence::name(coneSequence.phase()):ringActive?"RING":(startupRightActive?"START_RIGHT":(blueAvoidActive?"BLUE_CONE":((c.centerBlackEnable && black.reliable)?"CENTER_BLACK":"BOUNDARY"))))
                    << " error=" << std::fixed << std::setprecision(1) << error
                    << " blackRows=" << black.validRows << "/" << black.nearRows
                    << " edgeRows=" << lane.bilateralRows << "/L" << lane.leftOnlyRows << "/R" << lane.rightOnlyRows
@@ -2562,15 +2594,15 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
     {
         const bool stop=forceMotorStop() || gMotorStop;
         const double speedCommand=stop?0.0:(speedOverrideActive.load()?speedOverrideValue.load():RuntimeConfig::getMotorAimSpeed());
-        const bool blackUsed=!ringActive && !startupRightActive && !finishStopped &&
+        const bool blackUsed=!coneSequence.steering() && !ringActive && !startupRightActive && !finishStopped &&
             (out.centerBlackReliable || partialBlackApplied);
-        const std::string source=coneSequence.steering()?std::string("CONE_")+ConeSequence::name(coneSequence.phase()):garage.stage!=GarageStage::IDLE?"GARAGE":(ringActive?"RING":(startupRightActive?"START_RIGHT":(blueAvoidActive?"CONE":(out.centerBlackReliable?"CENTER_BLACK":(partialBlackApplied?"PARTIAL_BLACK":"BOUNDARY")))));
+        const std::string source=coneSequence.steering()?std::string("CONE_VISUAL_")+ConeSequence::name(coneSequence.phase()):garage.stage!=GarageStage::IDLE?"GARAGE":(ringActive?"RING":(startupRightActive?"START_RIGHT":(blueAvoidActive?"CONE":(out.centerBlackReliable?"CENTER_BLACK":(partialBlackApplied?"PARTIAL_BLACK":"BOUNDARY")))));
         const std::string coneSide=ConeBoundary::sideName(blueResult.side);
         const auto& e=ring.result.evidence;
         // 【修正6 / A1】有效帧也走统一的 buildDiagnosticCsv()，
         // 与无效帧共用同一份字段布局，保证 FrameResult / CSV / 四宫格来自同一份最终状态。
-        CsvRow row;row.cone=blueResult;row.coneTuningValid=c.coneTuningValid;
-        row.valid=true;
+        CsvRow row;row.cone=blueResult;row.coneTuningValid=c.coneTuningValid;row.coneGrayThreshold=grayCone.threshold;
+        row.valid=true;row.laneValid=true;
         row.ringStage=static_cast<int>(ring.stage);
         row.garageStage=static_cast<int>(garage.stage);
         row.ringComplete=ring.result.completed;
@@ -2621,7 +2653,7 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
              <<" y="<<e.down.y<<'/'<<e.mid.y<<'/'<<e.up.y<<" out="<<e.rightOut.y;
         line3<<"cone="<<coneSide<<" ACTIVE="<<blueAvoidActive<<" held="<<blueResult.held<<" blocked="<<blueResult.blocked
              <<" confirm="<<blueResult.confirmations<<"/"<<c.coneSettings.confirmFrames<<" "<<blueResult.reason
-             <<" "<<ConeSequence::name(coneSequence.phase())<<":"<<coneSequence.remainingMs()<<"ms"
+             <<" "<<ConeSequence::name(coneSequence.phase())<<":"<<coneSequence.remainingMs()<<"ms"<<" "<<coneSequence.entryReason()<<"/"<<coneSequence.reason()
              <<" zebra_far="<<zebra.sequence.farArmed()<<" zebra_seen="<<zebra.seenThisLap<<" zebra_stop="<<(stopCheckMs*1000000<zebraStopUntilNs.load());
         line4<<"fork_far="<<crossing.farNear.armed()<<" near_rows="<<forkEv.nearSplitRows<<" near_y="<<c.crossingNearYPercent
              <<"% lap="<<lapCounter.load()<<" lap_ms="<<out.lapElapsedMs<<" garage="<<static_cast<int>(garage.stage)
@@ -2657,7 +2689,9 @@ bool speedOverride(double &targetSpeed)
 
 bool forceMotorStop()
 {
-    if(!enabled()) return false;
+    const Config c=cfg();
+    if(!c.enable) return false;
+    if(c.coneSequenceSettings.enabled && !c.coneTuningValid) return true;
     if(motorStopForced.load() || coneStopForced.load() || lostLaneStopForced.load() ||
         ringSideStopForced.load() || ringEntryStopForced.load() || coneInputStop.load()) return true;
     if(coneSequenceActive.load()) {
@@ -2678,7 +2712,7 @@ GarageStage garageStage(){return (GarageStage)garageStageAtomic.load();}
 
 void reset()
 {
-    coneDetector.reset();coneSequence.reset();coneInputStop.store(false);coneSequenceActive.store(false);coneLastFrameNs.store(-1);
+    coneDetector.reset();coneSequence.reset();coneLaunchAtMs=-1;coneInputStop.store(false);coneSequenceActive.store(false);coneLastFrameNs.store(-1);
     coneStopForced.store(false);
     ring=RingState{};zebra=ZebraState{};crossing=CrossingState{};garage=GarageStateData{};lapCounter.store(0);ringStageAtomic.store(0);garageStageAtomic.store(0);speedOverrideActive.store(false);motorStopForced.store(false);lostLaneStopForced.store(false);zebraStopUntilNs.store(0);processStart=frameNow();processStarted=false;lapEpoch=processStart;startupCrossingSynced=false;startupCrossingConfirm=0;finishStopPending=false;finishStopped=false;finishStopAt=Clock::time_point{}; laneWidthProfile.clear(); laneWidthMedian=0.0; laneWidthProfileHeight=0;
     // 【新增】限速器 / 丢线停车 / 中线平滑 的静态状态也一起清零。

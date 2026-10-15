@@ -1,4 +1,6 @@
-# 锥桶定时动作在独立 cone_avoidance.ini 调参；文件缺失/非法时比赛模式停驱动。
+# 2026-10-15.4：时间窗口进入+灰度视觉过桶换段；参数集中于 cone_avoidance.ini。
+# 环岛主逻辑在四段完成后开放；侧模板停车与入口定位停车默认关闭。
+# 锥桶区域速度、转向、最短时间与最大超时独立调参；文件缺失/非法时停止驱动。
 new_track_cone_sequence_enable=1
 # 连续2个真实新帧；缓存帧不参与确认。100ms是最大帧间隔，不是最小等待。
 new_track_blue_cone_max_confirm_gap_ms=100
@@ -68,7 +70,7 @@ new_track_start_right_speed=7
 
 # 锥桶避障：完整蓝色锥体HSV/8连通域检测；左锥替换左边界，右锥替换右边界。
 # 排除大蓝挡板；检测相对于当前道路中心的左右，不使用固定锥桶摆放脚本。
-new_track_blue_cone_enable=1
+new_track_blue_cone_enable=0
 new_track_blue_cone_speed=7
 # OpenCV H=0..179；按规则蓝色锥桶，实际光照变化可调整HSV范围。
 new_track_blue_cone_h_min=90
@@ -695,7 +697,7 @@ new_track_ring_side_log_ms=900
 #   mode=2  检出虚线后【立即】停车（delay_ms=0）。想再晚一点就调大 delay_ms
 #   mode=3  检出虚线后等【竖直窄条】停车     （③对应 f041，16x56；w<=narrow_w h>=narrow_h）
 # stop_ms=0 表示停下来就不走了，给你走过去判断位置
-new_track_ring_entry_cue_enable=1
+new_track_ring_entry_cue_enable=0
 new_track_ring_entry_cue_mode=2
 new_track_ring_entry_dash_min_blocks=2
 new_track_ring_entry_dash_tol_px=6

@@ -8,7 +8,8 @@ TEST_VIDEO_DIR="$(mktemp -d /tmp/vv-video-test.XXXXXX)"
 TEST_LIVE_DIR="$(mktemp -d /tmp/vv-live-test.XXXXXX)"
 TEST_START_DIR="$(mktemp -d /tmp/vv-start-test.XXXXXX)"
 TEST_GATE_DIR="$(mktemp -d /tmp/vv-gate-test.XXXXXX)"
-trap 'rm -f "$TEST_BIN"; rm -rf "$TEST_VIDEO_DIR" "$TEST_LIVE_DIR" "$TEST_START_DIR" "$TEST_GATE_DIR"' EXIT
+TEST_ROUTE_DIR="$(mktemp -d /tmp/vv-route-test.XXXXXX)"
+trap 'rm -f "$TEST_BIN"; rm -rf "$TEST_VIDEO_DIR" "$TEST_LIVE_DIR" "$TEST_START_DIR" "$TEST_GATE_DIR" "$TEST_ROUTE_DIR"' EXIT
 c++ -std=c++17 -O1 -Wall -Wextra -Wpedantic -UNDEBUG -Isrc \
     tests/cone_sequence_test.cpp -o "$TEST_BIN"
 "$TEST_BIN" "$PWD/cone_avoidance.ini"
@@ -43,24 +44,23 @@ if command -v pkg-config >/dev/null && pkg-config --exists opencv4; then
         src/Experiment/ProcessedRecording.cpp src/Experiment/VideoRecorder.cpp \
         $(pkg-config --cflags --libs opencv4) -o "$TEST_START_DIR/start_test"
     "$TEST_START_DIR/start_test" "$TEST_START_DIR"
-    c++ -std=c++17 -O1 -UNDEBUG -ffunction-sections -Isrc -Isrc/Experiment/Baselines \
-        tests/live_pipeline_test.cpp src/NewTrack/NewTrack.cpp src/NewTrack/Roundabout.cpp \
-        src/NewTrack/TrackGates.cpp src/NewTrack/EightNeighbor.cpp src/NewTrack/ConeBoundary.cpp \
-        src/NewTrack/DiagnosticView.cpp src/NewTrack/Binarization.cpp src/ImageProcess/FindLine/FindLine.cpp \
-        src/ImageProcess/FindStartPos/FindStartPos.cpp src/ImageProcess/FixLine/FixLine.cpp \
-        src/ImageProcess/HandleImage/HandleImage.cpp src/Experiment/Baselines/baselines.cpp \
-        src/Other/Global/Global.cpp \
-        -Wl,--gc-sections $(pkg-config --cflags --libs opencv4) -o "$TEST_BIN"
-    "$TEST_BIN" "$TEST_LIVE_DIR"
-    c++ -std=c++17 -O1 -UNDEBUG -ffunction-sections -Isrc -Isrc/Experiment/Baselines \
-        tests/pipeline_gate_test.cpp src/NewTrack/NewTrack.cpp src/NewTrack/Roundabout.cpp \
-        src/NewTrack/TrackGates.cpp src/NewTrack/EightNeighbor.cpp src/NewTrack/ConeBoundary.cpp \
-        src/NewTrack/DiagnosticView.cpp src/NewTrack/Binarization.cpp src/ImageProcess/FindLine/FindLine.cpp \
-        src/ImageProcess/FindStartPos/FindStartPos.cpp src/ImageProcess/FixLine/FixLine.cpp \
-        src/ImageProcess/HandleImage/HandleImage.cpp src/Experiment/Baselines/baselines.cpp \
-        src/Other/Global/Global.cpp \
-        -Wl,--gc-sections $(pkg-config --cflags --libs opencv4) -o "$TEST_BIN"
-    "$TEST_BIN" "$TEST_GATE_DIR"
+    run_pipeline_test() {
+        c++ -std=c++17 -O1 -UNDEBUG -ffunction-sections -Isrc -Isrc/Experiment/Baselines \
+            "$1" src/NewTrack/NewTrack.cpp src/NewTrack/Roundabout.cpp \
+            src/NewTrack/TrackGates.cpp src/NewTrack/EightNeighbor.cpp src/NewTrack/ConeBoundary.cpp \
+            src/NewTrack/GrayCone.cpp src/NewTrack/DiagnosticView.cpp src/NewTrack/Binarization.cpp src/ImageProcess/FindLine/FindLine.cpp \
+            src/ImageProcess/FindStartPos/FindStartPos.cpp src/ImageProcess/FixLine/FixLine.cpp \
+            src/ImageProcess/HandleImage/HandleImage.cpp src/Experiment/Baselines/baselines.cpp \
+            src/Other/Global/Global.cpp \
+            -Wl,--gc-sections $(pkg-config --cflags --libs opencv4) -o "$TEST_BIN"
+        "$TEST_BIN" "$2"
+    }
+    c++ -std=c++17 -O1 -UNDEBUG -Isrc tests/gray_cone_test.cpp src/NewTrack/GrayCone.cpp \
+        $(pkg-config --cflags --libs opencv4) -o "$TEST_BIN"
+    "$TEST_BIN"
+    run_pipeline_test tests/live_pipeline_test.cpp "$TEST_LIVE_DIR"
+    run_pipeline_test tests/cone_route_pipeline_test.cpp "$TEST_ROUTE_DIR"
+    run_pipeline_test tests/pipeline_gate_test.cpp "$TEST_GATE_DIR"
     if [ "$CONES_ONLY" -eq 0 ]; then
     c++ -std=c++17 -O1 -Isrc tests/track_gates_test.cpp src/NewTrack/TrackGates.cpp \
         $(pkg-config --cflags --libs opencv4) -o "$TEST_BIN"
