@@ -286,7 +286,7 @@ inline std::string normalizeCcSpeedSource(const std::string& source) {
 inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory",bool ccSpeed=false) {
     out<<"VERSION "<<(tuning.sysfsPwmControl ? sysfsPwmVersion : rehearsalVersion)<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
-    if(tuning.sysfsPwmControl) out<<"SYSFS_PWM_COMPAT：servo_pwm=3370右/4470中/5170左；逻辑标度10000；300Hz；counts/5ms按7.25 PPR1024换算rps。\n";
+    if(tuning.sysfsPwmControl) out<<"SYSFS_PWM_COMPAT：servo_pwm=3370右/4470中/5170左；逻辑标度10000；300Hz；counts/5ms按7.25 PPR1024换算rps。\nGPIO输出采用7.25完整写入判定；value回读仅诊断，PWM仍严格回读，不代表物理电平确认。\n";
     else out<<"舵机调参命令范围="<<(ccSpeed ? ccParkingSteerMin : -legacyParkingSteerLimit)<<".."
         <<(ccSpeed ? ccParkingSteerLimit : legacyParkingSteerLimit)
         <<"（正右负左），实际还受车辆max_steer_deg限制；不是实测前轮角度或机械安全范围。\n";

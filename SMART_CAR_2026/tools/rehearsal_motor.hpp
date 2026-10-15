@@ -17,6 +17,7 @@ struct MotorEvent {
     bool factoryReadback=false;
     bool sysfs=false;
     std::array<double,2> measuredRps{{0,0}};
+    bool gpioReadbackEnforced=true;
 };
 inline std::string motorEventDetail(const MotorEvent& event) {
     std::ostringstream out;
@@ -28,8 +29,10 @@ inline std::string motorEventDetail(const MotorEvent& event) {
             <<' '<<side<<"_pwm_enable="<<event.pwmEnabled[i];
     }
     out<<" gpio73_enable="<<event.driverEnabled<<" write_result="<<(event.error.empty() ? "completed" : "failed")
-        <<" verification="<<(event.sysfs ? "sysfs_text_readback" : event.factoryReadback ? "factory_status_zero_readback" : "byte_count")
+        <<" verification="<<(event.sysfs ? (event.gpioReadbackEnforced ? "sysfs_text_readback" : "sysfs_pwm_readback_gpio_write_ack") : event.factoryReadback ? "factory_status_zero_readback" : "byte_count")
         <<" motor_zero_ns="<<event.motorZeroNs<<" measured_left_rps="<<event.measuredRps[0]<<" measured_right_rps="<<event.measuredRps[1]<<" error="<<event.error;
+    out<<" gpio_verification="<<(event.gpioReadbackEnforced ? "backend_checked" : "write_ack_only")
+        <<" gpio_direction_fields=written_commands";
     return out.str(); // Successful software write only; -1 means unknown, not a measured waveform.
 }
 // Only the authorized main thread starts motion. Within that trial the worker
@@ -139,6 +142,7 @@ private:
         }
         event.factoryReadback=hardware_.factory_write_readback;
         event.sysfs=hardware_.motor_backend=="sysfs";
+        event.gpioReadbackEnforced=io_.outputGpioReadbackRequired();
         event.measuredRps=feedback_;
         if(event.sysfs) {
             // Diagnostics on failure are best effort; do not hide the original error.

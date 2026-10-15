@@ -17,9 +17,12 @@ class MemoryNodes final:public SysfsNodes {
 public:
     std::string failedPath,failedValue;
     bool corruptPeriod=false,rejectUnsetDisable=true;
+    std::set<std::string> forcedZeroRead,unreadablePaths;
     bool exists(const std::string& p) override {std::lock_guard<std::mutex> held(mutex_);return files_.count(p)!=0;}
     std::string read(const std::string& p) override {
         std::lock_guard<std::mutex> held(mutex_);
+        if(unreadablePaths.count(p)) throw std::runtime_error("Injected GPIO read failure");
+        if(forcedZeroRead.count(p)) return "0";
         if(corruptPeriod && p.find("pwmchip8/pwm2/period")!=std::string::npos) return "49999";
         return files_.at(p);
     }
@@ -242,6 +245,49 @@ int main() {
         check(nodes.writes().size()==before,"invalid direct input makes no hardware write");
         servo.close();check(nodes.read(direct.servo_pwm)=="1490000","shutdown direct zero means4470 rather than PWM0");
         rejects([&]{SysfsBoardIo wrong(nodes,hardware,true);},"legacy3040000period refused before direct output");
+    }
+    {
+        const auto direct=HardwareConfig::load("deploy/sysfs_pwm_hardware.ini");
+        const auto directParams=Params::load("deploy/sysfs_pwm_vehicle.ini");
+        MemoryNodes nodes;
+        nodes.forcedZeroRead={direct.motor_left_dir,direct.motor_right_dir,direct.motor_enable_gpio};
+        SysfsBoardIo io(nodes,direct,true);
+        check(!io.outputGpioReadbackRequired(),"compatibility explicitly uses original7.25 GPIO write acknowledgement");
+        RehearsalMotor motor(io,direct,directParams);
+        check(nodes.read(direct.motor_left_pwm)=="0" && nodes.read(direct.motor_right_pwm)=="0","real-board low GPIO reads do not block zero PWM initialization");
+        motor.start(-1000,-1000,.5,1,1,1);
+        const auto events=motor.takeEvents();
+        check(events.size()==1 && events[0].event=="MOTOR_START" && events[0].error.empty(),"reverse trial starts after successful direction writes despite independent low reads");
+        check(!events[0].gpioReadbackEnforced && events[0].driverEnabled==0,"event preserves observedlow separately from write verification");
+        const auto detail=motorEventDetail(events[0]);
+        check(detail.find("gpio_verification=write_ack_only")!=std::string::npos && detail.find("sysfs_pwm_readback_gpio_write_ack")!=std::string::npos,"record does not claim all GPIOs passed readback");
+        check(findWrite(nodes.writes(),direct.motor_left_dir,"1")<nodes.writes().size(),"left reverse direction is actually written");
+        check(findWrite(nodes.writes(),direct.motor_right_dir,"1")<nodes.writes().size(),"right reverse direction is actually written");
+        motor.stop("MOTOR_STOP_QUIT");
+        check(nodes.read(direct.motor_left_pwm)=="0" && nodes.read(direct.motor_right_pwm)=="0","compatibility stop still clears and verifies both PWM channels");
+        check(findWrite(nodes.writes(),direct.motor_enable_gpio,"0")<nodes.writes().size(),"stop still writes nSLEEP0");
+        nodes.failedPath=direct.motor_left_dir;nodes.failedValue="1";
+        rejects([&]{io.writeGpioLevel(direct.motor_left_dir,1);},"actual GPIO write failure still propagates");
+        nodes.failedPath=direct.motor_enable_gpio;
+        rejects([&]{io.setMotorEnable(true);},"actual enable write failure still propagates");
+        nodes.failedPath="";
+    }
+    {
+        const auto direct=HardwareConfig::load("deploy/sysfs_pwm_hardware.ini");
+        MemoryNodes nodes;nodes.unreadablePaths={direct.motor_left_dir,direct.motor_right_dir,direct.motor_enable_gpio};
+        SysfsBoardIo io(nodes,direct,true);
+        io.setMotorEnable(false);io.writeGpioLevel(direct.motor_left_dir,1);io.writeGpioLevel(direct.motor_right_dir,1);
+        check(nodes.read(direct.motor_left_pwm)=="0" && nodes.read(direct.motor_right_pwm)=="0","GPIO read errors are diagnostic while successful writes and PWM zero remain verified");
+        nodes.corruptPeriod=true;
+        rejects([&]{io.readPwmMetadata(direct.motor_left_pwm);},"PWM metadata mismatch remains fatal in compatibility mode");
+        nodes.corruptPeriod=false;nodes.forcedZeroRead.insert(direct.motor_left_pwm);
+        rejects([&]{io.writePwmDuty(direct.motor_left_pwm,1000);},"PWM duty mismatch remains fatal in compatibility mode");
+    }
+    {
+        MemoryNodes nodes;nodes.forcedZeroRead.insert(hardware.motor_left_dir);
+        SysfsBoardIo io(nodes,hardware);
+        check(io.outputGpioReadbackRequired(),"legacy strict GPIO policy remains unchanged");
+        rejects([&]{io.readPwmMetadata(hardware.motor_left_pwm);},"legacy GPIO mismatch still fails rather than silently changing old behavior");
     }
     std::cout<<checks<<" new-car sysfs checks passed (mock hardware only)\n";
     return 0;

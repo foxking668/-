@@ -80,6 +80,7 @@ public:
     virtual void setMotorEnable(bool) {} // Factory board has no separate software enable.
     virtual bool nativeServo() const {return false;}
     virtual bool compatibilityPwmServo() const {return false;}
+    virtual bool outputGpioReadbackRequired() const {return true;}
     virtual uint32_t writeServoCommand(double) {throw std::runtime_error("Native servo unsupported");}
     virtual void readBinary(const std::string& path,void* data,size_t bytes)=0;
     virtual void writeBinary(const std::string& path,const void* data,size_t bytes)=0;

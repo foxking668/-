@@ -8,8 +8,8 @@ for library_dir in /home/root/qy/opencv411/lib /home/root/opencv-4.11-loongarch/
 done
 [ -x "$program" ] || { echo 'Missing parking_sysfs_pwm_20261016; build this version first.' >&2; exit 1; }
 case "$("$program" --help)" in
-    *'sysfs_pwm_parking version=2026-10-16.1'*'--sysfs-pwm-control'*) ;;
-    *) echo 'Wrong executable; require sysfs PWM compatibility 2026-10-16.1.' >&2; exit 1;;
+    *'sysfs_pwm_parking version=2026-10-16.2'*'--sysfs-pwm-control'*) ;;
+    *) echo 'Wrong executable; require sysfs PWM compatibility 2026-10-16.2.' >&2; exit 1;;
 esac
 mkdir -p config
 if [ ! -e config/parking_tuning.new_car.ini ]; then

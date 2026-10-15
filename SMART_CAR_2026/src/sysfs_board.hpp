@@ -25,7 +25,8 @@ inline uint32_t sysfsNumber(const std::string& text) {
 }
 inline void sysfsWriteChecked(SysfsNodes& nodes,const std::string& path,uint32_t value) {
     nodes.write(path,std::to_string(value));
-    if(sysfsNumber(nodes.read(path))!=value) throw std::runtime_error("Sysfs readback mismatch: "+path+" requested="+std::to_string(value));
+    const auto observed=sysfsNumber(nodes.read(path));
+    if(observed!=value) throw std::runtime_error("Sysfs readback mismatch: "+path+" requested="+std::to_string(value)+" observed="+std::to_string(observed));
 }
 inline void sysfsExport(SysfsNodes& nodes,const std::string& marker,const std::string& exportPath,uint32_t number) {
     if(nodes.exists(marker)) return;
@@ -105,10 +106,11 @@ public:
                 if(sysfsNumber(nodes_.read(enable))!=1) sysfsWriteChecked(nodes_,enable,1);
             }
         }
-        sysfsWriteChecked(nodes_,config_.motor_enable_gpio,enabled ? 1 : 0);
+        writeOutputGpio(config_.motor_enable_gpio,enabled ? 1 : 0);
     }
     bool nativeServo() const override {return true;}
     bool compatibilityPwmServo() const override {return compatibilityPwm_;}
+    bool outputGpioReadbackRequired() const override {return !compatibilityPwm_;}
     void initializeReferenceServo() {prepareServo();}
     uint32_t writeServoCommand(double adjustedCommand) override {
         const auto duty=compatibilityPwm_ ? parkingPwmServoNs(adjustedCommand,uint32_t(config_.servo_period_ns)) : newCarServoNs(adjustedCommand,config_.servo_period_ns);
@@ -133,12 +135,28 @@ public:
     }
     void writeGpioLevel(const std::string& path,uint8_t level) override {
         if((path!=config_.motor_left_dir && path!=config_.motor_right_dir) || level>1) throw std::runtime_error("Unconfigured motor direction GPIO");
-        prepareMotors();sysfsWriteChecked(nodes_,path,level);
+        prepareMotors();writeOutputGpio(path,level);
     }
     std::string readText(const std::string& path) override {return nodes_.read(path);}
     void readBinary(const std::string&,void*,size_t) override {throw std::runtime_error("Sysfs board has no factory binary ABI");}
     void writeBinary(const std::string&,const void*,size_t) override {throw std::runtime_error("Sysfs board requires decimal text writes");}
 private:
+    void writeOutputGpio(const std::string& path,uint32_t level) {
+        if(!compatibilityPwm_) {sysfsWriteChecked(nodes_,path,level);return;}
+        // Original 7.25 GPIO::setValue accepts a complete one-byte write.
+        // LinuxSysfsNodes::write still throws on open/write/short-transfer errors.
+        // A GPIO value read is a separate diagnostic, not output-latch proof.
+        nodes_.write(path,std::to_string(level));
+        std::string observed;
+        try {
+            const auto value=sysfsNumber(nodes_.read(path));
+            if(value==level) return;
+            observed=std::to_string(value);
+        } catch(const std::exception& error) {observed="unavailable: "+std::string(error.what());}
+        if(gpioDiagnostics_.insert(path).second)
+            std::cerr<<"GPIO_REFERENCE_WRITE "<<path<<" requested="<<level<<" observed="<<observed
+                <<" verification=write_ack_only; readback is diagnostic, physical level unconfirmed\n";
+    }
     void checkMotorPath(const std::string& path) const {
         if(path!=config_.motor_left_pwm && path!=config_.motor_right_pwm) throw std::runtime_error("Unconfigured motor PWM: "+path);
     }
@@ -154,11 +172,12 @@ private:
         referenceMotorPwmInit(nodes_,config_.motor_left_pwm,uint32_t(config_.motor_period_ns));
         referenceMotorPwmInit(nodes_,config_.motor_right_pwm,uint32_t(config_.motor_period_ns));
         for(const auto& path:{config_.motor_left_dir,config_.motor_right_dir,config_.motor_enable_gpio}) {
-            sysfsGpio(nodes_,path,true,true);sysfsWriteChecked(nodes_,path,1);
+            sysfsGpio(nodes_,path,true,true);writeOutputGpio(path,1);
         }
         motorsReady_=true;
     }
     void prepareServo() {if(!servoReady_) {referenceServoPwmInit(nodes_,config_.servo_pwm,uint32_t(config_.servo_period_ns),compatibilityPwm_ ? parkingPwmServoNs(0,uint32_t(config_.servo_period_ns)) : 1520000);servoReady_=true;}}
     SysfsNodes& nodes_;HardwareConfig config_;bool compatibilityPwm_=false,motorsReady_=false,servoReady_=false;
+    std::set<std::string> gpioDiagnostics_;
 };
 }

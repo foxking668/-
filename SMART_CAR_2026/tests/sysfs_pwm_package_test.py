@@ -23,7 +23,7 @@ class Packaging(unittest.TestCase):
             elf[:6] = b'\x7fELF\x02\x01'
             elf[18:20] = (258).to_bytes(2, 'little')
             program = path / 'fixture'
-            program.write_bytes(elf + b'2026-10-16.1 --sysfs-pwm-control')
+            program.write_bytes(elf + b'2026-10-16.2 --sysfs-pwm-control')
             archive, _ = package(program, path / 'package.zip')
             with zipfile.ZipFile(archive) as contents:
                 self.assertIsNone(contents.testzip())
@@ -33,7 +33,7 @@ class Packaging(unittest.TestCase):
                     self.assertEqual(hashlib.sha256(contents.read(name)).hexdigest(), digest)
                 self.assertNotIn('config/parking_tuning.new_car.ini', contents.namelist())
             elf[18:20] = (62).to_bytes(2, 'little')
-            program.write_bytes(elf + b'2026-10-16.1 --sysfs-pwm-control')
+            program.write_bytes(elf + b'2026-10-16.2 --sysfs-pwm-control')
             with self.assertRaisesRegex(ValueError, 'LoongArch'):
                 package(program, path / 'wrong.zip')
 
@@ -56,7 +56,7 @@ class Packaging(unittest.TestCase):
             program.write_text(
                 '#!/bin/sh\n'
                 'if [ "${1:-}" = --help ]; then\n'
-                ' echo "sysfs_pwm_parking version=2026-10-16.1 --sysfs-pwm-control"\n'
+                ' echo "sysfs_pwm_parking version=2026-10-16.2 --sysfs-pwm-control"\n'
                 ' exit 0\nfi\n'
                 'printf "%s\\n" "$@" > captured_args.txt\n', encoding='utf-8', newline='\n')
             program.chmod(0o755)

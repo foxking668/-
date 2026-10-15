@@ -6,7 +6,7 @@
 #include <iomanip>
 #include <set>
 namespace car2026 { namespace capture {
-constexpr const char* sysfsPwmVersion="2026-10-16.1";
+constexpr const char* sysfsPwmVersion="2026-10-16.2";
 struct ConvertedPwmTuning {
     std::string normalized;
     std::array<double,6> primary{},correction{};

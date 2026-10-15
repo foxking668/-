@@ -610,7 +610,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
                 if(stopWait) {
                     if(sysfs && monotonicNs()-stopWait->endNs>=int64_t(.5e9)) {
                         model.stop(stopWait->event=="MOTOR_STOP_LINE_LOST" ? "LINE_LOST_STOP_UNVERIFIED" : "MOTOR_TRIAL_COMPLETED_STOP_UNVERIFIED");
-                        std::cout<<"两路PWM与GPIO73已读回关闭；周期寄存器不用于判定物理停稳。"<<std::endl;
+                        std::cout<<(options.pwmControl ? "两路PWM零值已读回；GPIO73停机写入完成，回读仅作诊断；未判定物理停稳。" : "两路PWM与GPIO73已读回关闭；周期寄存器不用于判定物理停稳。")<<std::endl;
                     } else if(!sysfs && timing.stationaryAfter(stopWait->endNs)) {
                         stopConfirmed=true;model.stop(stopWait->event=="MOTOR_STOP_LINE_LOST" ? "LINE_LOST" : "MOTOR_TRIAL_COMPLETED");
                     }
@@ -722,6 +722,7 @@ int run(const Options& options,const Config& config,const car2026::HardwareConfi
         <<"\ntuning_interface="<<(options.pwmControl ? "servo_pwm_10000_counts_equivalent_5ms" : "legacy")
         <<"\nservo_logic_scale="<<(options.pwmControl ? car2026::parkingPwmScale : 0)
         <<"\nservo_period_ns="<<hardware.servo_period_ns
+        <<"\noutput_gpio_verification="<<(options.pwmControl ? "write_ack_only_readback_diagnostic" : "backend_checked")
         <<"\nmotor_control="<<(options.ccSpeed ? "cc_incremental_speed_pid" : "fixed_raw_pwm")<<"\nmotor_pid_period_ms="<<(options.ccSpeed ? 50 : 0)
         <<"\nreverse_right_only="<<model.tuning().reverseRightOnly
         <<"\nservo_zero_on_exit="<<(exitZeroAttempted ? (exitZeroSucceeded ? "software_write_completed":"failed") : "not_attempted")

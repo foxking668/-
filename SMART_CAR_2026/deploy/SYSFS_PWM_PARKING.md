@@ -1,4 +1,4 @@
-# 7.25 sysfs适配入库：2026-10-16.1
+# 7.25 sysfs适配入库：2026-10-16.2
 
 问题：当前4.19.190+系统有pwmchip2/8，没有/dev/zf_*。用户确认当前板子7.25能跑。本版复用7.25的sysfs电机和编码器，不创建假的设备节点，不改另一个XX工程。
 
@@ -9,10 +9,10 @@ cd /mnt/hgfs/share/SMART_CAR_2026
 sh deploy/build_sysfs_pwm_parking.sh
 ```
 使用现有/home/gy/builds/SMART_CAR_2026-loongarch配置；全新环境须先指定cmake/loongarch64.cmake及龙芯OpenCV。脚本不在x86主机运行LoongArch二进制。
-上传 deploy/parking_sysfs_pwm_20261016_1_verified.zip 到板子/home/root/gy：
+上传 deploy/parking_sysfs_pwm_20261016_2_verified.zip 到板子/home/root/gy：
 ```sh
 cd /home/root/gy
-unzip -o parking_sysfs_pwm_20261016_1_verified.zip
+unzip -o parking_sysfs_pwm_20261016_2_verified.zip
 sha256sum -c SYSFS_PWM_SHA256SUMS
 chmod +x parking_sysfs_pwm_20261016
 sh ./run_sysfs_pwm_parking.sh
@@ -58,5 +58,14 @@ Windows模拟设备、状态机及单位换算测试不等于龙芯实车验证�
 4. 隐藏bug：验证了负左/正右与原始PWM方向、端点越界不写输出、关机回4470而不是PWM0、两轮使能、错周期拒绝、非法文件重载后恢复、旧配置不覆盖、错误架构二进制拒绝。
 5. 优化建议：先固定能稳定运动的目标速度，再调每段时间；最终物理脉宽和编码器响应需上板确认，不能把离线测试等同整车跑通。
 
-本次离线结果：1662项控制检查通过（含原状态机440、启动42、巡线95、舵机35、电机99、sysfs模拟100、cc PID593、cc转向63、新PWM适配47、核心任务148）；12项Python打包/脚本检查；原cc源码对照64项；6个Linux目标文件编译通过。
+版本.1离线结果：1662项控制检查通过（含原状态机440、启动42、巡线95、舵机35、电机99、sysfs模拟100、cc PID593、cc转向63、新PWM适配47、核心任务148）；12项Python打包/脚本检查；原cc源码对照64项；6个Linux目标文件编译通过。
 未完成：真正LoongArch链接和实车运行，需在用户现有虚拟机使用上面的构建命令完成。没有生成或冒充可上板的新二进制。
+
+## 2026-10-16.2：GPIO输出回读兼容修复
+用户实车在gpio12初始化写1后回读不一致，版本.1因此中止。核对原7.25 GPIO.cpp：setValue检查write(fd, value, 1)==1，不把随后value读取作为写入成功条件。
+本模式对三个输出GPIO（方向12/13和总使能73）统一采用该判定：打开失败、短写、写入失败继续报错；value读失败或不一致只作诊断，每个引脚每个实例最多报告一次GPIO_REFERENCE_WRITE，记录requested和observed。
+输入方向GPIO75/72、GPIO direction属性、PWM period/duty_cycle/enable都保持严格检查。旧CC sysfs模式也保持原来的严格输出回读，改动只作用于--sysfs-pwm-control。
+MOTOR事件增加gpio_verification=write_ack_only；左右gpio字段是成功下发的方向命令，gpio73_enable仍是独立读到的值，可能为0或-1。不能把write成功、GPIO回读和物理电平混为一谈。停机先严格写零并回读两路PWM，仍尝试GPIO73写0。
+对“写1读0”、读取异常、真正写入失败、两侧方向、使能、停机清零和PWM错误均有模拟覆盖。未修改转向/速度/持续时间/阶段参数；未进行新的实车验证。需要重新编译版本.2再部署，修改INI不能修复版本.1。
+
+版本.2复核结果：1678项控制检查通过（sysfs模拟116项，其余1562项）；12项Python打包和启动脚本检查通过；6个Linux目标文件编译通过。针对本次变更的五项检查：共用一个输出GPIO写入函数，无三份重复逻辑；命名明确write_ack_only；严格PWM与GPIO诊断分层；覆盖读不一致、读失败、写失败及停机清零；诊断每引脚限一次防止PID循环刷屏。仅离线验证，不声明实车已跑通。
