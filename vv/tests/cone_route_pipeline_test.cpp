@@ -69,7 +69,8 @@ int main(int argc,char** argv) {
     assert(column(r,"cone_phase")=="FAULT" && column(r,"stop_command")=="1" && column(r,"stop_reason")=="CONE_VISUAL_TIMEOUT");
     assert(column(r,"ring_gate_open")=="0");
     NewTrack::reset();process(1000,road);process(6000,road);const auto remaining=column(r,"cone_remaining_ms");
-    NewTrack::processFrameAt(cv::Mat(),false,6033);process(9000,road);assert(column(r,"cone_remaining_ms")==remaining);
+    NewTrack::processFrameAt(cv::Mat(),false,6033);process(9000,road);
+    assert(std::stoll(column(r,"cone_remaining_ms"))==std::stoll(remaining)-33); // Last actual driving slice, not the stopped interval.
     Other::gMotorStop=true;process(9033,road);assert(column(r,"stop_reason")=="OPERATOR_STOP");Other::gMotorStop=false;
     std::remove("cone_avoidance.ini");NewTrack::reset();process(1000,road);
     assert(column(r,"cone_tuning_valid")=="0" && column(r,"stop_command")=="1");

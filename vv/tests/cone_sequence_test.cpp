@@ -46,6 +46,8 @@ int main(int argc,char** argv) {
     c.update(9066,0,false,9066,true,s,road());assert(!c.active());update(9099,view());assert(c.routeComplete() && !c.active());
     // Exact deadline entry with both floating ranges zero.
     c.reset();s.entryEarlyMs=s.entryLateMs=0;update(4499,road());assert(!c.used());update(4500,road());assert(c.used());
+    // Even if EVERY subsequent capture misses the watchdog deadline, maximum motion is bounded.
+    for(int t=4800;t<=9600;t+=300) update(t,road());assert(c.needsStop());
     c.reset();s=Settings{};s.enabled=true;
     // Parser rejects old formats, partial writes, duplicates, unknown/NaN, non-integer times and inverted limits.
     std::ifstream input(argv[1]);std::ostringstream all;all<<input.rdbuf();const std::string original=all.str();

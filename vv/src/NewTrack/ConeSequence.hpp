@@ -81,7 +81,7 @@ inline const char* name(Phase p) {switch(p) {
     case Phase::FAULT:return "FAULT";default:return "IDLE";}}
 class Controller {
     Settings locked_;int lap_=-1;bool used_=false,previousAllowed_=false,hasClock_=false,tracking_=false,nearSeen_=false;
-    long long elapsed_=0,lastMs_=0,releaseAtMs_=-1;Phase phase_=Phase::IDLE;
+    long long elapsed_=0,motionBudgetMs_=0,lastMs_=0,releaseAtMs_=-1;Phase phase_=Phase::IDLE;
     Candidate target_;int targetHits_=0,missing_=0,roadHits_=0,entryHits_=0;
     double previousRoad_=50;std::string entryReason_="NONE",reason_="WAIT_WINDOW";
     void clearEvidence() {tracking_=false;nearSeen_=false;targetHits_=missing_=roadHits_=entryHits_=0;}
@@ -109,7 +109,7 @@ class Controller {
         return best;
     }
     void advance(long long now) {
-        const int next=int(phase_)+1;phase_=static_cast<Phase>(next);elapsed_=0;clearEvidence();reason_="SEEK_CURRENT_CONE";
+        const int next=int(phase_)+1;phase_=static_cast<Phase>(next);elapsed_=motionBudgetMs_=0;clearEvidence();reason_="SEEK_CURRENT_CONE";
         if(phase_==Phase::RETURN_RIGHT) reason_="SEEK_ROAD";
         if(phase_==Phase::POST) {releaseAtMs_=now;reason_="ROAD_RECOVERED";if(locked_.postMs==0) phase_=Phase::DONE;}
     }
@@ -120,6 +120,10 @@ public:
         if(!enabled) {phase_=used_?Phase::DONE:Phase::IDLE;previousAllowed_=false;hasClock_=false;clearEvidence();return;}
         const bool fresh=hasClock_ && now>lastMs_ && now-lastMs_<=150;
         const bool continuous=fresh && allowed && previousAllowed_ && observation.valid;
+        // Motors may run after the preceding permitted frame until the 150ms watchdog.
+        // Repeated sparse frames must not freeze the maximum-turn safety budget forever.
+        if(steering() && hasClock_ && previousAllowed_ && now>lastMs_)
+            motionBudgetMs_+=std::min(150LL,now-lastMs_);
         if(!continuous) {clearEvidence();if(steering()) reason_=allowed?"EVIDENCE_RESET":"PAUSED";}
         if(phase_==Phase::IDLE && !used_) {
             locked_=settings;
@@ -131,7 +135,7 @@ public:
                 } else {tracking_=false;entryHits_=0;}
                 const bool visual=entryHits_>=2;
                 if(visual || routeMs>=latest) {
-                    used_=true;phase_=Phase::LEFT;elapsed_=0;entryReason_=visual?"VISUAL_WINDOW":"TIME_FALLBACK";
+                    used_=true;phase_=Phase::LEFT;elapsed_=motionBudgetMs_=0;entryReason_=visual?"VISUAL_WINDOW":"TIME_FALLBACK";
                     reason_="SEEK_CURRENT_CONE";targetHits_=candidate?entryHits_:0;
                     nearSeen_=targetHits_>=2 && target_.bottom()>=locked_.passNearYPercent;
                 } else reason_="ENTRY_CONFIRMING";
@@ -162,8 +166,10 @@ public:
                     }
                 }
                 if(passed && elapsed_>=locked_.minMs[index]) advance(now);
-                else if(elapsed_>=locked_.maxMs[index]) {phase_=Phase::FAULT;reason_="VISUAL_STAGE_TIMEOUT";clearEvidence();}
             }
+        }
+        if(steering() && motionBudgetMs_>=locked_.maxMs[int(phase_)-1]) {
+            phase_=Phase::FAULT;reason_="VISUAL_STAGE_TIMEOUT";clearEvidence();
         }
         lastMs_=now;hasClock_=true;previousAllowed_=allowed && observation.valid;
     }
@@ -178,7 +184,7 @@ public:
     const std::string& entryReason() const{return entryReason_;}
     const std::string& reason() const{return reason_;}
     bool nearSeen() const{return nearSeen_;}
-    long long remainingMs() const{return active()?std::max(0LL,(phase_==Phase::POST?locked_.postMs:locked_.maxMs[int(phase_)-1])-elapsed_):0;}
+    long long remainingMs() const{return active()?std::max(0LL,phase_==Phase::POST?locked_.postMs-elapsed_:locked_.maxMs[int(phase_)-1]-motionBudgetMs_):0;}
     double error() const{return steering()?(int(phase_)%2?-1:1)*locked_.errors[int(phase_)-1]:0;}
     double speed() const{return steering()?locked_.zoneSpeed:locked_.postSpeed;}
 };
