@@ -1,6 +1,7 @@
 #pragma once
 #include "hardware.hpp"
 #include "sysfs_pwm_units.hpp"
+#include "reference_725_servo.hpp"
 #include "capture_data.hpp"
 #include <chrono>
 #include <thread>
@@ -92,7 +93,7 @@ class SysfsBoardIo final:public DeviceIo {
 public:
     SysfsBoardIo(SysfsNodes& nodes,const HardwareConfig& config,bool compatibilityPwm=false):nodes_(nodes),config_(config),compatibilityPwm_(compatibilityPwm) {
         config_.validate();
-        if(compatibilityPwm_) parkingPwmServoNs(0,uint32_t(config_.servo_period_ns));
+        if(compatibilityPwm_) reference725ServoCommandPulse(0,uint32_t(config_.servo_period_ns));
         if(config_.motor_backend!="sysfs") throw std::runtime_error("Sysfs board requires sysfs profile");
         sysfsPwmDirectory(config_.motor_left_pwm);sysfsPwmDirectory(config_.motor_right_pwm);sysfsPwmDirectory(config_.servo_pwm);
     }
@@ -109,11 +110,11 @@ public:
         writeOutputGpio(config_.motor_enable_gpio,enabled ? 1 : 0);
     }
     bool nativeServo() const override {return true;}
-    bool compatibilityPwmServo() const override {return compatibilityPwm_;}
+    bool reference725Servo() const override {return compatibilityPwm_;}
     bool outputGpioReadbackRequired() const override {return !compatibilityPwm_;}
     void initializeReferenceServo() {prepareServo();}
     uint32_t writeServoCommand(double adjustedCommand) override {
-        const auto duty=compatibilityPwm_ ? parkingPwmServoNs(adjustedCommand,uint32_t(config_.servo_period_ns)) : newCarServoNs(adjustedCommand,config_.servo_period_ns);
+        const auto duty=compatibilityPwm_ ? reference725ServoCommandPulse(adjustedCommand,uint32_t(config_.servo_period_ns)) : newCarServoNs(adjustedCommand,config_.servo_period_ns);
         prepareServo();sysfsWriteChecked(nodes_,config_.servo_pwm,duty);return duty;
     }
     PwmInfo readPwmMetadata(const std::string& path) override {
@@ -176,7 +177,7 @@ private:
         }
         motorsReady_=true;
     }
-    void prepareServo() {if(!servoReady_) {referenceServoPwmInit(nodes_,config_.servo_pwm,uint32_t(config_.servo_period_ns),compatibilityPwm_ ? parkingPwmServoNs(0,uint32_t(config_.servo_period_ns)) : 1520000);servoReady_=true;}}
+    void prepareServo() {if(!servoReady_) {referenceServoPwmInit(nodes_,config_.servo_pwm,uint32_t(config_.servo_period_ns),compatibilityPwm_ ? reference725ServoInitPulse() : 1520000);servoReady_=true;}}
     SysfsNodes& nodes_;HardwareConfig config_;bool compatibilityPwm_=false,motorsReady_=false,servoReady_=false;
     std::set<std::string> gpioDiagnostics_;
 };

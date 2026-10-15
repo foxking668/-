@@ -1,15 +1,13 @@
 #pragma once
 #include "capture_data.hpp"
 #include "sysfs_pwm_units.hpp"
-#include <array>
-#include <algorithm>
+#include "reference_725_servo.hpp"
 #include <iomanip>
 #include <set>
 namespace car2026 { namespace capture {
-constexpr const char* sysfsPwmVersion="2026-10-16.4";
+constexpr const char* sysfsPwmVersion="2026-10-16.5";
 struct ConvertedPwmTuning {
     std::string normalized;
-    std::array<double,6> primary{},correction{};
 };
 // Only translates configuration units. Stage execution and cc PID stay shared.
 inline ConvertedPwmTuning convertPwmTuning(const std::string& text) {
@@ -34,12 +32,17 @@ inline ConvertedPwmTuning convertPwmTuning(const std::string& text) {
             output<<"reverse_right_only=0\n";
         } else if(section=="session" && key=="motor_target_counts") output<<"motor_target_rps="<<parkingCountsToRps(finiteNumber(value))<<'\n';
         else if(section=="session" && key=="motor_raw_pwm") output<<"motor_pid_pwm_limit="<<parkingMotorLimitNs(finiteNumber(value))<<'\n';
-        else if(index>=0 && (key=="servo_pwm" || key=="correction_servo_pwm")) {
-            if(key=="correction_servo_pwm" && index!=1 && index!=3) throw std::runtime_error("Correction only supported in stages 2/4");
-            const double delta=parkingPwmDelta(finiteNumber(value));
-            if(key=="servo_pwm") result.primary[size_t(index)]=delta;else result.correction[size_t(index)]=delta;
-            // Base parser checks the same signs/hold pairing using a unit placeholder.
-            output<<(key=="servo_pwm" ? "steer_command" : "correction_steer_command")<<'='<<(delta==0 ? 0 : delta>0 ? 1 : -1)<<'\n';
+        else if(index>=0 && (key=="servo_pwm" || key=="correction_servo_pwm" || key=="steer_command" || key=="correction_steer_command")) {
+            const bool correction=key=="correction_servo_pwm" || key=="correction_steer_command";
+            if(correction && index!=1 && index!=3) throw std::runtime_error("Correction only supported in stages 2/4");
+            const bool oldPwm=key=="servo_pwm" || key=="correction_servo_pwm";
+            double command=finiteNumber(value);
+            if(oldPwm) {
+                if(command!=4470) throw std::runtime_error("Old "+key+"="+value+" has no verified angle mapping; replace with "+(correction ? "correction_steer_command" : "steer_command")+" (0 center, negative left, positive right). Do not reuse PWM counts as angles.");
+                command=0; // Only the explicitly named old neutral alias is unambiguous.
+            }
+            reference725ServoCommandPulse(command,reference725ServoPeriod);
+            output<<(correction ? "correction_steer_command" : "steer_command")<<'='<<command<<'\n';
         } else if(index==0 && key.rfind("line_steer_",0)==0) {
             if(key=="line_steer_kp") output<<"line_pwm_kp="<<value<<'\n';
             else if(key=="line_steer_kd") output<<"line_pwm_kd="<<value<<'\n';
@@ -47,29 +50,17 @@ inline ConvertedPwmTuning convertPwmTuning(const std::string& text) {
             else if(key=="line_steer_step_per_frame") output<<"line_pwm_step="<<value<<'\n';
             else throw std::runtime_error("Unknown PWM line key: "+key);
         } else {
-            if(key=="steer_command" || key=="correction_steer_command" || key=="reverse_right_only" || key.find("target_rps")!=std::string::npos || key.rfind("motor_pid_",0)==0 || key=="motor_left_command" || key=="motor_right_command" || key.rfind("line_pwm_",0)==0)
+            if(key=="reverse_right_only" || key.find("target_rps")!=std::string::npos || key.rfind("motor_pid_",0)==0 || key=="motor_left_command" || key=="motor_right_command" || key.rfind("line_pwm_",0)==0)
                 throw std::runtime_error("Do not mix legacy angle/rps/PWM settings into sysfs PWM mode: "+key);
             output<<key<<'='<<value<<'\n';
         }
     }
     for(const auto* key:{"motor_control","motor_target_counts","motor_raw_pwm"})
         if(!keys.count(std::string("session.")+key)) throw std::runtime_error(std::string("Missing session.")+key);
-    for(int i=1;i<=6;++i) if(!keys.count("stage_"+std::to_string(i)+".servo_pwm")) throw std::runtime_error("All six servo_pwm keys required");
+    for(int i=1;i<=6;++i) {
+        const auto stage="stage_"+std::to_string(i)+".";
+        if(!keys.count(stage+"steer_command") && !keys.count(stage+"servo_pwm")) throw std::runtime_error("All six steer_command keys required");
+    }
     result.normalized=output.str();return result;
 }
-// Retains the XX PWM steering sign, gains, frame derivative scaling and step cap.
-class SysfsPwmLineController {
-public:
-    void reset() {previousNs_=0;previousError_=0;pwm_=parkingPwmCenter;}
-    double update(double target,int64_t now,double kp,double kd,double deadband,int step) {
-        if(!std::isfinite(target) || now<=0 || (previousNs_ && now<=previousNs_)) throw std::runtime_error("PWM line requires fresh finite feedback");
-        double error=79-target;if(std::abs(error)<=deadband) error=0;
-        const double scale=previousNs_ && now-previousNs_<250000000 ? std::min(2.,16666667./double(now-previousNs_)) : 0;
-        const int requested=int(std::clamp(parkingPwmCenter+kp*error+kd*(error-previousError_)*scale,double(parkingPwmRight),double(parkingPwmLeft)));
-        pwm_=std::clamp(requested,pwm_-step,pwm_+step);previousNs_=now;previousError_=error;
-        return parkingPwmDelta(pwm_);
-    }
-private:
-    int64_t previousNs_=0;double previousError_=0;int pwm_=parkingPwmCenter;
-};
 }}

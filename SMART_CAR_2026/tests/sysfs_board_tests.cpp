@@ -232,20 +232,36 @@ int main() {
         const auto directParams=Params::load("deploy/sysfs_pwm_vehicle.ini");
         MemoryNodes nodes;SysfsBoardIo io(nodes,direct,true);
         ServoOutput servo(io,direct,directParams);
-        check(nodes.writes().empty(),"direct PWM servo metadata never moves hardware");
-        check(io.compatibilityPwmServo() && servo.info().freq==300,"explicit direct compatibility mode reports300Hz");
-        check(servo.set(parkingPwmDelta(5000))==1666667,"PWM5000 becomes1666667ns without angleoffset");
+        check(nodes.writes().empty(),"original 7.25 servo metadata never moves hardware");
+        check(io.reference725Servo() && servo.info().freq==329,"original 3040000ns period reports rounded329Hz");
+        check(servo.set(-10)==1477777,"original -10 command includes -15 offset exactly once");
         const auto writes=nodes.writes();const std::string dir="/sys/class/pwm/pwmchip1/pwm0";
         check(direct.servo_pwm==dir+"/duty_cycle","direct profile uses September7.25 PWM1 channel0");
-        check(findWrite(writes,dir+"/period","3333333")<findWrite(writes,direct.servo_pwm,"1490000"),"direct initialization period precedes4470center pulse");
-        check(findWrite(writes,direct.servo_pwm,"1490000")<findWrite(writes,dir+"/enable","1"),"direct center pulse precedesenable, same reference order");
+        check(findWrite(writes,dir+"/period","3040000")<findWrite(writes,direct.servo_pwm,"1520000"),"original initialization writes period before unoffset setAngle90");
+        check(findWrite(writes,direct.servo_pwm,"1520000")<findWrite(writes,dir+"/enable","1"),"original initialization pulse precedes enable");
         check(!nodes.exists(direct.motor_enable_gpio),"servo conversion never initializes motor GPIO");
         const auto before=nodes.writes().size();
-        rejects([&]{servo.set(-701);},"direct left stop cannot be exceeded");
-        rejects([&]{servo.set(1101);},"direct right stop cannot be exceeded");
+        rejects([&]{servo.set(-75.1);},"original adjusted zero-degree boundary cannot be exceeded");
+        rejects([&]{servo.set(105.1);},"original adjusted 180-degree boundary cannot be exceeded");
         check(nodes.writes().size()==before,"invalid direct input makes no hardware write");
-        servo.close();check(nodes.read(direct.servo_pwm)=="1490000","shutdown direct zero means4470 rather than PWM0");
-        rejects([&]{SysfsBoardIo wrong(nodes,hardware,true);},"legacy3040000period refused before direct output");
+        servo.close();check(nodes.read(direct.servo_pwm)=="1494666","shutdown uses original runtime zero with -15 offset");
+        auto oldPeriod=direct;oldPeriod.servo_period_ns=3333333;
+        rejects([&]{SysfsBoardIo wrong(nodes,oldPeriod,true);},"former300Hz period refused before original formula output");
+        auto restricted=directParams;restricted.max_steer_deg=10;ServoOutput limited(io,direct,restricted);
+        const auto beforeLimited=nodes.writes().size();
+        rejects([&]{limited.set(11);},"original formula still respects narrower vehicle command limit");
+        check(nodes.writes().size()==beforeLimited,"vehicle limit rejection makes no output write");
+        auto secondOffset=directParams;secondOffset.steer_offset_deg=-15;ServoOutput offset(io,direct,secondOffset);
+        rejects([&]{offset.set(0);},"a second caller offset cannot silently double the original -15");
+        ServoOutput runtime(io,direct,directParams);runtime.set(-10);
+        RehearsalMotor timed(io,direct,directParams);timed.setStopAction([&]{runtime.set(0);});
+        timed.start(-1000,-1000,.03,1,1,1);
+        const auto until=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+        while(timed.active() && std::chrono::steady_clock::now()<until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        check(!timed.active() && nodes.read(direct.servo_pwm)=="1494666" &&
+              nodes.read(direct.motor_left_pwm)=="0" && nodes.read(direct.motor_right_pwm)=="0",
+              "independent motor expiry returns servo through original runtime formula and zeros both wheels");
     }
     {
         const auto direct=HardwareConfig::load("deploy/sysfs_pwm_hardware.ini");

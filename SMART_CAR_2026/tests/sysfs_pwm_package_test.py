@@ -15,9 +15,65 @@ from package_sysfs_pwm_parking import package
 
 
 class Packaging(unittest.TestCase):
+    def test_original_formula_tuning_upgrade_backs_up_and_never_guesses_angles(self):
+        shell = Path('C:/Program Files/Git/bin/sh.exe') if os.name == 'nt' else shutil.which('sh')
+        for scenario in ('center', 'noncenter', 'validation_error', 'edited'):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory)
+                for name in ('run_sysfs_pwm_parking.sh', 'sysfs_pwm_hardware.ini', 'sysfs_pwm_vehicle.ini',
+                             'parking_tuning.sysfs_pwm.example.ini', 'manual_capture.sysfs_pwm.ini'):
+                    shutil.copyfile(ROOT / 'deploy' / name, path / name)
+                (path / 'config').mkdir()
+                tuning = path / 'config/parking_tuning.new_car.ini'
+                source = (path / 'parking_tuning.sysfs_pwm.example.ini').read_text(encoding='utf-8')
+                source = source.replace('steer_command=0', 'servo_pwm=4470').replace('motor_target_counts=40', 'motor_target_counts=41')
+                source = source.replace('motor_raw_pwm=1500', 'motor_raw_pwm=3000')
+                source = source.replace('[stage_2]\nservo_pwm=4470\nsettle_time_s=0.5\nhold_time_s=0\nmotor_run_time_s=0',
+                                        '[stage_2]\nservo_pwm=4470\nsettle_time_s=0.5\nhold_time_s=2\nmotor_run_time_s=2')
+                if scenario == 'noncenter':
+                    source = source.replace('[stage_2]\nservo_pwm=4470', '[stage_2]\nservo_pwm=4900')
+                tuning.write_text(source, encoding='utf-8', newline='\n')
+                original = tuning.read_bytes()
+                action = 'exit 0'
+                if scenario == 'validation_error':
+                    action = 'exit 1'
+                elif scenario == 'edited':
+                    action = "printf '\\n# edited concurrently\\n' >> config/parking_tuning.new_car.ini; exit 0"
+                program = path / 'parking_sysfs_pwm_20261016'
+                program.write_text(
+                    '#!/bin/sh\n'
+                    'if [ "${1:-}" = --help ]; then\n'
+                    ' echo "sysfs_pwm_parking version=2026-10-16.5 --sysfs-pwm-control --no-camera"; exit 0\nfi\n'
+                    'for arg in "$@"; do\n'
+                    f' if [ "$arg" = --check-config ]; then {action}; fi\n'
+                    'done\necho executed >> executions.txt\n', encoding='utf-8', newline='\n')
+                program.chmod(0o755)
+                run = lambda: subprocess.run([str(shell), './run_sysfs_pwm_parking.sh'], cwd=path,
+                                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                result = run()
+                backups = list((path / 'config').glob('*.before_original725_*.bak'))
+                self.assertEqual(len(backups), 1)
+                self.assertEqual(backups[0].read_bytes(), original)
+                self.assertFalse(list((path / 'config').glob('*.tmp')))
+                if scenario == 'center':
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    header = (b'# CURRENT 2026-10-16.5: edit steer_command/correction_steer_command; 0=center, negative=left, positive=right.\n'
+                              b'# Previous comments below are historical; servo_pwm counts no longer control steering.\n')
+                    self.assertEqual(tuning.read_bytes(), header + original.replace(b'servo_pwm=4470', b'steer_command=0'))
+                    self.assertEqual(run().returncode, 0)
+                    self.assertEqual(len(list((path / 'config').glob('*.before_original725_*.bak'))), 1)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse((path / 'executions.txt').exists())
+                    if scenario == 'edited':
+                        self.assertIn(b'# edited concurrently', tuning.read_bytes())
+                        self.assertIn(b'servo_pwm=4470', tuning.read_bytes())
+                    else:
+                        self.assertEqual(tuning.read_bytes(), original)
+
     def test_existing_pwm2_migration_preserves_settings_and_rejects_failures(self):
         shell = Path('C:/Program Files/Git/bin/sh.exe') if os.name == 'nt' else shutil.which('sh')
-        for scenario in ('success', 'partial', 'invalid', 'concurrent', 'duplicate', 'custom'):
+        for scenario in ('success', 'partial', 'period_only', 'invalid', 'concurrent', 'duplicate', 'custom'):
             with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
                 path = Path(directory)
                 for name in ('run_sysfs_pwm_parking.sh', 'sysfs_pwm_hardware.ini', 'sysfs_pwm_vehicle.ini',
@@ -26,7 +82,9 @@ class Packaging(unittest.TestCase):
                 (path / 'config').mkdir()
                 profile = path / 'config/sysfs_pwm_hardware.ini'
                 old = (path / 'sysfs_pwm_hardware.ini').read_text(encoding='utf-8').replace(
-                    'pwmchip1/pwm0', 'pwmchip2/pwm0').replace('encoder_right_sign=1', 'encoder_right_sign=-1')
+                    'pwmchip1/pwm0', 'pwmchip2/pwm0').replace('servo_period_ns=3040000', 'servo_period_ns=3333333').replace('encoder_right_sign=1', 'encoder_right_sign=-1')
+                if scenario == 'period_only':
+                    old = old.replace('pwmchip2/pwm0', 'pwmchip1/pwm0')
                 if scenario == 'duplicate':
                     old += '\nservo_pwm=/sys/class/pwm/pwmchip2/pwm0/duty_cycle\n'
                 if scenario == 'custom':
@@ -43,7 +101,7 @@ class Packaging(unittest.TestCase):
                 program.write_text(
                     '#!/bin/sh\n'
                     'if [ "${1:-}" = --help ]; then\n'
-                    ' echo "sysfs_pwm_parking version=2026-10-16.4 --sysfs-pwm-control --no-camera"; exit 0\nfi\n'
+                    ' echo "sysfs_pwm_parking version=2026-10-16.5 --sysfs-pwm-control --no-camera"; exit 0\nfi\n'
                     'for arg in "$@"; do\n'
                     ' if [ "$arg" = --check-config ]; then\n'
                     '  printf "%s\\n" "$@" > preflight_args.txt\n'
@@ -54,18 +112,18 @@ class Packaging(unittest.TestCase):
                 run = lambda: subprocess.run([str(shell), './run_sysfs_pwm_parking.sh'], cwd=path,
                                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 result = run()
-                backups = list((path / 'config').glob('*.before_pwm1_*.bak'))
+                backups = list((path / 'config').glob('*.before_725_servo_*.bak'))
                 self.assertEqual(tuning.read_bytes(), b'user tuning must remain unchanged\n')
                 self.assertFalse(list((path / 'config').glob('*.tmp')))
-                if scenario in ('success', 'partial'):
+                if scenario in ('success', 'partial', 'period_only'):
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(profile.read_bytes(), original.replace(b'pwmchip2/pwm0', b'pwmchip1/pwm0'))
+                    self.assertEqual(profile.read_bytes(), original.replace(b'pwmchip2/pwm0', b'pwmchip1/pwm0').replace(b'servo_period_ns=3333333', b'servo_period_ns=3040000'))
                     self.assertEqual(len(backups), 1)
                     self.assertEqual(backups[0].read_bytes(), original)
                     self.assertIn('--check-config', (path / 'preflight_args.txt').read_text())
                     self.assertIn('--no-camera', (path / 'preflight_args.txt').read_text())
                     self.assertEqual(run().returncode, 0)
-                    self.assertEqual(len(list((path / 'config').glob('*.before_pwm1_*.bak'))), 1)
+                    self.assertEqual(len(list((path / 'config').glob('*.before_725_servo_*.bak'))), 1)
                     self.assertEqual((path / 'executions.txt').read_text().splitlines(), ['started', 'started'])
                 else:
                     self.assertNotEqual(result.returncode, 0)
@@ -86,7 +144,7 @@ class Packaging(unittest.TestCase):
             elf[:6] = b'\x7fELF\x02\x01'
             elf[18:20] = (258).to_bytes(2, 'little')
             program = path / 'fixture'
-            program.write_bytes(elf + b'2026-10-16.4 --sysfs-pwm-control --no-camera')
+            program.write_bytes(elf + b'2026-10-16.5 --sysfs-pwm-control --no-camera')
             archive, _ = package(program, path / 'package.zip')
             with zipfile.ZipFile(archive) as contents:
                 self.assertIsNone(contents.testzip())
@@ -96,7 +154,7 @@ class Packaging(unittest.TestCase):
                     self.assertEqual(hashlib.sha256(contents.read(name)).hexdigest(), digest)
                 self.assertNotIn('config/parking_tuning.new_car.ini', contents.namelist())
             elf[18:20] = (62).to_bytes(2, 'little')
-            program.write_bytes(elf + b'2026-10-16.4 --sysfs-pwm-control --no-camera')
+            program.write_bytes(elf + b'2026-10-16.5 --sysfs-pwm-control --no-camera')
             with self.assertRaisesRegex(ValueError, 'LoongArch'):
                 package(program, path / 'wrong.zip')
 
@@ -119,7 +177,7 @@ class Packaging(unittest.TestCase):
             program.write_text(
                 '#!/bin/sh\n'
                 'if [ "${1:-}" = --help ]; then\n'
-                ' echo "sysfs_pwm_parking version=2026-10-16.4 --sysfs-pwm-control --no-camera"\n'
+                ' echo "sysfs_pwm_parking version=2026-10-16.5 --sysfs-pwm-control --no-camera"\n'
                 ' exit 0\nfi\n'
                 'printf "%s\\n" "$@" > captured_args.txt\n', encoding='utf-8', newline='\n')
             program.chmod(0o755)

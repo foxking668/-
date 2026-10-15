@@ -26,7 +26,7 @@ def package(program, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--program', required=True)
-    parser.add_argument('--output', default=str(ROOT / 'deploy/parking_sysfs_pwm_20261016_4_verified.zip'))
+    parser.add_argument('--output', default=str(ROOT / 'deploy/parking_sysfs_pwm_20261016_5_verified.zip'))
     args = parser.parse_args()
     path, manifest = package(args.program, args.output)
     print('VERIFIED_PACKAGE ' + str(path))

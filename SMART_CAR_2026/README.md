@@ -1,6 +1,6 @@
 # 2026 龙芯智能驾驶工程
 
-2026-10-16：当前系统无 `/dev/zf_*`、但7.25可运行时，使用独立的 [sysfs PWM入库入口](deploy/SYSFS_PWM_PARKING.md)。构建 `sh deploy/build_sysfs_pwm_parking.sh`，板端运行 `sh ./run_sysfs_pwm_parking.sh`，保留XX格式 `servo_pwm` 和等效 `motor_target_counts` 调参。旧CC/XX入口不覆盖，硬件单位显式转换。
+2026-10-16：当前系统无 `/dev/zf_*`、但7.25可运行时，使用独立的 [sysfs PWM入库入口](deploy/SYSFS_PWM_PARKING.md)。构建 `sh deploy/build_sysfs_pwm_parking.sh`，板端运行 `sh ./run_sysfs_pwm_parking.sh`，方向改用 `steer_command`，复用原7.25公式、PWM1周期3040000ns及运行偏移-15；速度保留等效 `motor_target_counts`。默认无相机执行。旧CC/XX入口不覆盖，硬件单位显式转换。
 
 新增前进直线循迹观察模块（2026-10-08）：复用现有黑线识别和直线拟合，分别判断线形与居中/对正误差，使用显式图像目标、真实新帧滤波和建议命令限幅/限速，不把起步偏斜当作正确姿态。当前只回放和输出建议，不访问执行器、不依赖IMU、未接入正式驾驶。129项新检查及442帧前进录像检查通过；目标/命令仍未完成实车闭环标定。入口、配置、结果及五项检查见[STRAIGHT_FOLLOW.md](deploy/STRAIGHT_FOLLOW.md)。
 

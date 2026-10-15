@@ -1,108 +1,112 @@
-# 7.25 sysfs适配入库：2026-10-16.4
+# 原版7.25舵机公式入库：2026-10-16.5
 
-问题：当前4.19.190+系统有pwmchip1/2/8，没有/dev/zf_*。用户确认当前板子7.25能跑。本版复用7.25的sysfs电机和编码器，不创建假的设备节点，不改另一个XX工程。
+当前板子使用sysfs接口、无/dev/zf_*。本版按用户指定的2026-09/7.25.zip复用舵机公式、PWM1通道、周期和-15运行偏移。默认跳过相机，沿用已有电机PID、阶段时间和两次启动流程。旧CC/XX入口、另一个SMART_CAR_2026 -2工程不修改。
 
-当前启动器默认带`--no-camera`：不打开相机、不取帧、不录像、不巡线，阶段1按设定舵机值和时间前进，阶段2至5按原动作倒车。保留编码器速度PID、舵机计时、反向修正、手动停机及六阶段CSV。需要更新为版本.4可执行文件，板上的版本.2无法通过修改INI获得这个功能。
+## 舵机公式与调用顺序
 
-## 构建和上传
-在已经配好龙芯工具链与目标OpenCV的虚拟机：
+已核对压缩包内Steer.hpp、Steer.cpp、Global.cpp和ImageHandle.cpp的活动代码。注释中的0.52..2.52ms说明与实际表达式不一致，本版以活动代码为准：
+
+```cpp
+// Steer.hpp
+period = 3040000;
+// ImageHandle.cpp -> Steer::setAngle
+float angle = 90.0f + float(steer_command);
+angle += -15.0f;
+float duty = (((angle - 90.0f) / 90.0f) * 5.0f)
+           * (float)(period / 100.0f) + 1520000.0f;
+// 原PwmController::setDutyCycle接收unsigned int：截断，不四舍五入。
+```
+
+Global.cpp先steer->init()，内部setAngle(90)、写入1520000ns后enable；之后才setSteerOffset(-15)。本版保留该顺序，因此初始化脉宽与运行时零命令脉宽不同：
+
+| 状态/命令 | 写入脉宽ns |
+|---|---:|
+| 原版初始化，偏移尚为0 | 1520000 |
+| steer_command=-10 | 1477777 |
+| steer_command=0，运行和自动回正 | 1494666 |
+| steer_command=10 | 1511555 |
+
+通道/sys/class/pwm/pwmchip1/pwm0/duty_cycle；周期3040000ns，约328.947Hz。禁止再次通过车辆steer_offset_deg叠加-15；配置仍保持steer_offset_deg=0、steer_sign=1，原偏移在专用输出层只应用一次。
+
+方向改用steer_command，0名义回正、负左正右、可用小数。软件命令范围-75..105来自最终angle=75+command限制0..180，另受车辆max_steer_deg约束；这是命令范围，不是实测车轮转角或机械安全行程。初始化、阶段命令、自动回正、停机回正均走同一份原公式函数，初始化显式使用偏移0，运行/回正使用偏移-15。
+
+不再把servo_pwm=3370/4470/5170解释为当前板子的实际舵机标定，也不按10000刻度计算舵机脉宽。10000刻度仅保留给原有电机输出上限换算。
+
+## 构建与部署
+
+源码已位于共享工程SMART_CAR_2026；在已有工具链和OpenCV配置的虚拟机运行：
+
 ```sh
 cd /mnt/hgfs/share/SMART_CAR_2026
 sh deploy/build_sysfs_pwm_parking.sh
 ```
-使用现有/home/gy/builds/SMART_CAR_2026-loongarch配置；全新环境须先指定cmake/loongarch64.cmake及龙芯OpenCV。脚本不在x86主机运行LoongArch二进制。
-上传 deploy/parking_sysfs_pwm_20261016_4_verified.zip 到板子/home/root/gy：
+
+默认复用/home/gy/builds/SMART_CAR_2026-loongarch。脚本只编译目标程序并校验LoongArch ELF/版本后生成deploy/parking_sysfs_pwm_20261016_5_verified.zip，不在x86主机执行LoongArch测试。
+
+上传上述ZIP到板子/home/root/gy后：
+
 ```sh
 cd /home/root/gy
-unzip -o parking_sysfs_pwm_20261016_4_verified.zip
+unzip -o parking_sysfs_pwm_20261016_5_verified.zip
 sha256sum -c SYSFS_PWM_SHA256SUMS
 chmod +x parking_sysfs_pwm_20261016
 sh ./run_sysfs_pwm_parking.sh
 ```
-之后只运行run_sysfs_pwm_parking.sh，旧run_new_car_parking.sh仍是XX入口，不覆盖它，也不覆盖旧二进制。
 
-## 配置与执行
-继续读取 config/parking_tuning.new_car.ini，保留既有阶段/速度/角度/时间。没有该文件才复制全部居中、时间0的模板。格式或混用参数错误直接报错，绝不把用户配置重置为模板。
-新硬件文件独立放 config/sysfs_pwm_hardware.ini、config/sysfs_pwm_vehicle.ini；原new_car_hardware.ini和new_car_vehicle.ini保留。新配置只在缺失时创建。
-本版继承sysfs两次启动：第一次关舵机电源，等硬件初始化完成后Ctrl+C，看到PREPARE_COMPLETE；再次运行同一命令，正式试验提示后开舵机，Enter执行。
-仍用P+Enter停机/暂停，C+Enter仅恢复记录，Enter再授权运动；Q+Enter结束，Y/N直接保存。运行中保存当前段参数仍会重新授权执行，编辑前最好先停机退出。
-六阶段、两弯主转向和反向修正、0..120秒小数时长及六个CSV均复用原状态机；当前无相机模式不生成录像。第3阶段时间0表示不驱动，可直接选择stage=4。不会自动跑完六阶段。
+应看到VERSION 2026-10-16.5、SERVO_725_COMMAND_LIMIT和CAMERA_DISABLED。旧二进制与新脚本不能混用。本机没有新生成可上板的LoongArch二进制，需由上述虚拟机构建命令完成。
 
-## 单位必须区分
-- servo_pwm保持3370右、4470中、5170左。新后端把它明确规定为10000逻辑刻度，300Hz周期3333333ns。脉宽=round(servo_pwm*3333333/10000)，三点分别1123333/1490000/1723333ns。没有读取或声称读取到不存在的厂家duty_max。数值不是实测轮角。
-- 如果原厂使用的duty_max不是10000，该逻辑刻度不能保证复现原标定。当前保留参数窗口，不扩大机械行程；上车须观察回中/方向。旧7.25命令公式仍保留在原模式，本模式直接写逻辑PWM换算的脉宽。
-- 电机PWM周期仍为7.25的50000ns，左pwmchip8/pwm2、右pwmchip8/pwm1；GPIO12/13控制方向，GPIO73使能。前进两侧GPIO0，倒退GPIO1，零PWM停车。
-- 编码器仍为7.25的0x1611b000周期寄存器0/3和方向GPIO75/72：rps=100000000/period_ticks/1024*方向。不是XX的读取清零delta，不重复把右侧反馈取负。
-- motor_target_counts保留名称，定义为按PPR1024换算的等效脉冲/5ms：rps=counts/(1024*0.005)。40=7.8125rps；范围整数1..400。采样记录真实rps，绝不把周期估计伪装成原生delta，也不把它当停稳证据。
-- motor_raw_pwm保留为输出限幅，逻辑刻度10000，整数20..3500。限幅ns=值*50000/10000；1500=7500ns，3500=17500ns。motor_control只支持speed；raw模式会拒绝，防止原始工厂PWM单位混用。
-- 速度控制使用7.25原增量PID64/32/48，每50ms执行。XX原15/4/12和20/3/12属于另一单位/周期，不能直接搬用。本版两轮前进/倒退，没有右轮独驱开关。
-- 巡线复用7.25的80x60图像识别，保留XX的line_steer_kp/kd、死区和每帧PWM变化上限。识别中心参考为原7.25的0.42宽；每帧输出仍经过3370..5170边界限制。连续有效确认后启动，持续丢线停机，反馈不延长电机总时间。
+## 原有配置的保留、备份与迁移
 
-## 输出与限制
-原调参文件完整保存为config_N.ini，日志含逻辑PWM、实际脉宽、目标和反馈rps、实际下发PWM纳秒、方向GPIO、使能及六阶段时间。CSV configured_command/last_written_command是内部center-minus-PWM差值，用户PWM=4470-command；SERVO_PWM_WRITE同时打印可直接核对的PWM和pulse_ns。
-参数示例（修改已有段，不重复添加section）：
+主调参文件仍是/home/root/gy/config/parking_tuning.new_car.ini，存在时绝不覆盖为模板。新模板使用steer_command、correction_steer_command；全部居中且电机时间0。
+
+如果已有文件仍含servo_pwm/correction_servo_pwm，启动器先生成.before_original725_时间_进程号.bak完整备份。只有旧中位4470或4470.0可明确迁移为命令0；速度、阶段、时间和其他文字保留。候选文件通过不访问硬件的--check-config检查，并确认原文件未被并发编辑后替换；失败则保留原文件和备份、清理临时文件，不执行试验。
+
+旧非中位PWM值（如4900、5000、3370）没有经过验证的角度映射，启动器显示OLD_PWM_REQUIRES_ANGLE，保留原文件和备份后退出。用户在原文件把它改成steer_command或correction_steer_command，并重新填写角度命令。不能把旧4900直接写成steer_command=4900，也不能同时保留同一阶段的两个主转向字段。解析器只兼容旧中位别名，不接受非中位猜测转换。
+
+独立硬件文件config/sysfs_pwm_hardware.ini只自动迁移已知PWM1/PWM2与3040000/3333333组合到PWM1、3040000，改前生成.before_725_servo_备份并校验。编码器符号、GPIO、电机等其余项不变。未知/重复路径或周期直接拒绝。硬件和调参迁移分别校验与备份，后续硬件校验失败不会执行试验；已经成功迁移的调参字段仍为同义零命令。迁移操作本身不访问硬件，check-config不消耗第一次启动的准备标记。
+
+## 参数示例与运行
+
+原文件中修改对应区段，不重复添加同名section。首次先静止确认名义回中：
+
 ```ini
-[session]
-mode=single
-stage=2
-motor_control=speed
-motor_target_counts=40
-motor_raw_pwm=1500
+[stage_2]
+steer_command=0
+settle_time_s=0.5
+hold_time_s=2
+motor_run_time_s=0
+correction_steer_command=0
+correction_hold_time_s=0
 ```
-第一倒弯servo_pwm>4470向左，反向修正servo_pwm<4470向右；第二倒弯反之。correction_hold_time_s=0关闭修正；电机时间0禁用。电机总时间与最后一步舵机计时先到者停机。
-本版未启用IMU、未配置超声波，也没有自动测距停车。周期寄存器可能保留旧速度，终端不声明已物理停稳。
-Windows模拟设备、状态机及单位换算测试不等于龙芯实车验证。部署ZIP仅在真正LoongArch编译并通过架构/版本校验后生成，不能用旧XX可执行文件代替。
 
-## 本次五项复核
-1. 重复代码：未复制停车主程序、阶段状态机、速度PID或sysfs驱动；只新增有明确单位的转换层、PWM巡线控制和独立部署入口。
-2. 命名：sysfs_pwm与XX/旧CC入口分开；内部delta、逻辑PWM、脉宽ns、真实rps明确区分。
-3. 结构：配置转换->原阶段模型；7.25设备后端->原电机线程；阶段时间及退出保存共用原逻辑。
-4. 隐藏bug：验证了负左/正右与原始PWM方向、端点越界不写输出、关机回4470而不是PWM0、两轮使能、错周期拒绝、非法文件重载后恢复、旧配置不覆盖、错误架构二进制拒绝。
-5. 优化建议：先固定能稳定运动的目标速度，再调每段时间；最终物理脉宽和编码器响应需上板确认，不能把离线测试等同整车跑通。
+观察正常后再重新启动，逐步调主转弯负命令及右修正正命令。例如主转弯-10、hold_time_s=2，右修正5、correction_hold_time_s=1；主转弯时间到后自动反向修正，再回零。第二弯主命令为正、修正为负。是否符合实际机械方向仍需本车确认。
 
-版本.1离线结果：1662项控制检查通过（含原状态机440、启动42、巡线95、舵机35、电机99、sysfs模拟100、cc PID593、cc转向63、新PWM适配47、核心任务148）；12项Python打包/脚本检查；原cc源码对照64项；6个Linux目标文件编译通过。
-未完成：真正LoongArch链接和实车运行，需在用户现有虚拟机使用上面的构建命令完成。没有生成或冒充可上板的新二进制。
+电机启停仍由motor_run_time_s控制，0禁用；正值可用小数0..120秒。第一段前进，第二至第五段倒车，第六段停车。电机总时间和最后一个舵机动作计时先到者停机，不会因修正动作重置电机总时间。
 
-## 2026-10-16.2：GPIO输出回读兼容修复
-用户实车在gpio12初始化写1后回读不一致，版本.1因此中止。核对原7.25 GPIO.cpp：setValue检查write(fd, value, 1)==1，不把随后value读取作为写入成功条件。
-本模式对三个输出GPIO（方向12/13和总使能73）统一采用该判定：打开失败、短写、写入失败继续报错；value读失败或不一致只作诊断，每个引脚每个实例最多报告一次GPIO_REFERENCE_WRITE，记录requested和observed。
-输入方向GPIO75/72、GPIO direction属性、PWM period/duty_cycle/enable都保持严格检查。旧CC sysfs模式也保持原来的严格输出回读，改动只作用于--sysfs-pwm-control。
-MOTOR事件增加gpio_verification=write_ack_only；左右gpio字段是成功下发的方向命令，gpio73_enable仍是独立读到的值，可能为0或-1。不能把write成功、GPIO回读和物理电平混为一谈。停机先严格写零并回读两路PWM，仍尝试GPIO73写0。
-对“写1读0”、读取异常、真正写入失败、两侧方向、使能、停机清零和PWM错误均有模拟覆盖。未修改转向/速度/持续时间/阶段参数；未进行新的实车验证。需要重新编译版本.2再部署，修改INI不能修复版本.1。
+1. 关舵机开关，第一次运行，等准备提示后Ctrl+C退出。
+2. 再运行相同命令，正式试验提示后开舵机，按一次Enter授权本阶段。
+3. 先设置舵机、等待settle_time_s，再执行阶段电机和保持计时。
+4. P+Enter停机并暂停记录；C+Enter只恢复记录，Enter再授权运动。Q+Enter结束；最后Y/N直接按键保存，不自动重启。
+5. 运行中保存当前阶段参数仍是执行授权，会停下原动作后重新设置/计时。编辑前建议先P暂停或退出。
 
-版本.2复核结果：1678项控制检查通过（sysfs模拟116项，其余1562项）；12项Python打包和启动脚本检查通过；6个Linux目标文件编译通过。针对本次变更的五项检查：共用一个输出GPIO写入函数，无三份重复逻辑；命名明确write_ack_only；严格PWM与GPIO诊断分层；覆盖读不一致、读失败、写失败及停机清零；诊断每引脚限一次防止PID循环刷屏。仅离线验证，不声明实车已跑通。
+保持原两次启动身份校验：阶段、版本、硬件配置或相机模式变化均需重新准备。不会自动串行完成六个阶段。用户不需要量角器，但代码命令与车轮实际角度不能混称。
 
-## 2026-10-16.3：按指定7.25.zip使用PWM1
+## 无相机与数据记录
 
-已核对2026-09的7.25.zip：STEER_PWM_CHIP=1、STEER_PWM_INDEX=0。2026-10的“自动排期选方法”版本是PWM2，两个版本不能混称。本次仅修改此适配模式的舵机通道为/sys/class/pwm/pwmchip1/pwm0/duty_cycle；保持现有300Hz换算、3370/4470/5170窗口、电机、阶段和时间逻辑。没有把旧7.25的3040000ns周期直接套入现有逻辑PWM换算。
+启动器默认--no-camera：准备和正式运行均不打开相机、不取帧、不录像、不巡线。阶段1即使配置line_follow_enable=1，也按设定舵机命令和电机时间前进。有效编码器采样刷新原电机看门狗；主循环每次最多等20ms终端输入，不空转。frame_timeout_s仍约束控制/编码器循环，不扩大、不取消。
 
-启动器会保留已有调参文件。若独立sysfs硬件配置仍为已知旧PWM2路径，先生成带时间和进程号的before_pwm1备份，在临时文件只替换servo_pwm路径，通过不访问硬件的--check-config检查并确认原文件没有同时被编辑后再替换。缺失、重复、自定义舵机路径或检查失败直接退出，不猜测引脚。不修改encoder_right_sign或其他硬件项；再次启动不重复迁移。直接运行新程序也会检查PWM1路径，防止绕过启动器仍误用PWM2。
+保留六阶段CSV、stage_speed_summary.csv、stage_timing_summary.csv、配置快照和session.txt。无相机使用CONTROL_TICK，不伪造FRAME/视频文件；配置命令、最近命令都为steer_command单位。SERVO_725_WRITE打印命令、脉宽、周期、偏移。元数据记录原公式标识、初始化脉宽、运行偏移及camera_enabled=0。不使用IMU、未配置超声波，不推断物理停车成功。
 
-目前板上已有版本.2也可直接改配置使用PWM1，无须为单独切换通道等待重新编译。程序停止且舵机开关关闭后执行：
-```sh
-cd /home/root/gy
-cp config/sysfs_pwm_hardware.ini "config/sysfs_pwm_hardware.ini.before_pwm1_$(date +%Y%m%d_%H%M%S)"
-sed -i 's#^servo_pwm=.*#servo_pwm=/sys/class/pwm/pwmchip1/pwm0/duty_cycle#' config/sysfs_pwm_hardware.ini
-sh ./run_sysfs_pwm_parking.sh
-```
-按原两次启动流程执行；先在选中阶段把motor_run_time_s设0，确认转向后再恢复原电机时间。开启和脉宽回读只说明软件设置，仍需实际观察舵机动作。旧PWM2不再作为本程序舵机输出；启动器迁移本身不操作硬件。
+## 电机逻辑保持原样
 
-本次五项检查：复用原硬件和状态机，无新增转向控制副本；PWM1路径和备份名称清晰；先验证再替换；覆盖旧配置残留、重复路径、检查失败和并发修改；建议先只改通道，确认舵机正常后再调动作参数，避免同时变更多项。
+电机仍为原7.25增量PID64/32/48、50ms，双轮驱动；左PWM8/2、右PWM8/1，周期50000ns。方向GPIO12/13、使能GPIO73保留。输出GPIO采用完整write判定、回读只诊断；PWM和方向属性严格读回。输入方向GPIO75/72与0x1611b000周期寄存器0/3仍为原生rps采样，不当成读清零delta。
 
-版本.3验证：1484项相关控制回归检查通过（含117项sysfs模拟）；13项Python打包/启动测试通过，其中迁移测试覆盖6种情形；6个Linux源文件编译通过；两个shell脚本语法检查通过。未进行实车验证，也未在本机生成龙芯部署二进制。
+motor_target_counts保留为PPR1024等效脉冲/5ms，rps=counts/(1024*0.005)，整数1..400，40=7.8125rps。motor_raw_pwm仍仅作输出上限，20..3500按10000刻度转成100..17500ns；motor_control=speed。没有把舵机公式变化扩散到速度/方向符号或电机参数。
 
-## 2026-10-16.4：无相机按参数执行
+## 检查与限制
 
-用户要求跳过相机。本版新增--no-camera，独立sysfs启动器默认携带该参数；其他旧入口不带参数时仍保留相机流程。首次准备和第二次正式运行均不调用相机打开函数；正式运行不取帧、不创建AVI、不分析线路、不等待WAIT_LINE。阶段1即使原配置line_follow_enable=1，也按servo_pwm和motor_run_time_s执行；不改写用户调参文件。
+重复代码：删除旧舵机10000刻度换算及XX巡线PWM控制副本，原公式仅在一个专用函数实现，继续共用阶段/电机/PID线程。命名：reference725明确原公式来源，区分角度命令、实际脉宽和电机占空比刻度。结构：配置转换只处理电机单位，舵机命令原值进入原公式。隐藏bug：覆盖-15重复偏移、初始化/回正区别、浮点截断、旧周期拒绝、旧字段冲突、非中位误转换、备份与并发编辑。优化建议：先验证静止零命令，再小步调整转向，保持已有电机参数，避免同时修改多项。
 
-保留PWM1、3370/4470/5170窗口、速度目标、原PID公式和50ms周期、六阶段与两段反向修正时间、首次Ctrl+C/第二次Enter授权、P暂停停机、C恢复记录后Enter再运动、Q退出和一次Y/N保存。motor_run_time_s=0仍禁止阶段电机驱动；本版不会自动串行跑完所有阶段。
+原公式的732项离线检查覆盖初始化、运行零位、边界、无效输入及整个命令区间每0.25一档与原表达式的对照。另有原阶段、电机、GPIO、启动及迁移测试。离线计算和sysfs回读不能证明重烧内核后实际波形正确；当前原版7.25尚未在重烧后的板子复测，不声称已排除硬件/内核因素。
 
-无相机主循环每20ms最多等待一次终端输入，避免空转；有效编码器采样后刷新原电机看门狗。frame_timeout_s现在也作为控制/编码器循环超时阈值，不增大原值，不取消超时停机。无效反馈、输入循环阻塞、到时、P/Q或异常仍走原停机和回正路径。周期速度寄存器不是物理停稳证明。
-
-CSV以CONTROL_TICK明确记录无相机控制周期，不伪造FRAME事件、帧号或视频文件。仍生成六阶段CSV、stage_speed_summary.csv、stage_timing_summary.csv和配置快照；session.txt标记camera_enabled=0、video_recording_enabled=0、line_follow_effective=0、相机尺寸0和watchdog_source=control_and_valid_encoders。启动准备身份含是否启用相机，切换模式后必须重新完成两次启动。--check-config保持不访问硬件。
-
-命令不变：重新编译并上传上方版本.4部署ZIP，校验、chmod后执行sh ./run_sysfs_pwm_parking.sh。确认VERSION 2026-10-16.4和CAMERA_DISABLED；第二次正式试验提示后开舵机、按Enter。旧二进制不支持新参数，启动器会拒绝混用。程序仍链接OpenCV共享库，但该模式不访问相机设备。
-
-本次五项复核：继续共用阶段模型、舵机线程、速度PID和电机线程，无第二套执行引擎；独立RehearsalOptions命名并测试新参数；相机可选而编码器/计时停机持续有效；检查两次启动模式切换、无帧时循环节流、元数据真实及旧程序拒绝；后续先保持已有速度与动作时长，确认无相机流程后再逐项调参。
-
-离线验证：1546项控制/配置检查通过，含新增10项参数解析、49项PWM配置和102项电机/计时检查；13项Python打包与启动测试通过；6个Linux源文件编译通过；两个shell脚本语法检查通过。未在本机链接龙芯部署二进制，未进行实车验证。
+本次结果：2286项控制/配置/原公式检查通过（原公式732、PWM配置53、sysfs模拟121）；14项Python打包/启动测试通过（含旧配置备份、零位迁移、非中位拒绝、未知配置和并发修改）；6个Linux源文件编译通过；两个shell脚本语法通过。真正LoongArch链接和实车波形仍由部署验证。

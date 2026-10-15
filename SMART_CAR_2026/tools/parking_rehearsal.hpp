@@ -61,8 +61,8 @@ struct ParkingTuning {
         referenceSpeed.validate();
         if(reverseRightOnly && !ccSpeedControl) throw std::runtime_error("reverse_right_only requires --cc-motor-control");
         if(!std::isfinite(limit) || limit<=0) throw std::runtime_error("Invalid vehicle steering limit");
-        const double commandLimit=sysfsPwmControl ? parkingPwmCenter-parkingPwmRight : std::min(ccSpeedControl ? ccParkingSteerLimit : legacyParkingSteerLimit,limit);
-        const double commandMinimum=sysfsPwmControl ? parkingPwmCenter-parkingPwmLeft : ccSpeedControl ? std::max(ccParkingSteerMin,-limit) : -commandLimit;
+        const double commandLimit=std::min(ccSpeedControl ? ccParkingSteerLimit : legacyParkingSteerLimit,limit);
+        const double commandMinimum=ccSpeedControl ? std::max(ccParkingSteerMin,-limit) : -commandLimit;
         if(sysfsPwmControl && (!ccSpeedControl || reverseRightOnly)) throw std::runtime_error("PWM compatibility requires cc speed control and both wheels");
         if(stage<1 || stage>6) throw std::runtime_error("stage must be 1..6");
         for(double scale:{speedLeftCmPerCount,speedRightCmPerCount})
@@ -78,7 +78,7 @@ struct ParkingTuning {
             const double direction=index==1 ? 1. : -1.;
             const auto label="stage_"+std::to_string(index+1);
             if(sysfsPwmControl && item.command*direction>0 && (item.holdSeconds>0 || item.powered()))
-                throw std::runtime_error(label+" primary servo_pwm points in wrong direction");
+                throw std::runtime_error(label+" primary steer_command points in wrong direction");
             if(!std::isfinite(correction.command) || correction.command*direction<0 || correction.command<commandMinimum || correction.command>commandLimit ||
                !std::isfinite(correction.holdSeconds) || correction.holdSeconds<0 || correction.holdSeconds>120)
                 throw std::runtime_error(label+" correction has wrong direction, exceeds limit, or hold time outside 0..120");
@@ -96,8 +96,8 @@ struct ParkingTuning {
             const auto& item=stages[i];
             item.speed.validate();
             item.line.validate(sysfsPwmControl ? legacyParkingSteerLimit : item.line.enabled ? commandLimit : (ccSpeedControl ? ccParkingSteerLimit : legacyParkingSteerLimit));
-            if(sysfsPwmControl) {parkingPwmValue(item.command);parkingPwmValue(item.correction.command);}
-            if(sysfsPwmControl && i==5 && item.command!=0) throw std::runtime_error("stage_6 requires servo_pwm=4470");
+            if(sysfsPwmControl) {reference725ServoCommandPulse(item.command,reference725ServoPeriod);reference725ServoCommandPulse(item.correction.command,reference725ServoPeriod);}
+            if(sysfsPwmControl && i==5 && item.command!=0) throw std::runtime_error("stage_6 requires steer_command=0");
             if(item.line.enabled && (i!=0 || !single || item.command!=0 || item.holdSeconds!=0 || item.motorLeft<=0 || item.motorRight<=0))
                 throw std::runtime_error("Line following requires single stage_1, steer_command=0, hold_time_s=0 and positive motor amplitudes (run time 0 may disable motors)");
             for(double command:{item.motorLeft,item.motorRight})
@@ -114,7 +114,6 @@ struct ParkingTuning {
         if(pwmControl) {
             const auto converted=convertPwmTuning(text);
             auto result=parse(converted.normalized,true);result.sysfsPwmControl=true;result.source=text;
-            for(size_t i=0;i<6;++i) {result.stages[i].command=converted.primary[i];result.stages[i].correction.command=converted.correction[i];}
             result.validate();return result;
         }
         if(text.size()>16384) throw std::runtime_error("Tuning file too large");
@@ -286,7 +285,7 @@ inline std::string normalizeCcSpeedSource(const std::string& source) {
 inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory",bool ccSpeed=false,bool noCamera=false) {
     out<<"VERSION "<<(tuning.sysfsPwmControl ? sysfsPwmVersion : rehearsalVersion)<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
-    if(tuning.sysfsPwmControl) out<<"SYSFS_PWM_COMPAT：servo_pwm=3370右/4470中/5170左；逻辑标度10000；300Hz；counts/5ms按7.25 PPR1024换算rps。\nGPIO输出采用7.25完整写入判定；value回读仅诊断，PWM仍严格回读，不代表物理电平确认。\n";
+    if(tuning.sysfsPwmControl) out<<"SYSFS_725_ORIGINAL：舵机PWM1，周期3040000ns，原版-15偏移；steer_command=0名义回正，负左正右，范围-75..105为软件命令范围；不是机械安全范围。counts/5ms按PPR1024换算rps。\nGPIO输出采用7.25完整写入判定；value回读仅诊断，PWM仍严格回读，不代表物理电平确认。\n";
     else out<<"舵机调参命令范围="<<(ccSpeed ? ccParkingSteerMin : -legacyParkingSteerLimit)<<".."
         <<(ccSpeed ? ccParkingSteerLimit : legacyParkingSteerLimit)
         <<"（正右负左），实际还受车辆max_steer_deg限制；不是实测前轮角度或机械安全范围。\n";
@@ -312,9 +311,9 @@ inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,con
     }
     for(int index:{1,3}) {
         const auto& item=tuning.stages[size_t(index)];const auto& correction=item.correction;
-        out<<"阶段"<<index+1<<' '<<stageNames[index]<<" | 主转弯="<<(tuning.sysfsPwmControl ? parkingPwmValue(item.command) : item.command)<<"/"<<item.holdSeconds<<"s"
+        out<<"阶段"<<index+1<<' '<<stageNames[index]<<" | 主转弯="<<item.command<<"/"<<item.holdSeconds<<"s"
             <<" | "<<(index==1 ? "右" : "左")<<"修正="<<(correction.holdSeconds>0 ? "启用" : "关闭")
-            <<" "<<(tuning.sysfsPwmControl ? parkingPwmValue(correction.command) : correction.command)<<"/"<<correction.holdSeconds<<"s"
+            <<" "<<correction.command<<"/"<<correction.holdSeconds<<"s"
             <<" | 入口="<<(item.correctionOnly ? "只测修正" : "完整弯道")<<'\n';
         if(correction.holdSeconds==0)
             out<<"提示：该弯道不会自动反向修正；旧文件缺少correction字段时默认关闭，请在对应区段补入参数。\n";
