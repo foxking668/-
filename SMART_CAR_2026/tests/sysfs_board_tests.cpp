@@ -235,7 +235,8 @@ int main() {
         check(nodes.writes().empty(),"direct PWM servo metadata never moves hardware");
         check(io.compatibilityPwmServo() && servo.info().freq==300,"explicit direct compatibility mode reports300Hz");
         check(servo.set(parkingPwmDelta(5000))==1666667,"PWM5000 becomes1666667ns without angleoffset");
-        const auto writes=nodes.writes();const std::string dir="/sys/class/pwm/pwmchip2/pwm0";
+        const auto writes=nodes.writes();const std::string dir="/sys/class/pwm/pwmchip1/pwm0";
+        check(direct.servo_pwm==dir+"/duty_cycle","direct profile uses September7.25 PWM1 channel0");
         check(findWrite(writes,dir+"/period","3333333")<findWrite(writes,direct.servo_pwm,"1490000"),"direct initialization period precedes4470center pulse");
         check(findWrite(writes,direct.servo_pwm,"1490000")<findWrite(writes,dir+"/enable","1"),"direct center pulse precedesenable, same reference order");
         check(!nodes.exists(direct.motor_enable_gpio),"servo conversion never initializes motor GPIO");

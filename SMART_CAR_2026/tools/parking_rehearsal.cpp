@@ -775,11 +775,11 @@ int main(int argc,char** argv) {
         if(options.upgradeCcTuning) {upgradeCcTuning(options);return 0;}
         auto config=loadConfig(options.capture);const auto hardware=car2026::HardwareConfig::load(options.hardware);
         const auto params=car2026::Params::load(options.vehicle);
-        if(options.pwmControl && (hardware.motor_backend!="sysfs" || hardware.motor_period_ns!=50000 || hardware.servo_period_ns!=car2026::parkingPwmServoPeriod || params.steer_sign!=1 || params.steer_offset_deg!=0))
-            throw std::runtime_error("PWM compatibility requires its dedicated sysfs profiles: motor50000ns, servo3333333ns, offset0/sign1; XX factory profiles cannot be reused");
+        if(options.pwmControl && (hardware.motor_backend!="sysfs" || hardware.servo_pwm!="/sys/class/pwm/pwmchip1/pwm0/duty_cycle" || hardware.motor_period_ns!=50000 || hardware.servo_period_ns!=car2026::parkingPwmServoPeriod || params.steer_sign!=1 || params.steer_offset_deg!=0))
+            throw std::runtime_error("PWM compatibility requires its dedicated sysfs profiles: PWM1 channel0, motor50000ns, servo3333333ns, offset0/sign1; XX factory profiles cannot be reused");
         const auto tuning=ParkingTuning::load(options.tuning,options.ccSpeed,options.pwmControl);
         tuning.validate(params.max_steer_deg);
-        if(options.pwmControl) std::cout<<"SERVO_PWM_LIMIT 3370..5170 center=4470 logical_scale=10000 period_ns=3333333\n";
+        if(options.pwmControl) std::cout<<"SERVO_PWM_LIMIT 3370..5170 center=4470 logical_scale=10000 period_ns=3333333 path="<<hardware.servo_pwm<<'\n';
         else std::cout<<"STEER_COMMAND_LIMIT "<<(options.ccSpeed ? std::max(ccParkingSteerMin,-params.max_steer_deg) : -std::min(legacyParkingSteerLimit,params.max_steer_deg))
             <<".."<<std::min(options.ccSpeed ? ccParkingSteerLimit : legacyParkingSteerLimit,params.max_steer_deg)<<'\n';
         if(options.ccSpeed) {

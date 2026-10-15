@@ -1,6 +1,6 @@
-# 7.25 sysfs适配入库：2026-10-16.2
+# 7.25 sysfs适配入库：2026-10-16.3
 
-问题：当前4.19.190+系统有pwmchip2/8，没有/dev/zf_*。用户确认当前板子7.25能跑。本版复用7.25的sysfs电机和编码器，不创建假的设备节点，不改另一个XX工程。
+问题：当前4.19.190+系统有pwmchip1/2/8，没有/dev/zf_*。用户确认当前板子7.25能跑。本版复用7.25的sysfs电机和编码器，不创建假的设备节点，不改另一个XX工程。
 
 ## 构建和上传
 在已经配好龙芯工具链与目标OpenCV的虚拟机：
@@ -9,10 +9,10 @@ cd /mnt/hgfs/share/SMART_CAR_2026
 sh deploy/build_sysfs_pwm_parking.sh
 ```
 使用现有/home/gy/builds/SMART_CAR_2026-loongarch配置；全新环境须先指定cmake/loongarch64.cmake及龙芯OpenCV。脚本不在x86主机运行LoongArch二进制。
-上传 deploy/parking_sysfs_pwm_20261016_2_verified.zip 到板子/home/root/gy：
+上传 deploy/parking_sysfs_pwm_20261016_3_verified.zip 到板子/home/root/gy：
 ```sh
 cd /home/root/gy
-unzip -o parking_sysfs_pwm_20261016_2_verified.zip
+unzip -o parking_sysfs_pwm_20261016_3_verified.zip
 sha256sum -c SYSFS_PWM_SHA256SUMS
 chmod +x parking_sysfs_pwm_20261016
 sh ./run_sysfs_pwm_parking.sh
@@ -69,3 +69,22 @@ MOTOR事件增加gpio_verification=write_ack_only；左右gpio字段是成功下
 对“写1读0”、读取异常、真正写入失败、两侧方向、使能、停机清零和PWM错误均有模拟覆盖。未修改转向/速度/持续时间/阶段参数；未进行新的实车验证。需要重新编译版本.2再部署，修改INI不能修复版本.1。
 
 版本.2复核结果：1678项控制检查通过（sysfs模拟116项，其余1562项）；12项Python打包和启动脚本检查通过；6个Linux目标文件编译通过。针对本次变更的五项检查：共用一个输出GPIO写入函数，无三份重复逻辑；命名明确write_ack_only；严格PWM与GPIO诊断分层；覆盖读不一致、读失败、写失败及停机清零；诊断每引脚限一次防止PID循环刷屏。仅离线验证，不声明实车已跑通。
+
+## 2026-10-16.3：按指定7.25.zip使用PWM1
+
+已核对2026-09的7.25.zip：STEER_PWM_CHIP=1、STEER_PWM_INDEX=0。2026-10的“自动排期选方法”版本是PWM2，两个版本不能混称。本次仅修改此适配模式的舵机通道为/sys/class/pwm/pwmchip1/pwm0/duty_cycle；保持现有300Hz换算、3370/4470/5170窗口、电机、阶段和时间逻辑。没有把旧7.25的3040000ns周期直接套入现有逻辑PWM换算。
+
+启动器会保留已有调参文件。若独立sysfs硬件配置仍为已知旧PWM2路径，先生成带时间和进程号的before_pwm1备份，在临时文件只替换servo_pwm路径，通过不访问硬件的--check-config检查并确认原文件没有同时被编辑后再替换。缺失、重复、自定义舵机路径或检查失败直接退出，不猜测引脚。不修改encoder_right_sign或其他硬件项；再次启动不重复迁移。直接运行新程序也会检查PWM1路径，防止绕过启动器仍误用PWM2。
+
+目前板上已有版本.2也可直接改配置使用PWM1，无须为单独切换通道等待重新编译。程序停止且舵机开关关闭后执行：
+```sh
+cd /home/root/gy
+cp config/sysfs_pwm_hardware.ini "config/sysfs_pwm_hardware.ini.before_pwm1_$(date +%Y%m%d_%H%M%S)"
+sed -i 's#^servo_pwm=.*#servo_pwm=/sys/class/pwm/pwmchip1/pwm0/duty_cycle#' config/sysfs_pwm_hardware.ini
+sh ./run_sysfs_pwm_parking.sh
+```
+按原两次启动流程执行；先在选中阶段把motor_run_time_s设0，确认转向后再恢复原电机时间。开启和脉宽回读只说明软件设置，仍需实际观察舵机动作。旧PWM2不再作为本程序舵机输出；启动器迁移本身不操作硬件。
+
+本次五项检查：复用原硬件和状态机，无新增转向控制副本；PWM1路径和备份名称清晰；先验证再替换；覆盖旧配置残留、重复路径、检查失败和并发修改；建议先只改通道，确认舵机正常后再调动作参数，避免同时变更多项。
+
+版本.3验证：1484项相关控制回归检查通过（含117项sysfs模拟）；13项Python打包/启动测试通过，其中迁移测试覆盖6种情形；6个Linux源文件编译通过；两个shell脚本语法检查通过。未进行实车验证，也未在本机生成龙芯部署二进制。
