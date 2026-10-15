@@ -1,6 +1,8 @@
-# 7.25 sysfs适配入库：2026-10-16.3
+# 7.25 sysfs适配入库：2026-10-16.4
 
 问题：当前4.19.190+系统有pwmchip1/2/8，没有/dev/zf_*。用户确认当前板子7.25能跑。本版复用7.25的sysfs电机和编码器，不创建假的设备节点，不改另一个XX工程。
+
+当前启动器默认带`--no-camera`：不打开相机、不取帧、不录像、不巡线，阶段1按设定舵机值和时间前进，阶段2至5按原动作倒车。保留编码器速度PID、舵机计时、反向修正、手动停机及六阶段CSV。需要更新为版本.4可执行文件，板上的版本.2无法通过修改INI获得这个功能。
 
 ## 构建和上传
 在已经配好龙芯工具链与目标OpenCV的虚拟机：
@@ -9,10 +11,10 @@ cd /mnt/hgfs/share/SMART_CAR_2026
 sh deploy/build_sysfs_pwm_parking.sh
 ```
 使用现有/home/gy/builds/SMART_CAR_2026-loongarch配置；全新环境须先指定cmake/loongarch64.cmake及龙芯OpenCV。脚本不在x86主机运行LoongArch二进制。
-上传 deploy/parking_sysfs_pwm_20261016_3_verified.zip 到板子/home/root/gy：
+上传 deploy/parking_sysfs_pwm_20261016_4_verified.zip 到板子/home/root/gy：
 ```sh
 cd /home/root/gy
-unzip -o parking_sysfs_pwm_20261016_3_verified.zip
+unzip -o parking_sysfs_pwm_20261016_4_verified.zip
 sha256sum -c SYSFS_PWM_SHA256SUMS
 chmod +x parking_sysfs_pwm_20261016
 sh ./run_sysfs_pwm_parking.sh
@@ -24,7 +26,7 @@ sh ./run_sysfs_pwm_parking.sh
 新硬件文件独立放 config/sysfs_pwm_hardware.ini、config/sysfs_pwm_vehicle.ini；原new_car_hardware.ini和new_car_vehicle.ini保留。新配置只在缺失时创建。
 本版继承sysfs两次启动：第一次关舵机电源，等硬件初始化完成后Ctrl+C，看到PREPARE_COMPLETE；再次运行同一命令，正式试验提示后开舵机，Enter执行。
 仍用P+Enter停机/暂停，C+Enter仅恢复记录，Enter再授权运动；Q+Enter结束，Y/N直接保存。运行中保存当前段参数仍会重新授权执行，编辑前最好先停机退出。
-六阶段、两弯主转向和反向修正、0..120秒小数时长、录像及六个CSV均复用原状态机。第3阶段时间0表示不驱动，可直接选择stage=4。不会自动跑完六阶段。
+六阶段、两弯主转向和反向修正、0..120秒小数时长及六个CSV均复用原状态机；当前无相机模式不生成录像。第3阶段时间0表示不驱动，可直接选择stage=4。不会自动跑完六阶段。
 
 ## 单位必须区分
 - servo_pwm保持3370右、4470中、5170左。新后端把它明确规定为10000逻辑刻度，300Hz周期3333333ns。脉宽=round(servo_pwm*3333333/10000)，三点分别1123333/1490000/1723333ns。没有读取或声称读取到不存在的厂家duty_max。数值不是实测轮角。
@@ -88,3 +90,19 @@ sh ./run_sysfs_pwm_parking.sh
 本次五项检查：复用原硬件和状态机，无新增转向控制副本；PWM1路径和备份名称清晰；先验证再替换；覆盖旧配置残留、重复路径、检查失败和并发修改；建议先只改通道，确认舵机正常后再调动作参数，避免同时变更多项。
 
 版本.3验证：1484项相关控制回归检查通过（含117项sysfs模拟）；13项Python打包/启动测试通过，其中迁移测试覆盖6种情形；6个Linux源文件编译通过；两个shell脚本语法检查通过。未进行实车验证，也未在本机生成龙芯部署二进制。
+
+## 2026-10-16.4：无相机按参数执行
+
+用户要求跳过相机。本版新增--no-camera，独立sysfs启动器默认携带该参数；其他旧入口不带参数时仍保留相机流程。首次准备和第二次正式运行均不调用相机打开函数；正式运行不取帧、不创建AVI、不分析线路、不等待WAIT_LINE。阶段1即使原配置line_follow_enable=1，也按servo_pwm和motor_run_time_s执行；不改写用户调参文件。
+
+保留PWM1、3370/4470/5170窗口、速度目标、原PID公式和50ms周期、六阶段与两段反向修正时间、首次Ctrl+C/第二次Enter授权、P暂停停机、C恢复记录后Enter再运动、Q退出和一次Y/N保存。motor_run_time_s=0仍禁止阶段电机驱动；本版不会自动串行跑完所有阶段。
+
+无相机主循环每20ms最多等待一次终端输入，避免空转；有效编码器采样后刷新原电机看门狗。frame_timeout_s现在也作为控制/编码器循环超时阈值，不增大原值，不取消超时停机。无效反馈、输入循环阻塞、到时、P/Q或异常仍走原停机和回正路径。周期速度寄存器不是物理停稳证明。
+
+CSV以CONTROL_TICK明确记录无相机控制周期，不伪造FRAME事件、帧号或视频文件。仍生成六阶段CSV、stage_speed_summary.csv、stage_timing_summary.csv和配置快照；session.txt标记camera_enabled=0、video_recording_enabled=0、line_follow_effective=0、相机尺寸0和watchdog_source=control_and_valid_encoders。启动准备身份含是否启用相机，切换模式后必须重新完成两次启动。--check-config保持不访问硬件。
+
+命令不变：重新编译并上传上方版本.4部署ZIP，校验、chmod后执行sh ./run_sysfs_pwm_parking.sh。确认VERSION 2026-10-16.4和CAMERA_DISABLED；第二次正式试验提示后开舵机、按Enter。旧二进制不支持新参数，启动器会拒绝混用。程序仍链接OpenCV共享库，但该模式不访问相机设备。
+
+本次五项复核：继续共用阶段模型、舵机线程、速度PID和电机线程，无第二套执行引擎；独立RehearsalOptions命名并测试新参数；相机可选而编码器/计时停机持续有效；检查两次启动模式切换、无帧时循环节流、元数据真实及旧程序拒绝；后续先保持已有速度与动作时长，确认无相机流程后再逐项调参。
+
+离线验证：1546项控制/配置检查通过，含新增10项参数解析、49项PWM配置和102项电机/计时检查；13项Python打包与启动测试通过；6个Linux源文件编译通过；两个shell脚本语法检查通过。未在本机链接龙芯部署二进制，未进行实车验证。

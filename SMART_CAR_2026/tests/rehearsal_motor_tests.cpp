@@ -1,4 +1,5 @@
 #include "../tools/rehearsal_motor.hpp"
+#include <atomic>
 #include "../tools/rehearsal_timing.hpp"
 #include "../tools/parking_rehearsal.hpp"
 #include <iostream>
@@ -162,6 +163,26 @@ int main() {
         for(int i=0;i<6;++i) {std::this_thread::sleep_for(std::chrono::milliseconds(30));motor.heartbeat();}
         auto events=motor.takeEvents();if(events.empty()) events=waitStop(motor);
         check(events.back().event=="MOTOR_STOP_DURATION","valid heartbeat cannot extend absolute motion deadline");
+    }
+    {
+        // No image callback: encoder/control updates alone must sustain speed PID.
+        MotorOnlyIo io;auto shortWatch=params;shortWatch.frame_timeout_s=.1;
+        RehearsalMotor motor(io,hardware,shortWatch);std::atomic<int> updates{0},centers{0};
+        std::atomic<bool> feedbackCorrect{true};
+        motor.setSpeedController([&](double left,double right) {
+            ++updates;if(left!=-4 || right!=-5) feedbackCorrect=false;
+            return std::array<int,2>{-800,-900};
+        });
+        motor.setStopAction([&] {++centers;});motor.submitSpeedFeedback(-4,-5);
+        motor.start(-1000,-1000,.18,1,1,1,true);motor.takeEvents();
+        for(int i=0;i<5;++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            motor.submitSpeedFeedback(-4,-5);motor.heartbeat();
+        }
+        const auto events=waitStop(motor);
+        check(updates>0 && feedbackCorrect,"encoder-only heartbeat runs reference speed controller without camera frames");
+        check(events.back().event=="MOTOR_STOP_DURATION","encoder-only updates preserve absolute timed stop");
+        check(motor.outputs()==std::array<int,2>{0,0} && centers==1,"encoder-only timed stop zeros both motors and centers once");
     }
     {
         MotorOnlyIo io;RehearsalMotor motor(io,hardware,params);io.failLeft=true;

@@ -43,7 +43,7 @@ class Packaging(unittest.TestCase):
                 program.write_text(
                     '#!/bin/sh\n'
                     'if [ "${1:-}" = --help ]; then\n'
-                    ' echo "sysfs_pwm_parking version=2026-10-16.3 --sysfs-pwm-control"; exit 0\nfi\n'
+                    ' echo "sysfs_pwm_parking version=2026-10-16.4 --sysfs-pwm-control --no-camera"; exit 0\nfi\n'
                     'for arg in "$@"; do\n'
                     ' if [ "$arg" = --check-config ]; then\n'
                     '  printf "%s\\n" "$@" > preflight_args.txt\n'
@@ -63,6 +63,7 @@ class Packaging(unittest.TestCase):
                     self.assertEqual(len(backups), 1)
                     self.assertEqual(backups[0].read_bytes(), original)
                     self.assertIn('--check-config', (path / 'preflight_args.txt').read_text())
+                    self.assertIn('--no-camera', (path / 'preflight_args.txt').read_text())
                     self.assertEqual(run().returncode, 0)
                     self.assertEqual(len(list((path / 'config').glob('*.before_pwm1_*.bak'))), 1)
                     self.assertEqual((path / 'executions.txt').read_text().splitlines(), ['started', 'started'])
@@ -85,7 +86,7 @@ class Packaging(unittest.TestCase):
             elf[:6] = b'\x7fELF\x02\x01'
             elf[18:20] = (258).to_bytes(2, 'little')
             program = path / 'fixture'
-            program.write_bytes(elf + b'2026-10-16.3 --sysfs-pwm-control')
+            program.write_bytes(elf + b'2026-10-16.4 --sysfs-pwm-control --no-camera')
             archive, _ = package(program, path / 'package.zip')
             with zipfile.ZipFile(archive) as contents:
                 self.assertIsNone(contents.testzip())
@@ -95,7 +96,7 @@ class Packaging(unittest.TestCase):
                     self.assertEqual(hashlib.sha256(contents.read(name)).hexdigest(), digest)
                 self.assertNotIn('config/parking_tuning.new_car.ini', contents.namelist())
             elf[18:20] = (62).to_bytes(2, 'little')
-            program.write_bytes(elf + b'2026-10-16.3 --sysfs-pwm-control')
+            program.write_bytes(elf + b'2026-10-16.4 --sysfs-pwm-control --no-camera')
             with self.assertRaisesRegex(ValueError, 'LoongArch'):
                 package(program, path / 'wrong.zip')
 
@@ -118,7 +119,7 @@ class Packaging(unittest.TestCase):
             program.write_text(
                 '#!/bin/sh\n'
                 'if [ "${1:-}" = --help ]; then\n'
-                ' echo "sysfs_pwm_parking version=2026-10-16.3 --sysfs-pwm-control"\n'
+                ' echo "sysfs_pwm_parking version=2026-10-16.4 --sysfs-pwm-control --no-camera"\n'
                 ' exit 0\nfi\n'
                 'printf "%s\\n" "$@" > captured_args.txt\n', encoding='utf-8', newline='\n')
             program.chmod(0o755)
@@ -130,6 +131,7 @@ class Packaging(unittest.TestCase):
                 self.assertEqual((path / 'config' / name).read_bytes(), data)
             args = (path / 'captured_args.txt').read_text()
             self.assertIn('--sysfs-pwm-control', args)
+            self.assertIn('--no-camera', args)
             self.assertIn('config/sysfs_pwm_hardware.ini', args)
             self.assertIn('config/parking_tuning.new_car.ini', args)
             current = path / 'config' / 'sysfs_pwm_hardware.ini'

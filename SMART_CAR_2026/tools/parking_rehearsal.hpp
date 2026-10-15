@@ -283,16 +283,20 @@ inline std::string normalizeCcSpeedSource(const std::string& source) {
     const auto upgraded=std::string("# 2026-10-11.1：共用motor_target_rps调速；缺省仅右轮倒车，左轮PWM为零；cc原公式不变。\n")+output.str();
     ParkingTuning::parse(upgraded,true);return upgraded;
 }
-inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory",bool ccSpeed=false) {
+inline void writeTuningSummary(std::ostream& out,const ParkingTuning& tuning,const std::string& path,const std::string& backend="factory",bool ccSpeed=false,bool noCamera=false) {
     out<<"VERSION "<<(tuning.sysfsPwmControl ? sysfsPwmVersion : rehearsalVersion)<<" | TUNING_FILE "<<path<<'\n'
         <<"选择 mode="<<(tuning.single ? "single" : "full")<<" stage="<<tuning.stage<<'\n';
     if(tuning.sysfsPwmControl) out<<"SYSFS_PWM_COMPAT：servo_pwm=3370右/4470中/5170左；逻辑标度10000；300Hz；counts/5ms按7.25 PPR1024换算rps。\nGPIO输出采用7.25完整写入判定；value回读仅诊断，PWM仍严格回读，不代表物理电平确认。\n";
     else out<<"舵机调参命令范围="<<(ccSpeed ? ccParkingSteerMin : -legacyParkingSteerLimit)<<".."
         <<(ccSpeed ? ccParkingSteerLimit : legacyParkingSteerLimit)
         <<"（正右负左），实际还受车辆max_steer_deg限制；不是实测前轮角度或机械安全范围。\n";
-    out<<"阶段1巡线="<<(tuning.stages[0].line.enabled ? "启用（电机时间为0时仅观察）" : "关闭")<<"；不含交点分支选择。\n";
-    if(ccSpeed && !tuning.sysfsPwmControl) out<<"巡线=CC_725：80x60最近邻缩放，裁剪顶5%/底2%，HSV白色掩膜、轮廓补线、中心黑线优先；center_pratio=0.42，直接舵机误差，无旧PD滤波。\n";
-    if(tuning.sysfsPwmControl) out<<"巡线=7.25图像识别 + PWM转向；电机=7.25原速度PID64/32/48、50ms；motor_target_counts是等效目标，不是假装读取delta。\n";
+    if(noCamera) out<<"阶段1巡线=关闭（无相机模式，不等待线路确认；按设定舵机值和电机时间前进）。\n";
+    else {
+        out<<"阶段1巡线="<<(tuning.stages[0].line.enabled ? "启用（电机时间为0时仅观察）" : "关闭")<<"；不含交点分支选择。\n";
+        if(ccSpeed && !tuning.sysfsPwmControl) out<<"巡线=CC_725：80x60最近邻缩放，裁剪顶5%/底2%，HSV白色掩膜、轮廓补线、中心黑线优先；center_pratio=0.42，直接舵机误差，无旧PD滤波。\n";
+        if(tuning.sysfsPwmControl) out<<"巡线=7.25图像识别 + PWM转向。\n";
+    }
+    if(tuning.sysfsPwmControl) out<<"电机=7.25原速度PID64/32/48、50ms；motor_target_counts是等效目标，不是假装读取delta。\n";
     if(ccSpeed && !tuning.sysfsPwmControl) out<<"电机控制=cc增量速度PID，每50ms更新；只调[session] motor_target_rps，两轮共用目标rps；阶段时间控制启停；PWM由PID计算。\n";
     else if(!tuning.sysfsPwmControl) out<<(backend=="sysfs" ? "电机单位=duty_ns；3000=6%，50000=100%；无2000/12000人为上限。\n" : "电机单位=原始PWM；填2000就写2000，无2000人为上限；启动车辆前核对各电机duty_max。\n");
     if(ccSpeed) out<<"reverse_right_only="<<tuning.reverseRightOnly

@@ -8,8 +8,8 @@ for library_dir in /home/root/qy/opencv411/lib /home/root/opencv-4.11-loongarch/
 done
 [ -x "$program" ] || { echo 'Missing parking_sysfs_pwm_20261016; build this version first.' >&2; exit 1; }
 case "$("$program" --help)" in
-    *'sysfs_pwm_parking version=2026-10-16.3'*'--sysfs-pwm-control'*) ;;
-    *) echo 'Wrong executable; require sysfs PWM compatibility 2026-10-16.3.' >&2; exit 1;;
+    *'sysfs_pwm_parking version=2026-10-16.4'*'--sysfs-pwm-control'*'--no-camera'*) ;;
+    *) echo 'Wrong executable; require sysfs PWM compatibility 2026-10-16.4.' >&2; exit 1;;
 esac
 mkdir -p config
 if [ ! -e config/parking_tuning.new_car.ini ]; then
@@ -35,7 +35,7 @@ case "$servo_path" in
             rm -f -- "$temporary"; exit 1
         fi
         checked=0
-        "$program" --sysfs-pwm-control --check-config --allow-partial \
+        "$program" --sysfs-pwm-control --no-camera --check-config --allow-partial \
             --config manual_capture.sysfs_pwm.ini --hardware-config "$temporary" \
             --vehicle-config config/sysfs_pwm_vehicle.ini --tuning-config config/parking_tuning.new_car.ini || checked=$?
         if { [ "$checked" -ne 0 ] && [ "$checked" -ne 2 ]; } || ! cmp -s "$profile" "$backup"; then
@@ -47,10 +47,11 @@ case "$servo_path" in
     *) echo 'Expected exactly one servo_pwm path on PWM1 or the known old PWM2 profile; no profile changed.' >&2; exit 1;;
 esac
 printf 'SERVO_PWM_PATH %s\n' /sys/class/pwm/pwmchip1/pwm0/duty_cycle
+printf '%s\n' '无相机运行：不打开相机、不录像、不巡线；按舵机值和电机时长执行，保留编码器PID与停机控制。'
 printf '%s\n' 'SYSFS 7.25：沿用当前parking_tuning.new_car.ini；3370右/4470中/5170左，逻辑标度10000。40等效counts/5ms=7.8125rps；两轮驱动。'
 printf '%s\n' '两次启动：先关舵机开关，首次等PREPARE提示后Ctrl+C；再次运行同一命令，正式试验提示后开舵机、Enter执行。结束先关舵机再Q；Y/N保存。'
 exec "$program" --config manual_capture.sysfs_pwm.ini \
     --hardware-config config/sysfs_pwm_hardware.ini \
     --vehicle-config config/sysfs_pwm_vehicle.ini \
     --tuning-config config/parking_tuning.new_car.ini \
-    --sysfs-pwm-control --allow-partial --output captures/parking_tuning
+    --sysfs-pwm-control --no-camera --allow-partial --output captures/parking_tuning

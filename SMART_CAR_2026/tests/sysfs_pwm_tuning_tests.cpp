@@ -61,6 +61,10 @@ int main() {
     line.reset();for(int i=0;i<20;++i) line.update(300,2000000000+int64_t(i)*20000000,16,4,1,120);
     check(line.update(300,2500000000,16,4,1,120)==1100,"right steering bounded at3370");
     rejects([&]{line.update(NAN,3000000000,16,4,1,120);},"nonfinite line feedback rejected");
+    std::ostringstream cameraFreeSummary;
+    writeTuningSummary(cameraFreeSummary,tuning,"tuning.ini","sysfs",true,true);
+    check(cameraFreeSummary.str().find("阶段1巡线=关闭（无相机模式")!=std::string::npos,"camera bypass summary overrides configured line-follow flag");
+    check(cameraFreeSummary.str().find("巡线=7.25图像识别")==std::string::npos,"camera bypass never advertises active image processing");
     std::cout<<"sysfs_pwm_tuning_tests: "<<checks<<" checks passed\n";
  } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
 }
