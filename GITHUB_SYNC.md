@@ -52,6 +52,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-sync-github.p
 
 ## 板上获取代码
 
+2026-10-15：用户指定的旧车比赛版本为仓库根目录下 `vv/`。同步它时使用：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\sync-github.ps1 -ProjectDirectory vv -Message '具体修改说明' -BranchSlug 'vv-cone-avoidance'
+```
+
+此选项只收集 `vv/` 与协作/同步脚本文件，不收集 `SMART_CAR_2026`、`vv_parking`、`vv_creep_fix` 等其他目录的待处理内容。默认不传参数时仍同步 `SMART_CAR_2026`。`vv` 的板上部署、两个参数文件及构建命令见 `vv/CONE_AVOIDANCE.md`。
+
 已有克隆仓库时，在仓库根目录执行：
 
 ```bash

@@ -23,11 +23,12 @@ function Assert-Equal {
 }
 
 function Invoke-TestSync {
-    param([switch]$DryRun, [switch]$ShouldFail)
+    param([switch]$DryRun, [switch]$ShouldFail, [string]$ProjectDirectory='SMART_CAR_2026')
     $scriptPath = Join-Path $checkoutPath 'scripts/sync-github.ps1'
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptPath,
         '-ExpectedRemote', $remotePath, '-Message', 'Review source change; literal $(do-not-execute)', '-BranchSlug', 'reviewed-source')
     if ($DryRun) { $arguments += '-DryRun' }
+    $arguments += @('-ProjectDirectory', $ProjectDirectory)
     $ErrorActionPreference = 'Continue'
     $output = @(& $powershellExecutable @arguments 2>&1)
     $exitCode = $LASTEXITCODE
@@ -75,6 +76,16 @@ try {
     Assert-Equal (Invoke-TestGit @('-C', $checkoutPath, 'log', '-1', '--format=%s')) 'Review source change; literal $(do-not-execute)' 'Message is kept literally'
     Invoke-TestSync | Out-Null
     Assert-Equal (Invoke-TestGit @('-C', $checkoutPath, 'rev-parse', 'HEAD')) $firstCommit 'No-change sync creates no commit'
+
+    New-Item -ItemType Directory -Path (Join-Path $checkoutPath 'vv') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $checkoutPath 'vv/source.txt'), 'reviewed vv source')
+    [IO.File]::WriteAllText($sourcePath, 'unrelated pending SMART work')
+    Invoke-TestSync -ProjectDirectory 'vv' | Out-Null
+    Assert-Equal (Invoke-TestGit @('-C', $checkoutPath, 'show', 'HEAD:vv/source.txt')) 'reviewed vv source' 'Explicit vv source is synchronized'
+    Assert-Equal (Invoke-TestGit @('-C', $checkoutPath, 'show', 'HEAD:SMART_CAR_2026/source.txt')) 'first reviewed edit' 'vv sync excludes other project work'
+    Assert-Equal ([IO.File]::ReadAllText($sourcePath)) 'unrelated pending SMART work' 'vv sync preserves other project work locally'
+    [IO.File]::WriteAllText($sourcePath, 'first reviewed edit')
+    $firstCommit = Invoke-TestGit @('-C', $checkoutPath, 'rev-parse', 'HEAD')
 
     Invoke-TestGit @('-C', $checkoutPath, 'add', 'outside.txt') | Out-Null
     Invoke-TestSync -ShouldFail | Out-Null

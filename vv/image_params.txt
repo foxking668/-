@@ -1,0 +1,717 @@
+# 锥桶定时动作在独立 cone_avoidance.ini 调参；文件缺失/非法时比赛模式停驱动。
+new_track_cone_sequence_enable=1
+# 连续2个真实新帧；缓存帧不参与确认。100ms是最大帧间隔，不是最小等待。
+new_track_blue_cone_max_confirm_gap_ms=100
+# 近锥扩大尺寸上限，仅对下半幅、上窄下宽的候选开放；待彩色实跑验证。
+new_track_blue_cone_near_max_area_percent=16
+new_track_blue_cone_near_max_width_percent=38
+new_track_blue_cone_near_max_height_percent=80
+
+# 2026-10-12：道路ROI大津法与低相机入口。0模式保留旧HSV用于对照。
+new_track_binary_mode=1
+new_track_binary_roi_top_percent=35
+new_track_binary_roi_bottom_percent=95
+new_track_binary_threshold_offset=0
+new_track_binary_denoise=1
+# 【二值化前模糊】>1 时在灰度图上先 GaussianBlur(k,k)，去噪让 Otsu 更干净。参考 cc 版=3；1=关闭
+new_track_binary_blur_kernel=1
+# 【固定阈值】0=ROI-Otsu（原行为）；1~254=不用 Otsu，直接钉死这个灰度阈值
+new_track_gray_threshold=0
+# 只有孤立像素被清理；不强制黑框、不对环岛证据做横向闭运算。
+new_track_ring_low_camera_enable=0
+new_track_ring_low_camera_opening_rows60=6
+new_track_ring_low_camera_support_rows60=3
+new_track_ring_low_camera_left_clipped_rows60=4
+new_track_ring_low_camera_confirm_frames=1
+new_track_ring_low_camera_stable_px80=5
+new_track_ring_low_camera_stable_rows60=6
+# 转向前去抖；与左探后的扩宽确认是两个不同条件。
+new_track_ring_entry_confirm_frames=3
+new_track_ring_entry_stable_px80=5
+new_track_ring_entry_stable_rows60=6
+
+# v5 VV_LOW_CAMERA_OTSU_V5；此文件单独提供，运行前放到 /home/root/smartcar/vv/image_params.txt
+# ============================================================
+# vv 新赛道旧车比赛版参数（重点参数在前，旧7.25兼容参数移到最后）
+# 运行目录：/home/root/smartcar/vv/
+# 普通运行：vv + image_params.txt；录像还需启动脚本vvv（ZIP内提供）。
+# ============================================================
+
+# ==================== 当前比赛必要基础参数 ====================
+# 7.25/M3共同使用的道路中心参考比例。
+center_pratio=0.50
+error_gain=4.0
+steer_offset_deg=95
+# 旧车速度档，仍按旧车控制量使用，不使用新车120/145那套速度尺度。
+motor_aim_speed=7
+
+# ============================================================
+# 2026 新赛道比赛模式（旧车）
+# ============================================================
+# 1=启用新赛道独立管线；开启后旧红绿灯/旧地图后处理不会参与。
+new_track_enable=1
+# 普通道路兜底找边：3=M3八邻域式双边界；4=7.25完整轮廓双边界。
+new_track_lane_method=4
+# 普通道路中心黑线第一优先级；黑线不可靠自动回退到上面的M3/7.25。
+new_track_center_black_enable=1
+# 保持7.25原来的视野风格；中心黑线通过横向闭运算从“找边图”中填掉，但原始图仍保留黑线用于巡线。
+new_track_top_crop_ratio=0.05
+new_track_bottom_crop_ratio=0.02
+new_track_left_crop_ratio=0.00
+new_track_right_crop_ratio=0.00
+
+# 初次出库：固定小右偏5，持续400ms；不再将原始巡线大右偏带入起步指令。
+new_track_start_right_enable=1
+new_track_start_right_duration_ms=400
+new_track_start_right_error=5
+new_track_start_right_speed=7
+
+# 锥桶避障：完整蓝色锥体HSV/8连通域检测；左锥替换左边界，右锥替换右边界。
+# 排除大蓝挡板；检测相对于当前道路中心的左右，不使用固定锥桶摆放脚本。
+new_track_blue_cone_enable=1
+new_track_blue_cone_speed=7
+# OpenCV H=0..179；按规则蓝色锥桶，实际光照变化可调整HSV范围。
+new_track_blue_cone_h_min=90
+new_track_blue_cone_h_max=135
+new_track_blue_cone_s_min=60
+new_track_blue_cone_v_min=45
+# 面积按80x60折算；大于全图8%的蓝块不是锥桶候选。
+new_track_blue_cone_min_area80x60=5
+new_track_blue_cone_max_area_percent=8
+# 以锥桶面对通道的外缘，加4像素安全余量；按80宽折算。
+new_track_blue_cone_margin_px80=4
+# 补线后剩余通道不足此像素数：不画穿过锥桶的假边界，标记blocked并暂时停驱动。
+# 这是像素阈值，不能代替真实车宽/轮迹标定。
+new_track_blue_cone_min_corridor_px80=12
+new_track_blue_cone_confirm_frames=2
+# 短时丢检只保持160ms；录像held=1明确说明使用上一帧锥体位置。
+new_track_blue_cone_hold_ms=160
+# 锥桶底端进入图像30%以下才参与避让，避免远处小蓝块。
+new_track_blue_cone_near_y_percent=30
+new_track_boundary_close_kernel=11
+new_track_center_black_min_run=2
+new_track_center_black_max_run=18
+new_track_center_black_max_step=24
+new_track_center_black_min_valid_rows=8
+new_track_center_black_min_near_rows=2
+# 黑段两侧必须留白多少像素：蓝区是大片连续深色、两侧无白，调大这个值能更彻底排除蓝区
+new_track_center_black_min_white_margin=2
+# 黑线丢边兜底：1=白路两侧都丢时仍在画面中间60%找黑线（参考cc版）；0=原行为
+new_track_center_black_loose_bounds=1
+# 单侧边界丢失时按已学习道路宽度重建虚拟边线，1开启
+new_track_single_edge_enable=1
+# 只剩右边界时额外向左、只剩左边界时额外向右的轻微修正（按160宽折算）
+new_track_single_edge_bias_px=8
+# 【转向目标限速】中心黑线不可靠时 targetX 每帧最多变多少像素（参考cc版=12）；0=关闭
+new_track_steer_target_max_step_px=12
+# 【中线空间平滑】逐行中值窗口（参考cc版=5）；1=关闭
+new_track_center_spatial_window=5
+# 【丢线停车】黑白都丢连续N帧停车（参考cc版=8），恢复M帧解除；0=关闭
+new_track_lost_lane_stop_frames=8
+new_track_lost_lane_recover_frames=4
+# 单边界状态下，只有少量中心黑线时允许朝黑线方向辅助收敛
+new_track_partial_black_assist_enable=1
+new_track_partial_black_min_valid_rows=3
+new_track_partial_black_min_near_rows=1
+# 部分黑线辅助权重，70表示70%朝黑线、30%保留虚拟中线
+new_track_partial_black_blend_percent=70
+
+# ---------------- 新工作模式：八邻域五阶段左环岛 ----------------
+# 0=普通巡线；1=环岛模式（普通找线保留7.25，环岛拐点独立八邻域）。可热切换。
+new_track_work_mode=1
+new_track_ring_enable=1
+# 从本圈起点倒Y重新计时，2.9秒后开放黑块门控；门控通过降速；入口连续确认后触发左探；3秒兜底仍需左开口+右界连续，连续扩宽确认后入环。
+new_track_ring_startup_block_ms=10000
+new_track_ring_speed=4
+# 恢复111/cc.zip的黑块门控：通过后立即预降速，再左探验证入口。
+new_track_ring_require_marker=1
+new_track_ring_approach_speed=4
+new_track_ring_marker_min_blocks=3
+new_track_ring_marker_confirm_frames=2
+new_track_ring_marker_hold_ms=7000
+new_track_ring_marker_center_tolerance_px=18
+new_track_ring_marker_min_span_rows=8
+new_track_ring_marker_vertical_ratio_percent=20
+new_track_ring_marker_min_angle_deg=22
+new_track_ring_marker_max_width_percent=45
+# 以下像素/行数以80宽60高为基准，裁剪后按实际尺寸折算。
+new_track_ring_jump_px80=4
+new_track_ring_min_gap_rows60=2
+new_track_ring_separation_rows60=6
+new_track_ring_confirm_frames=2
+new_track_ring_disappear_frames=3
+new_track_ring_right_continuous_percent=80
+# 关闭probe时沿用上拐点h*33%或单上点入环；开启probe时以左探扩宽确认进入状态2。
+new_track_ring_enter_y_percent=33
+new_track_ring_entry_timeout_ms=1600
+# 初见后始终不满足入环证据，6秒取消本次候选。
+new_track_ring_approach_timeout_ms=6000
+new_track_ring_exit_search_delay_ms=2500
+# 双边同时丢线行数严格大于5，且存在右边线反向生长拐点，才出环。
+new_track_ring_both_missing_rows60=5
+# 出环拟合远点y=h/3。x=0表示拟合拐点下方真实右线并外推；非0表示固定宽度百分比。
+new_track_ring_exit_target_x_percent=0
+new_track_ring_post_exit_cooldown_ms=2000
+new_track_ring_zebra_block_after_exit_ms=500
+# 门控参数已恢复；普通直线不强制左偏；左探及短时入环助转使用下面可调的左偏量。
+
+
+# ---------------- v3：门控后左探，参数文件单独交付 ----------------
+new_track_ring_probe_enable=0
+# 每圈前14秒允许新的黑块门控；横道预警/停车后禁止新的环岛候选。
+new_track_ring_marker_window_ms=14000
+# 真正进入状态2后最长14秒，不满足出口证据时取消任务，不冒充出环完成。
+new_track_ring_task_timeout_ms=14000
+# 门控后：入口八邻域拐点出现立即左探；否则3秒后需同时有左开口、右界连续才左探。
+new_track_ring_probe_wait_ms=3000
+# 1推荐：超时只能放宽拐点要求，不能在普通直道上盲目左偏。
+# 0可恢复上一版“3秒无条件左探”，仅用于对照调试，不作为默认。
+new_track_ring_probe_require_opening=1
+# 左边界变小还须路宽(right-left)增大，防止两边一起移动被误当成扩宽。
+new_track_ring_probe_require_width_growth=1
+new_track_ring_probe_width_growth_px80=2
+new_track_ring_probe_settle_ms=180
+# 左探最多1100ms；x增大连续3帧右偏回正，x减小连续3帧确认入环。
+new_track_ring_probe_timeout_ms=1100
+new_track_ring_probe_shift_px80=3
+new_track_ring_probe_confirm_frames=3
+# 与左探开始帧相同y的有效左边界坐标，y在h/3到h-4；无需连续，-1不计。
+# h=56 -> round(6*56/60)=6组；取左界dx/路宽变化的中位数，再连续3帧确认。
+new_track_ring_probe_min_rows60=6
+new_track_ring_probe_left_error=18
+new_track_ring_probe_right_error=10
+new_track_ring_probe_recover_ms=300
+new_track_ring_probe_cooldown_ms=3500
+# 扩宽确认后，在状态2额外保持短时左偏，状态3完全用几何边线巡线。
+new_track_ring_entry_assist_ms=800
+# 远区漏看：至少连续4帧强近区条纹，也能独立停车；每圈最多一次，下圈复位。
+new_track_zebra_near_fallback_confirm_frames=4
+# 倒Y先连续2帧远区候选，再最底30%连续3帧近区确认；不再按固定远区延时停车。
+new_track_crossing_far_confirm_frames=2
+new_track_crossing_far_hold_ms=8000
+
+# ---------------- 人行横道：黑条纹“远区预警 -> 近区确认” ----------------
+new_track_zebra_enable=1
+# 【重复停车】1=每次见到人行横道都播报+停车（默认）；0=旧行为，本圈只停一次
+# 旧行为的复位点只在"识别到车库倒Y并计圈"，而倒Y实测识别不到 -> 整场只停一次
+# 解锁条件：斑马线连续离开视野 zebra_release_frames 帧
+new_track_zebra_stop_every_time=0
+# 每圈从倒Y交叉口重新计时，12秒后才允许人行横道检测。
+new_track_zebra_startup_block_ms=12000
+new_track_zebra_stop_ms=3200
+new_track_zebra_crop_left_percent=8
+new_track_zebra_crop_right_percent=8
+# 远区放到图像上部20%~55%，只做面积预警；近区38%~92%看3跳变+2根宽黑条；也支持两条横向宽黑带。
+new_track_zebra_far_y_start_percent=20
+new_track_zebra_far_y_end_percent=55
+new_track_zebra_near_y_start_percent=38
+new_track_zebra_near_y_end_percent=92
+# 远区只看黑色面积，不要求黑白跳变/条纹数；连续3帧满足后先降速。
+new_track_zebra_far_black_area_min_percent=4
+new_track_zebra_far_black_area_max_percent=35
+new_track_zebra_far_confirm_frames=3
+new_track_zebra_approach_speed=7
+# 近区真正停车确认：每行至少3次跳变、2根独立宽黑条，连续2行。黑面积按条纹行统计，不被整片白路稀释。
+new_track_zebra_near_min_transitions=3
+new_track_zebra_near_min_stripes=2
+new_track_zebra_near_min_rows=2
+new_track_zebra_near_black_area_min_percent=5
+new_track_zebra_near_black_area_max_percent=65
+
+# 远区看到后最多锁存6秒；至少过150ms再允许近区确认；远区漏检可用强近区连续4帧补确认。
+new_track_zebra_far_near_hold_ms=6000
+new_track_zebra_near_after_far_min_delay_ms=150
+# 1=通常先远区后近区；强近区兜底独立生效，设fallback_confirm_frames=0可关闭兜底。
+new_track_zebra_require_far_near=1
+new_track_zebra_confirm_frames=2
+new_track_zebra_release_frames=24
+new_track_zebra_cooldown_ms=5000
+
+# ==================== 新赛道倒Y交叉口计圈 ====================
+# 不再用“道路变宽”直接当交叉口，而是检测赛道内部黑线的倒Y结构：单主干 + 两支分叉。
+new_track_crossing_enable=1
+new_track_crossing_require_zebra=0
+# 每圈18秒后才允许确认下一次车库右侧倒Y交叉口。
+new_track_crossing_startup_block_ms=18000
+# 环岛完成只作为调试参考，不作为计圈硬条件；环岛漏检时仍允许倒Y交叉口正常计圈。
+new_track_crossing_require_ring_complete=0
+# 倒Y结构：至少2行出现分叉，至少3行出现中间主干，分支最小间距按160宽折算为12px。
+new_track_crossing_fork_min_split_rows=2
+new_track_crossing_fork_min_stem_rows=3
+new_track_crossing_fork_min_separation_px=12
+# 发车起点倒Y只用于同步第一圈起点，不算完成一圈。
+new_track_startup_crossing_sync_enable=1
+new_track_startup_crossing_fallback_ms=2800
+new_track_startup_crossing_min_detect_ms=700
+new_track_startup_crossing_confirm_frames=3
+# 无论require_zebra取0或1，人行横道停车期间禁止计圈；以下延时从停车结束算起。
+new_track_crossing_after_zebra_delay_ms=1200
+# 分叉只在图像最底部30%确认，即y>=h*70%。远区连续确认只锁存候选，不计圈。
+new_track_crossing_near_y_percent=70
+new_track_crossing_near_min_split_rows=2
+# 倒Y结构连续3帧确认。
+new_track_crossing_open_confirm_frames=3
+new_track_crossing_cooldown_ms=5000
+
+# 第二圈倒Y交叉口确认后，暂不开自动入库时继续前进200ms再自动停车。
+new_track_finish_stop_enable=1
+new_track_finish_stop_delay_ms=200
+
+# ---------------- 第二圈倒车入库：逻辑已接入，第一阶段先关 ----------------
+# 自动入库打开后，第二圈交叉口将进入入库状态机，不执行上面的200ms停车兜底。
+new_track_garage_auto_enable=0
+new_track_garage_speed=7
+new_track_garage_turn_speed=7
+new_track_garage_reverse_speed=7
+new_track_garage_arm_delay_ms=1200
+new_track_garage_open_confirm_frames=4
+new_track_garage_forward_ms=650
+new_track_garage_right_turn_ms=650
+new_track_garage_right_turn_error=28
+new_track_garage_reverse_search_ms=1200
+new_track_garage_reverse_ms=1000
+new_track_garage_straighten_ms=500
+new_track_garage_straighten_error=-18
+new_track_garage_black_confirm_frames=3
+new_track_garage_reverse_black_gain=1.0
+new_track_debug_print=1
+
+
+# ============================================================
+# 以下为7.25自动排期/旧赛道兼容参数（NewTrack比赛模式大多不直接使用）
+# 为保持原接口和RuntimeConfig兼容，参数仍保留；现场优先调上面的new_track_*。
+# ============================================================
+
+# ============================================================
+# vv 新赛道旧车比赛版参数（2026-10-09）
+# 运行目录：/home/root/smartcar/vv/
+# 普通运行：vv + image_params.txt；录像还需启动脚本vvv（ZIP内提供）。
+# 普通速度=9；环岛屏蔽=4s/圈；人行横道屏蔽=12s/圈；顶部5%/底部2%/左右0裁剪。
+# 交叉口确认完成一圈后重新开始上述4s/12s计时。
+# ============================================================
+
+# 小车运行参数配置文件（M4、速度6、第03次正式实验，完整参数）。
+# 本文件以你最新粘贴的完整参数为准，已开启 M4 实验、录像和日志，目标速度设为6。
+# 本次运行编号为 M4_V06_R03，计划从固定起点连续运行两圈。
+# 请先退出小车程序，再替换运行目录中的 image_params.txt。
+# 运行 ./vv，启动后的3秒调试窗口不按 C/D，等待正常启动。
+# 看到 [Recording] READY 和 START!!! 后开始实验；第二圈结束后按一次 Ctrl+C。
+# 等待 verified=1、error=none、LOG SAVED，再按实际情况填写结果。
+# 等到 OUTCOME SAVED 和终端提示符恢复后，才处理文件或开始下一次实验。
+config_version=2026083101
+#
+# 使用方法：
+# 1. 必须先把多方法+录像版源码编译成 vv 并传到车上。
+#    若遇到 PID.h 的 size_t 宏错误，先使用 V2 修复头文件并完整重编。
+#    仅替换参数文件，不能让旧版程序获得 M1-M4 和录像功能。
+# 2. 本文件与 vv 放在同一运行目录，例如 /home/root/smartcar/vv/image_params.txt。
+#    从包含 vv 和 image_params.txt 的目录启动 ./vv。
+#    不要只改电脑上的副本而忘记传到小车，不要从其他目录启动旧程序。
+# 3. 普通模式约每 500ms 重读参数；实验组、方法、目标速度、录像设置在启动时冻结。
+#    正式实验统一按“退出程序 -> 修改并保存参数 -> 重新 ./vv”操作。
+#    不要边跑边改。即使部分参数能实时生效，也会破坏本次实验条件。
+# 4. 已有同名键只改值，不要在末尾再加一行同名键；实验键重复或拼错会拒绝启动。
+# 5. config_version 不是实验编号，不需要改。方案1/方案2的原参数均保留。
+#
+# 重要：每一行都写成 key=value；以 # 开头的行只是注释。
+# 下方“示例”全部以 # 开头，不会生效。请修改正式参数行，不要只改示例。
+# 保存为 UTF-8 纯文本；不要把 Markdown 的 ``` 标记放进参数文件。
+
+# ============================================================
+# 实验操作说明：先看这部分，后面的原车参数不需要为了换方法而重调
+# ============================================================
+#
+# 【第一步：第一次仅做架空录像检查，不计入正式跑圈成绩】
+# 先把驱动轮架空，确认可以人工切断动力。将下面同名正式参数行改为：
+# experiment_enable=1
+# experiment_method_group=1
+
+# experiment_method=4
+
+# experiment_task_features_enable=0
+# experiment_log_enable=1
+# experiment_run_id=VIDEO_TEST_01
+# experiment_video_enable=1
+# experiment_video_fps=15
+# motor_aim_speed=0
+# 然后运行 ./vv；启动 C/D 调试窗口不按键，除非确实要进入原调试功能。
+# 启动输出应有 method=M4、[Recording] READY，然后才是 START!!!。
+# 录 5-10 秒，按一次 Ctrl+C。等待 VERIFYING 逐帧校验结束，不能中途断电。
+# 检查终端 verified=1、error=none、LOG SAVED，并回放 front_camera.avi。
+# 此次没有跑两圈，success 不要填 1；备注填写 BENCH_TEST，正式统计单独排除。
+#
+# 【第二步：四种方法低速预试，再逐步检查更高速度档】
+# 实验组保持 1，方法分别用 1/2/3/4，先从 motor_aim_speed=9 检查。
+# 安全且正常后，再逐级检查 9、12、15。数值是目标速度档，不是 m/s。
+# 15 不是已经替你验证安全的速度；明显失控、无法人工及时停车就不要强行升档。
+# 预试名称可写 M1_S06_PILOT_01。预试和正式实验分开，不能选择性混入成绩。
+#
+# 【第三步：正式 M1-M4 x 6/9/12/15 四档对比】
+# 实验组固定 1，任务总开关固定 0，实验/日志/录像开关均固定 1，录像帧率固定。
+# 每次只选择方法、目标速度、运行名称，其他控制参数和相机位置保持相同。
+# 例如 M4、速度9、第1次正式会话，修改正式行：
+# experiment_method_group=1
+# experiment_method=4
+# motor_aim_speed=9
+# experiment_run_id=M4_S09_R01
+# 下一次 M2、速度9、第1次，则改方法为2、名称为 M2_S09_R01；速度仍为9。
+# 每次同一起点、同一方向、同一初始朝向，计划连续两圈作为一个会话。
+# 先统一出界与压线判定，记录电池状态、充电/换电、光照变化及异常。
+# 正式阶段四种方法交替，组内顺序提前抽签；不要某种方法全部跑完才换下一种。
+# 经安全预试后，正式速度组也应轮换先后，避免高档总在电池快没电时测。
+# 4方法 x 4速度 x 每组合10次 = 160次会话，计划最多320圈；不是10次就一定足够。
+# 4方法 x 4速度 x 每组合50次 = 800次会话，计划最多1600圈。先明确总工作量。
+# 固定计划次数，不因某种方法暂时领先而提前停止；失败与异常记录都要保留。
+#
+# 【第四步：每次结束及终端填写】
+# 正常两圈完成后按 Ctrl+C；出现失控风险、需扶车或救援时立即结束，不为凑圈冒险。
+# 不要 kill -9、断电或强关终端。先等录像收尾与日志保存，再填写以下内容：
+# success：无人工干预自主完成两圈填1；需扶车或未完成两圈填0；不清楚回车。
+# out_of_track_count：本次会话累计出界次数，没有填0；不要把压线次数混作出界。
+# manual_intervention：扶车、人工纠偏、因失败/失控风险接管停车填1；否则填0。
+# 正常完成后的 Ctrl+C 不算救援干预；因失控而 Ctrl+C 则要记录为干预。
+# video_path：内置录像开启时自动填写，不需要你手输。
+# notes：记录压线次数和扶车次数，例如 two_laps; line_touch=3; reposition=0。
+# 真正出界6次且每次扶车：success=0，out_of_track_count=6，manual_intervention=1。
+# 压线7次但自主完成两圈：success=1，out_of_track_count=0，manual_intervention=0。
+# 压线未单独数清时，写 line_touch=UNRECORDED，不要默认填0。
+# “正常两圈完成、没有出界、未扶车/接管”的前三项依次为1、0、0。
+# 本轮 success=1 表示自主完成两圈；压线次数另记，不能混入真正出界次数。
+# 等到 OUTCOME SAVED 和终端命令提示符恢复，再改下一次参数。
+#
+# 【第五步：文件在哪里、查看什么】
+# 运行目录下自动生成 experiment_logs/0001_M4_S09_R01/ 等递增编号目录。
+# 序号以现有目录为准，不保证从0001开始；不要删除旧日志来重置序号。
+# front_camera.avi：原始尺寸、未裁剪、未画线的前视录像，MJPG有损压缩并非无损原图。
+# video_timestamps.csv：视频帧对应的实验 frame_index 和实际采集时间。
+# frames.csv：逐帧方法输出、舵机目标指令、速度记录、时延等。
+# config_snapshot.txt：实际运行的方法和冻结参数；不要仅凭文件夹名字认方法。
+# runtime_params_at_start.txt：本次启动时完整参数原文。
+# summary.csv：本次会话自动统计；outcome.csv：你在终端填写的结果。
+# recording_status.txt：看 state、verification_passed、decoded_frames 和丢帧/错误。
+# CLOSED 且 verification_passed=1 表示正常收尾并通过解码帧数/尺寸检查。
+# CLOSED_WITH_DROPS 表示有队列丢帧；FAILED 表示异常；NO_FRAMES 表示未录到帧。
+# 有录像问题的会话也保留并标注，不能删掉重跑后只留下好的一次。
+# 比较缺边片段时按 frame_index 和时间戳对应日志，不用播放器秒数代替采集时间。
+# 各方法内部的缺边判断不是独立真值；M1不估计左右边界，不能认作“从不缺边”。
+# 录像不自动给出真实横向距离；舵机目标指令也不等于测到了舵机实际角度或能耗。
+# 旧日志在内存累积后写盘，请按短会话运行，不要把此版本当成无人值守长时间采集器。
+#
+# ---------------- 实验总开关 ----------------
+# 0：普通比赛模式，不执行本次方法对比；当前已设1进行正式实验。
+# 1：实验模式。必须同时 experiment_log_enable=1。
+# 正式实验或架空检查改1；恢复普通模式改0，并同时关闭录像。
+experiment_enable=0
+
+# ---------------- 选择本次方法 ----------------
+# 必须结合下面 experiment_method_group 判断，不能只看数字3/4。
+# group=1：1=M1质心法；2=M2扫描线法；3=M3双侧边界跟踪；4=M4你的完整方法。
+# group=0：只允许3=A3或4=A4，用于原来的缺边策略消融实验。
+# A3保留有序轮廓与多行聚合，但关闭缺失边界的图像边缘代理；A4保留完整处理。
+# M3不是A3；M4与A4使用同一完整处理路径，不能把同次运行重复算两份独立实验。
+# 此版本没有A0/A1/A2实车选择入口，不要填写0/1/2并解释为这些消融方法。
+experiment_method=4
+
+# ---------------- 选择实验组 ----------------
+# 0：原A3/A4；1：M1/M2/M3/M4完整方法比较。
+# 当前已设1，与上方方法4组合，进行M4你的完整方法的正式实验。
+# 每次启动时冻结；退出后改，重新启动才切换。
+experiment_method_group=1
+
+# ---------------- 录像开关 ----------------
+# 0：关闭录像；1：开启录像。当前已设1。
+# 开启录像必须同时 experiment_enable=1、experiment_log_enable=1。
+# 与巡线共用一次相机采集，保存缩小和裁剪前的帧，不是把小ROI放大成录像。
+# 后台最多缓存8帧；编码跟不上会计数丢帧，不改变你的巡线算法。
+# 启动时编码器/存储预检失败会拒绝启动控制线程。
+# 运行中录像失败会报警，但不是自动停车功能，需要操作者按规则结束本次测试。
+# 所有比较方法应统一开关设置，并先检查新录像负载对车上时延的影响。
+experiment_video_enable=0
+
+# ---------------- 录像采样上限 ----------------
+# 整数1..30，当前15。不是相机帧率设置，也不是电机/控制循环频率。
+# 实际保存帧数受采集速度和队列影响；时间分析以 video_timestamps.csv 为准。
+# 如需降低录像负载，应先在预试中统一选择新设置，不要正式运行中途修改。
+experiment_video_fps=15
+
+# ---------------- 外部任务总开关 ----------------
+# 1：保留原车红灯、斑马线、避障等任务干预；0：关闭这些任务干预。
+# M1-M4组必须设0，否则拒绝启动。A3/A4正式巡线对比也应设0。
+# 不要删除后面的原车参数；普通模式还要使用，部分配置也涉及正常视野裁剪。
+# 关闭任务不代表具备额外的失线自动停车功能，人员仍需准备人工接管。
+experiment_task_features_enable=0
+
+# ---------------- 日志开关 ----------------
+# 0：关闭；1：保存。实验启用时必须设1，不能只开录像而不记录实验日志。
+experiment_log_enable=0
+
+# ---------------- 本次名称 ----------------
+# 当前名称M4_V06_R03表示M4、速度6、第03次正式实验。它只是标签，不是算法开关。
+# 真正开关看 experiment_enable，实际方法看 group+method 和日志 method_label。
+# 建议正式运行用 M4_S09_R01：M4、速度档9、第1次；下一次用R02等。
+# 只用英文字母、数字、下划线、减号，不要空格或中文。
+# 即使名称重复，也会生成新的全局序号目录，不会覆盖之前实验。
+experiment_run_id=M4_V06_R03
+
+# ============================================================
+# 一、基础巡线 / 目标速度（中心比例保留，速度已设6用于正式实验）
+# ============================================================
+# 中心参考比例，不是舵机中位、物理角度或距离。
+# 四种方法比较时固定相同值；不要只给M4单独调成更有利的值。
+
+# 当前目标速度已经设6；本次实验结束前不要在运行中修改。
+# 这些值是控制器内部目标速度标度，不是m/s；真实速度需要编码器标定或独立测量。
+# 先逐级安全预试，不能因为软件允许填写15就认为实车高速安全。
+# 实验中该值启动时冻结，改档必须退出程序后再保存、重启。
+
+# ============================================================
+# 二、新区域型人行横道：跳变 + 区域面积 + 连通白条 
+# ============================================================
+zebra_region_far_cycle_enable=1
+zebra_region_far_center_y_ratio=0.3
+zebra_region_far_second_center_y_ratio=0.24
+zebra_region_near_center_y_ratio=0.25
+zebra_region_jump_min_count=3
+zebra_region_gap_ratio_max=2.0
+zebra_region_half_height_ratio=0.06
+zebra_region_sample_rows=9
+zebra_region_min_hit_rows=3
+zebra_region_white_area_ratio_min=0.15
+zebra_region_white_area_ratio_max=0.75
+zebra_region_component_min_area_ratio=0.010
+zebra_region_component_min_height_ratio=0.32
+zebra_region_component_min_count=3
+zebra_far_slow_enable=0
+zebra_slow_aim_speed=7
+zebra_slow_hold_ms=1000
+zebra_ignore_after_detect_ms=10000
+
+# 红灯停车并由黄/绿灯放行、真正恢复行驶后，暂停人行横道识别7秒。
+zebra_ignore_after_traffic_resume_ms=7000
+
+zebra_after_reverse_stop_ms=3200
+pid_recover_delay_ms=0
+motor_pid_clear_on_stop_enable=0
+
+# ============================================================
+# 三、新双 ROI 红灯（保持你的数值，并保留实时控制参数）
+# ============================================================
+traffic_red_enable=0
+traffic_red_debug_enable=0
+traffic_red_debug_interval_ms=800
+traffic_red_startup_ignore_ms=5000
+
+# 最终确认人行横道后，多少毫秒内暂停确认“新的红灯”。
+# 6200=暂停6.2秒；0=关闭。等待绿灯状态不受影响，避免无法放行。
+traffic_red_ignore_after_zebra_detect_ms=6200
+
+# 新增：真实红灯放行且电机真正重新起步后，立即暂停红绿灯检测多久。
+# 5000=起步后暂停5秒；0=关闭。该时间结束后会自动恢复本轮红灯检测资格。
+traffic_red_ignore_after_resume_ms=5000
+
+# 真实红灯放行且电机真正重新起步后，经过多少毫秒停止确认后续“新的红灯”。
+# 8000=起步8秒后关闭本轮后续新红灯识别；下一次确认人行横道时重新开启下一轮。
+# 0=关闭该功能，之后仍可继续识别新的红灯。
+traffic_red_disable_after_resume_ms=8000
+
+# 红灯放行并真正恢复行驶后，延迟多久开始短暂低速。
+traffic_red_after_detect_slow_delay_ms=9200
+traffic_red_after_detect_slow_aim_speed=7
+traffic_red_after_detect_slow_duration_ms=5000
+
+# -------- 绿灯放行并真正起步后的独立强制左偏 --------
+# 0=关闭；1=开启。
+traffic_red_after_resume_left_enable=1
+# 左偏阶段使用的中心比例。
+traffic_red_after_resume_left_pratio=0.65
+# 左偏持续时间，单位ms。
+traffic_red_after_resume_left_duration_ms=300
+# 左偏期间目标速度。
+traffic_red_after_resume_left_aim_speed=7
+# 至少保持的左转误差幅度；不是舵机物理角度。
+traffic_red_after_resume_left_min_error=30
+
+traffic_red_view_top_crop_ratio=0.00
+traffic_red_view_left_crop_ratio=0.01
+traffic_red_view_right_crop_ratio=0.10
+traffic_red_upper_roi_x_start=0.05
+traffic_red_upper_roi_x_end=0.95
+traffic_red_upper_roi_y_start=0.20
+traffic_red_upper_roi_y_end=0.56
+traffic_red_dual_roi_enable=1
+traffic_red_lower_roi_y_start=0.58
+traffic_red_lower_roi_y_end=1.00
+traffic_red_confirm_frames=1
+traffic_red_h1_min=0
+traffic_red_h1_max=12
+traffic_red_h2_min=165
+traffic_red_h2_max=179
+traffic_red_s_min=60
+traffic_red_v_min=55
+traffic_red_min_area=10.0
+traffic_red_max_area_ratio=0.05
+traffic_red_min_circle=0.1
+traffic_red_aspect_min=0.45
+traffic_red_aspect_max=2.20
+traffic_red_morph_kernel_size=1
+
+# ============================================================
+# 四、蓝色障碍路线总选择
+# ============================================================
+# 1=方案1：蓝色桶锥在右、挡板在左。
+# 2=方案2：蓝色桶锥在左、挡板在右。
+# 建议停车前选择好，不要在一段绕障动作执行中途切换。
+blue_obstacle_route_profile=2
+
+# ============================================================
+# 五、方案1独立参数：桶锥在右、挡板在左
+# 流程：正常运行 -> 强制左偏 -> 正常等待 -> 强制右偏 -> 指定速度巡线
+# ============================================================
+# 人行横道恢复后，先正常巡线多久。
+blue_obstacle_profile1_normal_run_ms=1800
+
+# 强制左偏阶段。
+blue_obstacle_profile1_left_enable=1
+blue_obstacle_profile1_left_pratio=0.65
+blue_obstacle_profile1_left_duration_ms=500
+blue_obstacle_profile1_left_aim_speed=7
+blue_obstacle_profile1_left_min_error=30
+
+# 左偏结束后等待，再强制右偏。
+blue_obstacle_profile1_right_enable=1
+blue_obstacle_profile1_right_delay_ms=200
+blue_obstacle_profile1_right_duration_ms=700
+blue_obstacle_profile1_right_min_error=58
+blue_obstacle_profile1_right_aim_speed=7
+
+# 右偏结束后的指定速度正常巡线。
+blue_obstacle_profile1_post_run_enable=1
+blue_obstacle_profile1_post_run_aim_speed=7
+blue_obstacle_profile1_post_run_duration_ms=5500
+
+# 方案1正常巡线顶部裁剪比例。
+blue_obstacle_profile1_normal_top_crop_ratio=0.20
+
+# ============================================================
+# 六、方案2独立试调参数：桶锥在左、挡板在右
+# ============================================================
+# 方案2动作选择：
+# 0=使用扩大视野；1=使用独立强制左偏。
+blue_obstacle_profile2_action_mode=1
+
+# 人行横道恢复后，方案2先正常巡线多久。
+blue_obstacle_profile2_normal_run_ms=2300
+
+# -------- 方案2模式1：独立强制左偏 --------
+# 仅 blue_obstacle_route_profile=2 且 blue_obstacle_profile2_action_mode=1 时使用。
+blue_obstacle_profile2_left_pratio=0.55
+blue_obstacle_profile2_left_duration_ms=400
+blue_obstacle_profile2_left_aim_speed=7
+blue_obstacle_profile2_left_min_error=20
+
+# -------- 方案2模式0：扩大视野 --------
+# 仅 blue_obstacle_route_profile=2 且 blue_obstacle_profile2_action_mode=0 时使用。
+blue_obstacle_profile2_expand_duration_ms=1000
+blue_obstacle_profile2_expand_aim_speed=7
+blue_obstacle_profile2_normal_top_crop_ratio=0.20
+blue_obstacle_profile2_expanded_top_crop_ratio=0.01
+
+# -------- 方案2动作结束后的指定速度正常巡线 --------
+# 无论方案2选择强制左偏还是扩大视野，结束后都使用这一组。
+blue_obstacle_profile2_post_run_enable=1
+blue_obstacle_profile2_post_run_aim_speed=7
+blue_obstacle_profile2_post_run_duration_ms=1200
+
+# ============================================================
+# 七、红灯 / 人行横道急停反转（保持你的数值）
+# ============================================================
+emergency_reverse_enable=0
+emergency_reverse_left_motor_enable=0
+emergency_reverse_right_motor_enable=1
+emergency_coast_ms=50
+emergency_reverse_pwm=22000
+emergency_reverse_turns=2.5
+emergency_reverse_timeout_ms=500
+emergency_brake_lock_ms=800
+
+
+# ./vvv：自动录制实际处理四宫格。./vv 不开启此录像；与experiment_video_enable独立。
+# 文件路径用真实二进制目录/video/run_日期时间_进程号_毫秒/processed.avi。
+# 保存：灰度裁剪、保留黑线的原始二值、最大白色8连通域对照、最终边界/中线/任务状态。
+# 同目录video_timestamps.csv保存实际采集时间、目标点、最终误差、状态及逐行坐标。
+# 录像采样帧率；过载时丢录像帧并计数，图像控制线程不等待编码。
+# 正常Ctrl+C后等[ProcessedVideo] CLOSED再断电；启动不能写视频时在车辆启动前退出。
+processed_video_fps=10
+processed_video_queue_capacity=4
+new_track_ring_center_pratio=30
+new_track_ring_creep_enable=1
+new_track_ring_creep_stop_ms=300
+new_track_ring_creep_speed=3
+new_track_ring_creep_max_mm=400
+new_track_ring_creep_wheel_mm=65
+new_track_ring_creep_timeout_ms=4000
+new_track_ring_creep_steer_px80=20
+new_track_ring_low_camera_window_ms=1500
+new_track_ring_template_enable=0
+new_track_ring_template_frames=2
+new_track_ring_template_threshold=0.60
+new_track_ring_template_file=ring_tmpl_entry.png
+new_track_ring_template_entry_enable=0
+new_track_ring_force_left_ms=0
+new_track_ring_force_left_error=-35
+new_track_ring_force_left_speed=4
+new_track_ring_template_float=0.03
+new_track_ring_template_max_ms=25000
+new_track_ring_template_window_ms=1500
+# ============ 【环岛右侧多模板触发】 ============
+# 用 run_103916 的 f033~f039（车沿环岛右侧行进）裁出的 7 张 80x56 模板做匹配。
+# 判据：任意一张命中=本帧在环岛右侧；窗口内累计 frames 帧即触发。
+# 触发后：完全断电停车 stop_ms -> 强制左转 left_error 持续 left_ms -> 全程速度压到 speed。
+new_track_ring_side_enable=0
+new_track_ring_side_tmpl_prefix=ring_side_
+new_track_ring_side_tmpl_count=7
+# 实测：整帧(80x56)区分度最好(余量0.281)；裁剪变小反而更差(60x44余量0.088)
+new_track_ring_side_crop_w=80
+new_track_ring_side_crop_h=56
+# 阈值实测(2026-10-13 run_102806 两圈/环岛关闭)：整轮最高0.662(f075黑弧)，背景最高0.364(f092)。
+new_track_ring_side_threshold=0.40
+new_track_ring_side_float=0.0
+new_track_ring_side_frames=2
+new_track_ring_side_window_ms=3000
+# 本圈时间窗：实测触发在 39.8s(第一圈环岛)，所以上界必须 >40s；给到 90s 覆盖两圈
+new_track_ring_side_start_ms=10000
+new_track_ring_side_max_ms=90000
+# ---- 触发后的固定序列 ----
+new_track_ring_side_stop_ms=3000
+new_track_ring_side_left_ms=2000
+new_track_ring_side_left_error=-60
+new_track_ring_side_speed=2
+# ---- 其它 ----
+new_track_ring_side_cooldown_ms=4000
+new_track_ring_side_log_ms=900
+# ============ 【环岛入口定位·虚线段判据】 ============
+# 黑色虚线段只在环岛右侧出现（黑弧出现不固定，不能当判据）。
+# 流程：检出虚线段(阶段A) -> mode决定停车时刻(阶段B) -> 立即完全断电停车
+#   mode=2  检出虚线后【立即】停车（delay_ms=0）。想再晚一点就调大 delay_ms
+#   mode=3  检出虚线后等【竖直窄条】停车     （③对应 f041，16x56；w<=narrow_w h>=narrow_h）
+# stop_ms=0 表示停下来就不走了，给你走过去判断位置
+new_track_ring_entry_cue_enable=1
+new_track_ring_entry_cue_mode=2
+new_track_ring_entry_dash_min_blocks=2
+new_track_ring_entry_dash_tol_px=6
+new_track_ring_entry_dash_need_frames=2
+new_track_ring_entry_dash_window_ms=3000
+# 【排除斑马线】虚线段必须纵向排开(跨很多行)+接近竖直；斑马线条纹是横向的
+new_track_ring_entry_dash_min_y_span=20
+new_track_ring_entry_dash_max_slope=1.5
+# 【特征①】虚线段在同一条竖线上，质心 x 跨度上限
+new_track_ring_entry_dash_max_x_spread=20
+# 【特征③】相邻两段最小空隙(行)
+new_track_ring_entry_dash_min_gap_rows=1
+new_track_ring_entry_delay_ms=0
+new_track_ring_entry_narrow_w=20
+new_track_ring_entry_narrow_h=45
+new_track_ring_entry_start_ms=6000
+new_track_ring_entry_max_ms=90000
+new_track_ring_entry_stop_ms=0
+new_track_ring_entry_log_ms=500

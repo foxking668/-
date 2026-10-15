@@ -5,13 +5,15 @@ param(
     [ValidatePattern('^[a-z0-9]+(?:-[a-z0-9]+)*$')]
     [string]$BranchSlug = 'update',
     [switch]$DryRun,
+    [ValidateSet('SMART_CAR_2026','vv')]
+    [string]$ProjectDirectory = 'SMART_CAR_2026',
     # Test override; production callers should leave this default unchanged.
     [string]$ExpectedRemote = 'https://github.com/foxking668/-.git'
 )
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
-$syncPaths = @('SMART_CAR_2026', 'AGENTS.md', '.gitignore', 'GITHUB_SYNC.md', 'scripts')
+$syncPaths = @($ProjectDirectory, 'AGENTS.md', '.gitignore', 'GITHUB_SYNC.md', 'scripts')
 
 function Invoke-RepoGit {
     param([string[]]$GitArguments)
@@ -46,8 +48,8 @@ function Confirm-RemoteCommit {
 
 if ([string]::IsNullOrWhiteSpace($Message)) { throw 'A non-empty change description is required.' }
 if (!(Get-Command git -ErrorAction SilentlyContinue)) { throw 'Git is not installed or not on PATH.' }
-if (!(Test-Path -LiteralPath (Join-Path $repositoryRoot 'SMART_CAR_2026') -PathType Container)) {
-    throw 'SMART_CAR_2026 is missing. Run this script from the correct project checkout.'
+if (!(Test-Path -LiteralPath (Join-Path $repositoryRoot $ProjectDirectory) -PathType Container)) {
+    throw "$ProjectDirectory is missing. Run this script from the correct project checkout."
 }
 $actualRoot = Invoke-RepoGit -GitArguments @('rev-parse', '--show-toplevel')
 if ([IO.Path]::GetFullPath($actualRoot) -ne [IO.Path]::GetFullPath($repositoryRoot)) {

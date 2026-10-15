@@ -1,0 +1,8 @@
+/.validation/
+/build/
+/video/
+/vv
+*.o
+*.obj
+*.exe
+*.log
