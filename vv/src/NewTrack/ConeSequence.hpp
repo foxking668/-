@@ -12,9 +12,9 @@ namespace NewTrack { namespace ConeSequence {
 struct Settings {
     bool enabled=false;
     int entryTimeMs=4500,entryEarlyMs=500,entryLateMs=500;
-    std::array<int,4> minMs{{200,200,200,200}},maxMs{{2500,2500,2500,2500}};
+    std::array<int,4> pulseMs{{200,200,200,200}},maxMs{{2500,2500,2500,2500}};
     std::array<double,4> errors{{30,58,30,58}};
-    double zoneSpeed=9,postSpeed=7;
+    double zoneSpeed=6,postSpeed=7;
     int postMs=5500,entryYPercent=45,passNearYPercent=75,returnCenterTolerance=20;
     int grayThresholdPercent=55,grayMinContrast=12,grayMinArea=5,grayTaperPercent=80;
 };
@@ -22,6 +22,7 @@ inline bool loadFile(const std::string& path,Settings& out,std::string& error) {
     std::ifstream in(path);if(!in) {error="cannot read "+path;return false;}
     const std::array<std::string,4> stages{{"first_left","second_right","third_left","return_right"}};
     std::map<std::string,std::pair<double,double>> limits={
+        {"format_version",{2,2}},
         {"entry_time_ms",{0,60000}},{"entry_early_ms",{0,30000}},{"entry_late_ms",{0,30000}},
         {"cone_zone_speed",{.5,20}},{"wait_duration_ms",{0,0}},
         {"post_duration_ms",{0,30000}},{"post_speed",{.5,20}},
@@ -49,7 +50,7 @@ inline bool loadFile(const std::string& path,Settings& out,std::string& error) {
             values[key]=v;
         } catch(...) {error="invalid/duplicate parameter at line "+std::to_string(number)+": "+key;return false;}
     }
-    if(values.size()!=limits.size()) {error="incomplete visual cone tuning file (26 parameters required)";return false;}
+    if(values.size()!=limits.size()) {error="incomplete pulse cone tuning file (format_version=2, 27 parameters required)";return false;}
     Settings next=out;next.entryTimeMs=int(values["entry_time_ms"]);
     next.entryEarlyMs=int(values["entry_early_ms"]);next.entryLateMs=int(values["entry_late_ms"]);
     next.zoneSpeed=values["cone_zone_speed"];next.postMs=int(values["post_duration_ms"]);next.postSpeed=values["post_speed"];
@@ -58,9 +59,9 @@ inline bool loadFile(const std::string& path,Settings& out,std::string& error) {
     next.grayThresholdPercent=int(values["gray_threshold_percent"]);next.grayMinContrast=int(values["gray_min_contrast"]);
     next.grayMinArea=int(values["gray_min_area_80x60"]);next.grayTaperPercent=int(values["gray_taper_percent"]);
     for(int i=0;i<4;++i) {
-        next.minMs[i]=int(values[stages[i]+"_duration_ms"]);next.maxMs[i]=int(values[stages[i]+"_timeout_ms"]);
+        next.pulseMs[i]=int(values[stages[i]+"_duration_ms"]);next.maxMs[i]=int(values[stages[i]+"_timeout_ms"]);
         next.errors[i]=values[stages[i]+"_error"];
-        if(next.maxMs[i]<=next.minMs[i]) {error="timeout must exceed minimum duration: "+stages[i];return false;}
+        if(next.maxMs[i]<=next.pulseMs[i]) {error="timeout must exceed forced pulse duration: "+stages[i];return false;}
     }
     if(next.entryEarlyMs>next.entryTimeMs || next.passNearYPercent<=next.entryYPercent) {
         error="entry early range exceeds origin, or pass-near row is not below entry row";return false;
@@ -69,7 +70,10 @@ inline bool loadFile(const std::string& path,Settings& out,std::string& error) {
 }
 
 // All candidate coordinates are normalized to 0..100, independent of camera resolution.
-struct Candidate {double x=0,y=0,w=0,h=0;bool acquire=true;double bottom() const{return y+h;}double center() const{return x+w/2;}};
+struct Candidate {
+    double x=0,y=0,w=0,h=0;bool acquire=true,nearClipped=false;
+    double bottom() const{return y+h;}double center() const{return x+w/2;}
+};
 struct Observation {
     bool valid=false,roadValid=false;double roadCenter=50;
     std::vector<Candidate> candidates;
@@ -80,9 +84,11 @@ inline const char* name(Phase p) {switch(p) {
     case Phase::RETURN_RIGHT:return "RETURN_RIGHT";case Phase::POST:return "POST";case Phase::DONE:return "DONE";
     case Phase::FAULT:return "FAULT";default:return "IDLE";}}
 class Controller {
-    Settings locked_;int lap_=-1;bool used_=false,previousAllowed_=false,hasClock_=false,tracking_=false,nearSeen_=false;
-    long long elapsed_=0,motionBudgetMs_=0,lastMs_=0,releaseAtMs_=-1;Phase phase_=Phase::IDLE;
+    Settings locked_;int lap_=-1;bool used_=false,previousAllowed_=false,previousDriveAllowed_=false,hasClock_=false,tracking_=false,nearSeen_=false;
+    long long elapsed_=0,motionBudgetMs_=0,nearAtMotionMs_=0,lastMs_=0,releaseAtMs_=-1;Phase phase_=Phase::IDLE;
+    long long previousMotionLimitMs_=150;
     Candidate target_;int targetHits_=0,missing_=0,roadHits_=0,entryHits_=0;
+    Candidate passedTarget_;bool hasPassedTarget_=false;
     double previousRoad_=50;std::string entryReason_="NONE",reason_="WAIT_WINDOW";
     void clearEvidence() {tracking_=false;nearSeen_=false;targetHits_=missing_=roadHits_=entryHits_=0;}
     static bool matches(const Candidate& a,const Candidate& b) {
@@ -93,15 +99,16 @@ class Controller {
         const Candidate* best=nullptr;double score=1e9;
         for(const auto& c:observation.candidates) {
             if(tracking_) {
-                if(!matches(c,target_) || (nearSeen_ && c.bottom()<locked_.passNearYPercent-10)) continue;
+                if(!matches(c,target_) || (nearSeen_ && !c.nearClipped && c.bottom()<locked_.passNearYPercent-10)) continue;
             }
             else {
-                if(!c.acquire) continue;
-                if(entry && c.bottom()<locked_.entryYPercent) continue;
+                if(!c.acquire && !c.nearClipped) continue;
+                if(entry && !c.acquire) continue;
+                if(!entry && hasPassedTarget_ && matches(c,passedTarget_)) continue;
+                if(entry && !c.nearClipped && c.bottom()<locked_.entryYPercent) continue;
                 if(expectedSide && ((phase_==Phase::RIGHT && c.center()>55) ||
                     ((phase_==Phase::LEFT || phase_==Phase::THIRD_LEFT) && c.center()<45))) continue;
-                // A new stage must not acquire the just-passed cone at the bottom of the image.
-                if(!entry && c.bottom()>=locked_.passNearYPercent) continue;
+                // Near/clipped acquisition still needs two fresh frames and the expected side.
             }
             const double next=tracking_?std::abs(c.center()-target_.center())+std::abs(c.bottom()-target_.bottom()):100-c.bottom();
             if(next<score) {best=&c;score=next;}
@@ -109,6 +116,7 @@ class Controller {
         return best;
     }
     void advance(long long now) {
+        if(phase_!=Phase::RETURN_RIGHT && tracking_) {passedTarget_=target_;hasPassedTarget_=true;}
         const int next=int(phase_)+1;phase_=static_cast<Phase>(next);elapsed_=motionBudgetMs_=0;clearEvidence();reason_="SEEK_CURRENT_CONE";
         if(phase_==Phase::RETURN_RIGHT) reason_="SEEK_ROAD";
         if(phase_==Phase::POST) {releaseAtMs_=now;reason_="ROAD_RECOVERED";if(locked_.postMs==0) phase_=Phase::DONE;}
@@ -117,14 +125,14 @@ public:
     void reset() {*this=Controller{};}
     void update(long long now,int lap,bool enabled,long long routeMs,bool allowed,const Settings& settings,const Observation& observation) {
         if(lap!=lap_) {reset();lap_=lap;}
-        if(!enabled) {phase_=used_?Phase::DONE:Phase::IDLE;previousAllowed_=false;hasClock_=false;clearEvidence();return;}
+        if(!enabled) {phase_=used_?Phase::DONE:Phase::IDLE;previousAllowed_=previousDriveAllowed_=false;hasClock_=false;clearEvidence();return;}
         const bool fresh=hasClock_ && now>lastMs_ && now-lastMs_<=150;
         const bool continuous=fresh && allowed && previousAllowed_ && observation.valid;
         // Motors may run after the preceding permitted frame until the 150ms watchdog.
         // Repeated sparse frames must not freeze the maximum-turn safety budget forever.
-        if(steering() && hasClock_ && previousAllowed_ && now>lastMs_)
-            motionBudgetMs_+=std::min(150LL,now-lastMs_);
-        if(!continuous) {clearEvidence();if(steering()) reason_=allowed?"EVIDENCE_RESET":"PAUSED";}
+        if(inRoute() && hasClock_ && previousDriveAllowed_ && now>lastMs_)
+            motionBudgetMs_+=std::min(previousMotionLimitMs_,now-lastMs_);
+        if(!continuous) {clearEvidence();if(inRoute()) reason_=allowed?"EVIDENCE_RESET":"PAUSED";}
         if(phase_==Phase::IDLE && !used_) {
             locked_=settings;
             const long long earliest=settings.entryTimeMs-settings.entryEarlyMs,latest=settings.entryTimeMs+settings.entryLateMs;
@@ -137,14 +145,14 @@ public:
                 if(visual || routeMs>=latest) {
                     used_=true;phase_=Phase::LEFT;elapsed_=motionBudgetMs_=0;entryReason_=visual?"VISUAL_WINDOW":"TIME_FALLBACK";
                     reason_="SEEK_CURRENT_CONE";targetHits_=candidate?entryHits_:0;
-                    nearSeen_=targetHits_>=2 && target_.bottom()>=locked_.passNearYPercent;
+                    nearSeen_=targetHits_>=2 && (target_.nearClipped || target_.bottom()>=locked_.passNearYPercent);
+                    nearAtMotionMs_=motionBudgetMs_;
                 } else reason_="ENTRY_CONFIRMING";
             } else reason_="WAIT_WINDOW";
         } else if(active() && continuous) {
             elapsed_+=now-lastMs_;
             if(phase_==Phase::POST) {if(elapsed_>=locked_.postMs) {phase_=Phase::DONE;reason_="DONE";}}
             else {
-                const int index=int(phase_)-1;
                 bool passed=false;
                 if(phase_==Phase::RETURN_RIGHT) {
                     const bool centered=observation.roadValid && std::abs(observation.roadCenter-50)<=locked_.returnCenterTolerance;
@@ -155,27 +163,35 @@ public:
                     const auto candidate=choose(observation,true,false);
                     if(candidate) {
                         target_=*candidate;tracking_=true;missing_=0;++targetHits_;
-                        if(targetHits_>=2 && target_.bottom()>=locked_.passNearYPercent) nearSeen_=true;
+                        if(targetHits_>=2 && (target_.nearClipped || target_.bottom()>=locked_.passNearYPercent)) {
+                            nearSeen_=true;nearAtMotionMs_=motionBudgetMs_;
+                        }
                         reason_=nearSeen_?"NEAR_TRACKED":"TRACKING";
                     } else {
                         if(tracking_) {
                             ++missing_;
                             if(!nearSeen_) {targetHits_=0;if(missing_>=2) tracking_=false;}
                         }
-                        passed=nearSeen_ && missing_>=2;reason_=passed?"CONE_PASSED":nearSeen_?"PASS_CONFIRMING":"SEEK_CURRENT_CONE";
+                        passed=nearSeen_ && missing_>=2 && motionBudgetMs_>nearAtMotionMs_;
+                        reason_=passed?"CONE_PASSED":nearSeen_?"PASS_CONFIRMING":"SEEK_CURRENT_CONE";
                     }
                 }
-                if(passed && elapsed_>=locked_.minMs[index]) advance(now);
+                if(passed) advance(now);
             }
         }
-        if(steering() && motionBudgetMs_>=locked_.maxMs[int(phase_)-1]) {
+        if(inRoute() && motionBudgetMs_>=locked_.maxMs[int(phase_)-1]) {
             phase_=Phase::FAULT;reason_="VISUAL_STAGE_TIMEOUT";clearEvidence();
         }
         lastMs_=now;hasClock_=true;previousAllowed_=allowed && observation.valid;
+        previousDriveAllowed_=previousAllowed_;
+        previousMotionLimitMs_=forcing()?std::min(150LL,pulseRemainingMs()):150;
     }
     bool used() const{return used_;}
-    bool steering() const{return phase_>=Phase::LEFT && phase_<=Phase::RETURN_RIGHT;}
-    bool active() const{return steering() || phase_==Phase::POST;}
+    bool inRoute() const{return phase_>=Phase::LEFT && phase_<=Phase::RETURN_RIGHT;}
+    bool forcing() const{return inRoute() && motionBudgetMs_<locked_.pulseMs[int(phase_)-1];}
+    bool guiding() const{return inRoute() && !forcing();}
+    bool active() const{return inRoute() || phase_==Phase::POST;}
+    void reportDriveAllowed(bool allowed){previousDriveAllowed_=previousDriveAllowed_ && allowed;}
     bool routeComplete() const{return phase_==Phase::POST || phase_==Phase::DONE;}
     bool needsStop() const{return phase_==Phase::FAULT;}
     long long releaseAtMs() const{return releaseAtMs_;}
@@ -185,7 +201,9 @@ public:
     const std::string& reason() const{return reason_;}
     bool nearSeen() const{return nearSeen_;}
     long long remainingMs() const{return active()?std::max(0LL,phase_==Phase::POST?locked_.postMs-elapsed_:locked_.maxMs[int(phase_)-1]-motionBudgetMs_):0;}
-    double error() const{return steering()?(int(phase_)%2?-1:1)*locked_.errors[int(phase_)-1]:0;}
-    double speed() const{return steering()?locked_.zoneSpeed:locked_.postSpeed;}
+    long long pulseRemainingMs() const{return forcing()?locked_.pulseMs[int(phase_)-1]-motionBudgetMs_:0;}
+    const Candidate* currentTarget() const{return tracking_ && targetHits_>=2 && missing_==0?&target_:nullptr;}
+    double error() const{return forcing()?(int(phase_)%2?-1:1)*locked_.errors[int(phase_)-1]:0;}
+    double speed() const{return inRoute()?locked_.zoneSpeed:locked_.postSpeed;}
 };
 } }

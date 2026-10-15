@@ -13,8 +13,8 @@ cmake -S "$ROOT" -B "$ROOT/build" -DOpenCV_DIR="$OPENCV_DIR"
 cmake --build "$ROOT/build" --parallel "$(nproc)"
 cp "$ROOT/build/vv" "$ROOT/vv"
 chmod +x "$ROOT/vv" "$ROOT/vvv"
-VERSION="$(sed -n 's/.*revision=\(VV_WINDOW_CONE_[A-Za-z0-9_]*\).*/\1/p' "$ROOT/src/NewTrack/NewTrack.cpp")"
-[[ "$VERSION" == VV_WINDOW_CONE_20261015_4 ]] || { echo 'Unexpected or missing source revision' >&2; exit 1; }
+VERSION="$(sed -n 's/.*revision=\(VV_CONE_PULSE_[A-Za-z0-9_]*\).*/\1/p' "$ROOT/src/NewTrack/NewTrack.cpp")"
+[[ "$VERSION" == VV_CONE_PULSE_20261015_5 ]] || { echo 'Unexpected or missing source revision' >&2; exit 1; }
 PACKAGE_DIR="$(mktemp -d "$ROOT/build/package-window-cone.XXXXXX")"
 cp "$ROOT/vv" "$ROOT/vvv" "$ROOT/cone_avoidance.ini" "$ROOT/apply_cone_config.sh" "$PACKAGE_DIR/"
 cp "$ROOT/image_params.txt" "$PACKAGE_DIR/image_params.reference.txt"
@@ -23,7 +23,7 @@ printf '%s\n' "$VERSION" > "$PACKAGE_DIR/VV_VERSION"
 (
     cd "$PACKAGE_DIR"
     sha256sum vv vvv cone_avoidance.ini apply_cone_config.sh image_params.reference.txt ring_*.png VV_VERSION > VV_SHA256SUMS
-    zip -q vv_window_cone_20261015_4.zip vv vvv cone_avoidance.ini apply_cone_config.sh image_params.reference.txt ring_*.png VV_VERSION VV_SHA256SUMS
+    zip -q vv_cone_pulse_20261015_5.zip vv vvv cone_avoidance.ini apply_cone_config.sh image_params.reference.txt ring_*.png VV_VERSION VV_SHA256SUMS
 )
-mv "$PACKAGE_DIR/vv_window_cone_20261015_4.zip" "$ROOT/vv_window_cone_20261015_4.zip"
-printf '\nBUILD_OK %s\nPackage: %s/vv_window_cone_20261015_4.zip\n' "$VERSION" "$ROOT"
+mv "$PACKAGE_DIR/vv_cone_pulse_20261015_5.zip" "$ROOT/vv_cone_pulse_20261015_5.zip"
+printf '\nBUILD_OK %s\nPackage: %s/vv_cone_pulse_20261015_5.zip\n' "$VERSION" "$ROOT"

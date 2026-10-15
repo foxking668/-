@@ -1,16 +1,8 @@
-当前版本 VV_WINDOW_CONE_20261015_4，维护目录 F:\共享文件夹\vv。
-正式START后的首次图像控制调用为首圈时间原点，不是第一条初始化日志。
-默认4000~5000ms连续2帧灰度视觉确认进入；5000ms仍未确认则下一有效控制帧兜底进入。
-进入后左→右→左→右回路，视觉确认过桶/找回道路后换段，等待0。
-全部26项在cone_avoidance.ini：进入窗口、区域速度9、四段误差30/58/30/58、最短200ms、超时2500ms等。
-上述数值为试调初值，非实车标定；超时未取得视觉证据则停车，不跳下一段。
-原main.cpp/build.sh/vvv未改。两个旧环岛停车分支默认关闭，环岛主逻辑在回路后开放。
-
-虚拟机编译：
-cd "/mnt/hgfs/share/vv" && OPENCV_DIR="/home/gy/下载/opencv-4.11.0/loongson/install/lib/cmake/opencv4" bash build_cone.sh
-成功：BUILD_OK VV_WINDOW_CONE_20261015_4。
-将生成的vv_window_cone_20261015_4.zip上传板子，部署校验步骤见CONE_AVOIDANCE.md。
-启动仍是 ./vvv，不加初始化阶段、不同时启动另一个./vv。Ctrl+C后等[ProcessedVideo] CLOSED。
-部署脚本保留现场主参数，只合并四个开关；普通巡线本地参考速度7，实车上次日志为9，不相互覆盖。
-旧INI不兼容，解压前如需保留请备份。旧vv和旧ZIP不是本版编译结果。
-详细方案/步骤：CONE_AVOIDANCE.md；专项验证及实跑回放限制：CONE_VALIDATION.md。
+当前版本 VV_CONE_PULSE_20261015_5，维护目录F:\共享文件夹\vv。
+修复进入后持续左打：duration现在是强制方向上限，默认200ms；到时转视觉引导，视觉不可用停车。
+专用区域速度=6，整段timeout=2500ms不表示固定打方向2500ms；未视觉确认不能直接跳段。
+进入窗口仍4500±500ms，方向仍左→右→左→右，等待0，回路后才开放环岛。
+新INI共27项且format_version=2；旧26项配置不能沿用。原main.cpp/build.sh/vvv保留。
+虚拟机：cd "/mnt/hgfs/share/vv" && OPENCV_DIR="/home/gy/下载/opencv-4.11.0/loongson/install/lib/cmake/opencv4" bash build_cone.sh
+成功BUILD_OK VV_CONE_PULSE_20261015_5，上传vv_cone_pulse_20261015_5.zip部署，运行仍./vvv。
+详见CONE_AVOIDANCE.md；验证范围与实跑回放限制见CONE_VALIDATION.md。

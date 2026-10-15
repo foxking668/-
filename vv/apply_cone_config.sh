@@ -22,16 +22,16 @@ BEGIN {
     for(i=1;i<=n;i++) values[keys[i]]=numbers[i]
 }
 {
-    if($0 ~ /^# VV_(FIXED|WINDOW)_CONE_[^:]*:/) next
+    if($0 ~ /^# (VV_(FIXED|WINDOW)_CONE_|VV_CONE_PULSE_)[^:]*:/) next
     key=$0;sub(/#.*/,"",key);sub(/=.*/,"",key)
     gsub(/^[ \t\r]+|[ \t\r]+$/,"",key)
     if(key ~ /^new_track_cone_(enable|detection_mode|gray_.*)$/) next
     if(!(key in values)) print $0
 }
 END {
-    print "# VV_WINDOW_CONE_20261015_4: window entry + gray visual pass L/R/L/R; two ring parking branches off"
+    print "# VV_CONE_PULSE_20261015_5: window entry + gray visual pass L/R/L/R; two ring parking branches off"
     for(i=1;i<=n;i++) print keys[i] "=" values[keys[i]]
 }' "$parameter_file" > "$temporary"
 mv "$temporary" "$parameter_file"
 trap - EXIT HUP INT TERM
-printf 'CONFIG_OK WINDOW_GRAY_PASS ring_side_stop=0 ring_entry_stop=0\nBackup: %s\n' "$backup"
+printf 'CONFIG_OK BOUNDED_PULSE_GRAY_PASS ring_side_stop=0 ring_entry_stop=0\nBackup: %s\n' "$backup"
