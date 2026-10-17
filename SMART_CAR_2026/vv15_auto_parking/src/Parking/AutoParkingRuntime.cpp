@@ -1,0 +1,182 @@
+#include "Parking/AutoParking.hpp"
+#include "Parking/AutoParkingRuntime.hpp"
+#include "headfile.hpp"
+#include <atomic>
+#include <filesystem>
+#include <memory>
+
+namespace AutoParking {
+namespace {
+using Clock=std::chrono::steady_clock;
+std::mutex mutex;
+std::unique_ptr<Controller> controller;
+std::atomic<bool> enabledFlag{false},takeoverFlag{false},cameraFlag{true};
+Lane latestLane;
+std::array<std::ofstream,6> logs;
+std::ofstream events;
+std::string directory;
+Phase reportedPhase=Phase::Cruise;
+int reportedStage=0;
+double lastStatus=-1;
+double nowSeconds() {return std::chrono::duration<double>(Clock::now().time_since_epoch()).count();}
+void row(int stage,const char* event,double now,const Output& out,double elapsed,double left=0,double right=0) {
+    if(stage<1 || stage>6 || !logs[stage-1].is_open()) return;
+    auto& file=logs[stage-1];
+    file<<std::fixed<<std::setprecision(6)<<now<<','<<event<<','<<stage<<','<<elapsed<<','
+        <<out.steer<<','<<out.left<<','<<out.right<<','<<left<<','<<right<<','<<latestLane.at<<'\n';
+    if(!file.good()) throw std::runtime_error("Parking CSV write failed");
+}
+void event(const char* name,double now,const std::string& detail="") {
+    if(!events.is_open()) return;
+    events<<std::fixed<<std::setprecision(6)<<now<<','<<name<<','<<detail<<'\n';events.flush();
+    if(!events.good()) throw std::runtime_error("Parking event log write failed");
+}
+void openLogs() {
+    const auto wall=std::chrono::system_clock::now().time_since_epoch();
+    const auto tag=std::chrono::duration_cast<std::chrono::milliseconds>(wall).count();
+    directory="captures/parking_auto/run_"+std::to_string(tag)+"_"+std::to_string(getpid());
+    // create_directory deliberately rejects an existing session instead of truncating its logs.
+    std::filesystem::create_directories("captures/parking_auto");
+    if(!std::filesystem::create_directory(directory)) throw std::runtime_error("Parking log directory already exists");
+    for(int i=0;i<6;++i) {
+        logs[i].open(directory+"/"+files[i]);
+        if(!logs[i]) throw std::runtime_error("Cannot open parking stage CSV");
+        logs[i]<<"steady_s,event,stage,motor_elapsed_s,steer_command,left_pwm_ns,right_pwm_ns,left_rps,right_rps,last_valid_lane_s\n";
+        row(i+1,i>0 && i<5 && controller->config().stages[i].seconds==0?"SKIPPED":"CONFIGURED",
+            nowSeconds(),{},0);
+    }
+    events.open(directory+"/events.csv");
+    if(!events) throw std::runtime_error("Cannot open parking event CSV");
+    events<<"steady_s,event,detail\n";
+    std::ofstream snapshot(directory+"/parking_tuning.snapshot.ini");
+    controller->config().write(snapshot);snapshot.flush();
+    if(!snapshot.good()) throw std::runtime_error("Cannot save actual parking configuration");
+    std::filesystem::copy_file("image_params.txt",directory+"/image_params.snapshot.txt");
+}
+bool steerWrite(Contral::Steer* steer,double command) {
+    if(!steer) return false;
+    steer->setSteerOffset(static_cast<float>(Other::RuntimeConfig::getSteerOffsetDeg()));
+    return steer->setAngle(static_cast<float>(90.0+command));
+}
+void zero(Contral::Motor* motor) {
+    if(!motor) return;
+    motor->setLeftPwm(0);motor->setRightPwm(0);
+    Other::gMotorAimSpeed=0;
+}
+void flush() {
+    for(auto& f:logs) if(f.is_open()) {f.flush();if(!f.good()) throw std::runtime_error("Parking CSV flush failed");}
+}
+}
+void initialize(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mutex);
+    controller=std::make_unique<Controller>(Config::read(path));
+    latestLane={};takeoverFlag.store(false);cameraFlag.store(true);
+    reportedPhase=Phase::Cruise;reportedStage=0;lastStatus=-1;
+    enabledFlag.store(controller->config().enabled);
+    std::cout<<"[AutoParking] "<<version<<" enabled="<<enabled()<<" trigger_zebra_count="
+             <<controller->config().zebraCount<<" reverse_right_only="<<controller->config().rightOnly<<std::endl;
+    for(int i=0;i<6;++i) {
+        const auto& s=controller->config().stages[i];
+        std::cout<<"[AutoParking] stage="<<i+1<<" "<<names[i]<<" pwm="<<s.pwm<<" time="<<s.seconds
+                 <<" steer="<<s.steer<<" hold="<<s.hold<<" correction="<<s.correction<<'/'<<s.correctionSeconds<<std::endl;
+    }
+}
+bool enabled() {return enabledFlag.load();}
+bool takeoverActive() {return takeoverFlag.load();}
+bool cameraNeeded() {return cameraFlag.load();}
+void zebraDetected(int count) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if(!controller) return;
+    const double now=nowSeconds();
+    if(!controller->onZebra(count,now)) return;
+    takeoverFlag.store(true);
+    try {
+        openLogs();event("SECOND_ZEBRA_CONFIRMED",now,"waiting_for_stop_and_reverse_to_finish");
+        std::cout<<"[AutoParking] 第二圈斑马线确认；完成现有停车动作后自动前移。日志="<<directory<<std::endl;
+    } catch(const std::exception& e) {controller->fault(e.what());cameraFlag.store(false);}
+}
+void publishLane(bool valid,double error) {
+    std::lock_guard<std::mutex> lock(mutex);
+    // Retain only a recent valid sample. Invalid frames cannot renew its watchdog timestamp.
+    if(valid && std::isfinite(error)) latestLane={true,nowSeconds(),error};
+}
+bool writeCruiseSteering(Contral::Steer* steer,double error) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if(takeoverFlag.load()) return true;
+    return steerWrite(steer,error);
+}
+bool motorStep(Contral::Motor* motor,Contral::Steer* steer,double leftRps,double rightRps,bool held) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if(!controller || !controller->active()) return false;
+    try {
+        const double before=nowSeconds();const int previousStage=controller->stage();
+        const double previousElapsed=controller->elapsed(before);
+        if(Other::gMotorStop) controller->fault("EXTERNAL_STOP");
+        Output out=controller->tick(before,held,latestLane);
+        cameraFlag.store(controller->cameraNeeded());
+        if(controller->finished()) {
+            zero(motor);
+            if(controller->phase()!=reportedPhase) steerWrite(steer,0);
+        } else {
+            // Stop both wheels before any between-stage steering change.
+            // During motion, steer first and issue the pair only if steering succeeded.
+            bool ok=true;
+            if(out.left==0 && out.right==0) {
+                ok=motor!=nullptr;
+                if(motor) {const bool l=motor->setLeftPwm(0);const bool r=motor->setRightPwm(0);ok=l&&r;}
+                const bool s=steerWrite(steer,out.steer);ok=ok&&s;
+            } else {
+                ok=steerWrite(steer,out.steer) && motor!=nullptr;
+                if(ok) {const bool l=motor->setLeftPwm(out.left);const bool r=motor->setRightPwm(out.right);ok=l&&r;}
+            }
+            const double ackAt=nowSeconds();
+            const bool firstOutput=!controller->motorStarted() && (out.left!=0 || out.right!=0);
+            controller->acknowledge(out,ok,ackAt);
+            if(!ok) {zero(motor);steerWrite(steer,0);out={};}
+            if(firstOutput && ok) event("MOTOR_OUTPUT_STARTED",ackAt,"stage="+std::to_string(controller->stage()));
+            Other::gMotorAimSpeed=0; // Open-loop PWM is not a target rps.
+        }
+        const double now=nowSeconds();
+        if(previousStage>0 && previousStage!=controller->stage())
+            row(previousStage,"STAGE_END",now,{},previousElapsed,leftRps,rightRps);
+        if(reportedPhase!=controller->phase() || reportedStage!=controller->stage()) {
+            reportedPhase=controller->phase();reportedStage=controller->stage();
+            event("STATE",now,std::string(phaseName(reportedPhase))+" stage="+std::to_string(reportedStage));
+            std::cout<<"[AutoParking] "<<phaseName(reportedPhase)<<" stage="<<reportedStage
+                     <<" reason="<<controller->reason()<<std::endl;
+            flush();
+        }
+        row(controller->stage(),"SAMPLE",now,out,controller->elapsed(now),leftRps,rightRps);
+        if(!controller->finished() && now-lastStatus>=1) {
+            lastStatus=now;
+            std::cout<<"[AutoParking] 当前阶段="<<controller->stage()<<" "<<phaseName(controller->phase())
+                     <<" 电机计时="<<controller->elapsed(now)<<"s 左/右PWM="<<out.left<<'/'<<out.right
+                     <<" 编码器="<<leftRps<<'/'<<rightRps<<"rps"<<std::endl;
+        }
+        if(controller->finished()) {
+            flush();
+            if(events.is_open()) events.flush();
+        }
+    } catch(const std::exception& e) {
+        controller->fault(e.what());cameraFlag.store(false);zero(motor);
+        if(reportedPhase!=Phase::Fault) std::cerr<<"[AutoParking] 故障停车: "<<e.what()<<std::endl;
+        reportedPhase=Phase::Fault;
+    }
+    return true;
+}
+void cameraReleased() {
+    std::lock_guard<std::mutex> lock(mutex);
+    try {event("CAMERA_RELEASED",nowSeconds(),"reverse_stages_have_no_video");}
+    catch(const std::exception& e) {if(controller) controller->fault(e.what());}
+    std::cout<<"[AutoParking] 阶段1结束，录像已停止、摄像头已释放。"<<std::endl;
+}
+void shutdown() {
+    std::lock_guard<std::mutex> lock(mutex);
+    if(!controller || !controller->active()) return;
+    try {event("PROGRAM_EXIT",nowSeconds(),controller->reason());flush();}
+    catch(const std::exception& e) {std::cerr<<"[AutoParking] 保存错误: "<<e.what()<<std::endl;}
+    for(auto& f:logs) f.close();
+    events.close();
+    std::cout<<"[AutoParking] 六个阶段CSV已保存: "<<directory<<std::endl;
+}
+}

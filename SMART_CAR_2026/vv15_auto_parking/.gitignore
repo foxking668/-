@@ -1,0 +1,10 @@
+build*/
+.validation/
+captures/
+experiment_logs/
+vv
+vvv
+vv_auto_parking
+*.zip
+*.bak-*
+__pycache__/
