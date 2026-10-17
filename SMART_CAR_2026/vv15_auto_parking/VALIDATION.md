@@ -15,7 +15,8 @@ Baseline limitations (not introduced or repaired in this parking task):
 - The uploaded VV15 `roundabout_test` fails check 44 at line 68 under the native host compiler.
   The identical failure was reproduced against the unmodified archive source.
 - Other original host fixtures fail at low_camera_ring_test:139, track_policy_test:56,
-  entrance_probe_test:134. These tests and their Roundabout source are byte-identical to VV15.
+  entrance_probe_test:134. These tests and their Roundabout logic are unchanged from VV15
+  (Git may normalize text line endings).
 - Original unused-variable/sign warnings remain. No claim that all inherited tests pass.
 
 No LoongArch OpenCV link or real-car test was possible on this Windows host. Run
