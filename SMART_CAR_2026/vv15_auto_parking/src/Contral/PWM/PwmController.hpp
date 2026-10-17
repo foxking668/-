@@ -1,6 +1,6 @@
 #pragma once
 
-#include "headfile.hpp"
+#include <string>
 
 namespace Contral
 {
@@ -22,7 +22,7 @@ namespace Contral
          * @param pwmChip PWM 芯片编号，对应 /sys/class/pwm/pwmchipN。
          * @param pwmNumber PWM 通道编号，对应 pwmchip 下的 pwmN。
          */
-        PwmController(int pwmChip, int pwmNumber);
+        PwmController(int pwmChip, int pwmNumber, const std::string& sysfsRoot="/sys/class/pwm");
         /**
          * @brief 析构 PwmController 对象
          *
@@ -101,6 +101,7 @@ namespace Contral
 
     private:
         std::string pwm_path; // PWM设备的路径
+        std::string export_path;
         int pwm_chip;
         int pwm_number;
         int period;

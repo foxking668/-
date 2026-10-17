@@ -13,7 +13,7 @@
 #include <utility>
 
 namespace AutoParking {
-inline constexpr const char* version = "VV15_AUTO_PARKING_20261017.2";
+inline constexpr const char* version = "VV15_AUTO_PARKING_20261017.3";
 inline constexpr std::array<const char*,6> names = {
     "前移巡线", "第一倒弯", "分支直退", "第二倒弯", "库内直退", "停止确认"};
 inline constexpr std::array<const char*,6> files = {

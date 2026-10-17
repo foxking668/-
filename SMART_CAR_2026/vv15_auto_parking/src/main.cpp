@@ -1,5 +1,6 @@
 #include "headfile.hpp"
 #include "Parking/AutoParking.hpp"
+#include "Parking/ServoCenter.hpp"
 #include "Experiment/VideoRecorder.hpp"
 #include "Experiment/ProcessedRecording.hpp"
 #include "NewTrack/NewTrack.hpp"
@@ -228,6 +229,87 @@ namespace
             }
             else if (ch >= 0) otherInput = true;
         }
+    }
+
+    int runServoCenterMode()
+    {
+        int result=0;
+        try
+        {
+            // Validate before hardware access; reuse the original global initialization order.
+            AutoParking::ServoCenter::readOffset("./image_params.txt");
+            if(!isatty(STDIN_FILENO)) throw std::runtime_error("Servo center mode requires an interactive terminal");
+            std::cout<<"[ServoCenter] "<<AutoParking::version<<" | original VV formula, zero-only motors"<<std::endl;
+            globalInit();
+            auto* motor=static_cast<Motor*>(gMotor);
+            auto* steer=static_cast<Steer*>(gSteer);
+            if(!AutoParking::stopMotorOutputs(motor)) throw std::runtime_error("Cannot hold both motor PWMs at zero");
+            std::cout<<"[ServoCenter] SERVO_CENTER_READY：电机仅输出0，不运行巡线/电机线程。"
+                     <<"现在可打开舵机；修改image_params.txt的steer_offset_deg后，按Enter应用命令0。"<<std::endl;
+            std::cout<<"[ServoCenter] +再Enter=命令+5；-再Enter=命令-5；Enter=回到命令0；"
+                     <<"实际左右待观察确认。结束先关舵机，再Q加Enter或Ctrl+C。"<<std::endl;
+            TerminalRawNonblockGuard guard;
+            if(!guard.valid()) throw std::runtime_error("Servo center mode requires an interactive terminal");
+            std::optional<double> shownOffset;
+            std::string lastError,input;
+            bool overflow=false;
+            auto nextConfigRead=std::chrono::steady_clock::now();
+            while(!gIsClose)
+            {
+                if(!AutoParking::stopMotorOutputs(motor)) throw std::runtime_error("Motor zero write failed; stopping center mode");
+                const auto now=std::chrono::steady_clock::now();
+                if(now>=nextConfigRead)
+                {
+                    nextConfigRead=now+std::chrono::milliseconds(500);
+                    try {
+                        const double offset=AutoParking::ServoCenter::readOffset("./image_params.txt");
+                        if(!shownOffset || offset!=*shownOffset || !lastError.empty())
+                            std::cout<<"[ServoCenter] 文件steer_offset_deg="<<offset
+                                     <<"；尚未应用该提示，按Enter写命令0。"<<std::endl;
+                        shownOffset=offset;lastError.clear();
+                    } catch(const std::exception& e) {
+                        if(lastError!=e.what()) std::cerr<<"[ServoCenter] 参数无效，保持电机0："<<e.what()<<std::endl;
+                        lastError=e.what();
+                    }
+                }
+                pollfd terminal{STDIN_FILENO,POLLIN,0};
+                const int ready=poll(&terminal,1,50);
+                if(ready<0 && errno==EINTR) continue;
+                if(ready<0 || (ready>0 && (terminal.revents&(POLLHUP|POLLERR|POLLNVAL))))
+                    throw std::runtime_error("Center terminal disconnected");
+                if(ready==0 || !(terminal.revents&POLLIN)) continue;
+                const int ch=readCharNonblock();
+                if(ch!='\r' && ch!='\n') {
+                    if(ch>=0) {if(input.size()<16) input+=static_cast<char>(ch);else overflow=true;}
+                    continue;
+                }
+                const std::string command=input;input.clear();
+                if(!overflow && (command=="q" || command=="Q")) break;
+                if(overflow || (command!="" && command!="0" && command!="+" && command!="-")) {
+                    overflow=false;
+                    std::cout<<"[ServoCenter] 只接受Enter、0、+、-、Q；字符后按Enter。"<<std::endl;
+                    continue;
+                }
+                double offset=0;
+                try {offset=AutoParking::ServoCenter::readOffset("./image_params.txt");}
+                catch(const std::exception& e) {std::cerr<<"[ServoCenter] 未执行："<<e.what()<<std::endl;continue;}
+                const double target=command=="+"?5:(command=="-"?-5:0);
+                if(!AutoParking::ServoCenter::apply(motor,steer,offset,target))
+                    throw std::runtime_error("Center servo or motor-zero write failed");
+                const std::string path="/sys/class/pwm/pwmchip"+std::to_string(STEER_PWM_CHIP)
+                    +"/pwm"+std::to_string(STEER_PWM_INDEX)+"/duty_cycle";
+                std::ifstream readback(path);long duty=-1;readback>>duty;
+                std::cout<<"[ServoCenter] APPLIED offset="<<offset<<" command="<<target<<" duty_readback_ns=";
+                if(readback && duty>=0) std::cout<<duty;else std::cout<<"UNAVAILABLE";
+                std::cout<<" | motor_left=0 motor_right=0；观察前轮位置。"<<std::endl;
+            }
+        }
+        catch(const std::exception& e) {std::cerr<<"[ServoCenter] ERROR "<<e.what()<<std::endl;result=2;}
+        if(gMotor && !AutoParking::stopMotorOutputs(static_cast<Motor*>(gMotor))) result=2;
+        // No automatic steering movement on exit; the operator closes servo power first.
+        globalDestroy();
+        std::cout<<"[ServoCenter] 已退出静止模式，没有进入巡线或倒车。"<<std::endl;
+        return result;
     }
 
     std::string trimLocal(const std::string &s)
@@ -1164,12 +1246,13 @@ int main(int argc, char **argv)
     const auto separator=invocation.find_last_of("/\\");
     const bool recordProcessed=invocation.substr(separator==std::string::npos?0:separator+1)=="vvv" ||
         (argc==2 && std::string(argv[1])=="--record-processed");
-    const bool useConfig = (argc == 1) || (argc == 2 && std::string(argv[1]) == "--use-config") ||
+    const bool servoCenterMode=argc==2 && std::string(argv[1])=="--servo-center";
+    const bool useConfig = servoCenterMode || (argc == 1) || (argc == 2 && std::string(argv[1]) == "--use-config") ||
         (argc == 2 && std::string(argv[1]) == "--record-processed");
     Experiment::gProcessedRecordingEnabled.store(recordProcessed);
     const bool experimentMenu = argc == 2 && std::string(argv[1]) == "--experiment-menu";
     if (argc > 1 && !useConfig && !experimentMenu) {
-        std::cerr << "Usage: ./vv [--record-processed|--experiment-menu|--use-config|--motor-test|--imu-test]; ./vvv = processed recording" << std::endl;
+        std::cerr << "Usage: ./vv [--servo-center|--record-processed|--experiment-menu|--use-config|--motor-test|--imu-test]; ./vvv = processed recording" << std::endl;
         return 2;
     }
     if (useConfig && !std::ifstream("./image_params.txt").good()) {
@@ -1256,6 +1339,7 @@ int main(int argc, char **argv)
      * 图像线程和电机线程检测到该标志后会自然退出循环。
      */
     signal(SIGINT, SigintHandler);
+    if(servoCenterMode) return runServoCenterMode();
 
     Experiment::ExperimentSnapshot experimentSnapshot;
     experimentSnapshot.enabled = RuntimeConfig::getExperimentEnable() != 0;

@@ -1,5 +1,6 @@
 #include "Parking/AutoParking.hpp"
 #include "Parking/AutoParkingRuntime.hpp"
+#include "Parking/SteeringOutput.hpp"
 #include "headfile.hpp"
 #include <atomic>
 #include <filesystem>
@@ -54,13 +55,11 @@ void openLogs() {
     std::filesystem::copy_file("image_params.txt",directory+"/image_params.snapshot.txt");
 }
 bool steerWrite(Contral::Steer* steer,double command) {
-    if(!steer) return false;
-    steer->setSteerOffset(static_cast<float>(Other::RuntimeConfig::getSteerOffsetDeg()));
-    return steer->setAngle(static_cast<float>(90.0+command));
+    return writeSteeringCommand(steer,command,Other::RuntimeConfig::getSteerOffsetDeg());
 }
 void zero(Contral::Motor* motor) {
     if(!motor) return;
-    motor->setLeftPwm(0);motor->setRightPwm(0);
+    stopMotorOutputs(motor);
     Other::gMotorAimSpeed=0;
 }
 void flush() {
@@ -145,8 +144,7 @@ bool motorStep(Contral::Motor* motor,Contral::Steer* steer,double leftRps,double
             // During motion, steer first and issue the pair only if steering succeeded.
             bool ok=true;
             if(out.left==0 && out.right==0) {
-                ok=motor!=nullptr;
-                if(motor) {const bool l=motor->setLeftPwm(0);const bool r=motor->setRightPwm(0);ok=l&&r;}
+                ok=stopMotorOutputs(motor);
                 // The manual standby gate owns zero PWM but writes no servo until Enter.
                 if(controller->phase()!=Phase::AwaitManualStart) {const bool s=steerWrite(steer,out.steer);ok=ok&&s;}
             } else {

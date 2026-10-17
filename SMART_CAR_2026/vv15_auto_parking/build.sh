@@ -20,6 +20,8 @@ echo "[源目录] $SRC_DIR"
 # ---------- ① 找 OpenCV 4.11 ----------
 OPENCV_DIR=""
 for d in \
+    "${OpenCV_DIR:-}" \
+    "$HOME/下载/opencv-4.11.0/loongson/install/lib/cmake/opencv4" \
     "$HOME/opencv-4.11.0/loongson/install/lib/cmake/opencv4" \
     "/home/tingxiao/opencv-4.11.0/loongson/install/lib/cmake/opencv4" \
     /home/*/opencv-4.11.0/loongson/install/lib/cmake/opencv4
@@ -33,6 +35,8 @@ done
 if [ -z "$OPENCV_DIR" ]; then
     echo "找不到 OpenCV 4.11 的 OpenCVConfig.cmake"
     echo "已尝试:"
+    echo "  OpenCV_DIR environment override"
+    echo "  \$HOME/下载/opencv-4.11.0/loongson/install/lib/cmake/opencv4"
     echo "  \$HOME/opencv-4.11.0/loongson/install/lib/cmake/opencv4"
     echo "  /home/tingxiao/opencv-4.11.0/loongson/install/lib/cmake/opencv4"
     echo "  /home/*/opencv-4.11.0/loongson/install/lib/cmake/opencv4"

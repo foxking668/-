@@ -1,4 +1,12 @@
 #include "PwmController.hpp"
+#include <cerrno>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <thread>
 
 namespace Contral
 {
@@ -15,10 +23,12 @@ namespace Contral
      * @param pwmChip PWM 芯片编号，对应 /sys/class/pwm/pwmchipN。
      * @param pwmNumber PWM 通道编号，对应 pwmchip 下的 pwmN。
      */
-    PwmController::PwmController(int pwmChip, int pwmNumber)
-        : pwm_chip(pwmChip), pwm_number(pwmNumber)
+    PwmController::PwmController(int pwmChip, int pwmNumber, const std::string& sysfsRoot)
+        : pwm_chip(pwmChip), pwm_number(pwmNumber), period(0), duty_cycle(0)
     {
-        this->pwm_path = "/sys/class/pwm/pwmchip" + std::to_string(pwmChip) + "/pwm" + std::to_string(pwmNumber) + "/";
+        const std::string chip=sysfsRoot+"/pwmchip"+std::to_string(pwmChip);
+        this->pwm_path=chip+"/pwm"+std::to_string(pwmNumber)+"/";
+        this->export_path=chip+"/export";
     }
 
     /**
@@ -68,8 +78,39 @@ namespace Contral
      */
     bool PwmController::initialize()
     {
-        std::string exportPath = "/sys/class/pwm/pwmchip" + std::to_string(this->pwm_chip) + "/export";
-        return writeToFile(exportPath, std::to_string(this->pwm_number));
+        if(pwm_chip<0 || pwm_number<0) return false;
+        std::string problem;
+        const auto ready=[&]() {
+            for(const char* item:{"period","duty_cycle","enable"}) {
+                errno=0;
+                std::fstream node(pwm_path+item,std::ios::in|std::ios::out);
+                if(!node.is_open()) {
+                    problem="open "+pwm_path+item+" reason="+std::strerror(errno?errno:EIO);
+                    return false;
+                }
+            }
+            int currentPeriod=0,currentDuty=0,currentEnable=-1;
+            std::ifstream periodFile(pwm_path+"period"),dutyFile(pwm_path+"duty_cycle"),enableFile(pwm_path+"enable");
+            if(!(periodFile>>currentPeriod) || !(dutyFile>>currentDuty) || !(enableFile>>currentEnable) ||
+               currentPeriod<0 || currentDuty<0 || currentDuty>currentPeriod || (currentEnable!=0 && currentEnable!=1)) {
+                problem="invalid period/duty_cycle/enable metadata under "+pwm_path;
+                return false;
+            }
+            period=currentPeriod;duty_cycle=currentDuty;return true;
+        };
+        if(ready()) return true; // Reuse an already exported channel without writing export.
+        std::error_code error;
+        if(!std::filesystem::is_directory(pwm_path,error)) {
+            const bool exported=writeToFile(export_path,std::to_string(pwm_number));
+            if(!exported && ready()) return true; // Another initializer may have won the race.
+        }
+        // Export completion may be delayed by sysfs/udev. Never issue a second export.
+        for(int attempt=0;attempt<50;++attempt) {
+            if(ready()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        std::cerr<<"[PWM_INIT_FAILED] channel="<<pwm_path<<" reason="<<problem<<std::endl;
+        return false;
     }
 
     // 启用PWM
@@ -113,8 +154,8 @@ namespace Contral
      */
     bool PwmController::setPeriod(unsigned int period_ns)
     {
-        this->period = period_ns;
-        return writeToFile(this->pwm_path + "period", std::to_string(period_ns));
+        if(!writeToFile(this->pwm_path+"period",std::to_string(period_ns))) return false;
+        this->period=period_ns;return true;
     }
 
     // 设置低电平时间（以纳秒为单位）
@@ -130,8 +171,8 @@ namespace Contral
      */
     bool PwmController::setDutyCycle(unsigned int duty_cycle_ns)
     {
-        this->duty_cycle = duty_cycle_ns;
-        return writeToFile(this->pwm_path + "duty_cycle", std::to_string(duty_cycle_ns));
+        if(!writeToFile(this->pwm_path+"duty_cycle",std::to_string(duty_cycle_ns))) return false;
+        this->duty_cycle=duty_cycle_ns;return true;
     }
 
     // 向文件写入值的辅助函数
@@ -148,15 +189,20 @@ namespace Contral
      */
     bool PwmController::writeToFile(const std::string &path, const std::string &value)
     {
-        std::ofstream file(path);
-        if (!file.is_open())
-        {
+        errno=0;
+        FILE* file=std::fopen(path.c_str(),"w");
+        if(!file) {
+            const int error=errno;
+            std::cerr<<"[PWM_IO_ERROR] open path="<<path<<" value="<<value
+                     <<" reason="<<std::strerror(error)<<std::endl;
             return false;
         }
-        file << value;
-        file.flush();
-        const bool written = file.good();
-        file.close();
-        return written && !file.fail();
+        bool written=std::fwrite(value.data(),1,value.size(),file)==value.size();
+        if(std::fflush(file)!=0) written=false;
+        int error=written?0:errno;
+        if(std::fclose(file)!=0) {written=false;if(!error) error=errno;}
+        if(!written) std::cerr<<"[PWM_IO_ERROR] write path="<<path<<" value="<<value
+                              <<" reason="<<std::strerror(error?error:EIO)<<std::endl;
+        return written;
     }
 }
