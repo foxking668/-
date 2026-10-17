@@ -75,6 +75,36 @@ int main(int argc,char** argv) {
         rejects([&]{auto x=c;x.lineLost=.8;x.validate();});
         rejects([&]{Config::number("nan");});
         rejects([&]{Config::number("1.5seconds");});
+        auto manualConfig=c;manualConfig.manual=true;Controller manual(manualConfig);
+        check(manual.active() && manual.phase()==Phase::AwaitManualStart && manual.cameraNeeded(),"manual owns startup zero and camera");
+        check(!manual.onZebra(2,1),"manual ignores zebra triggers");
+        o=manual.tick(100,true,{true,100,20});
+        check(o.left==0 && o.right==0 && manual.phase()==Phase::AwaitManualStart,"manual waits indefinitely even with a visible line");
+        check(!manual.motorStarted(),"waiting never starts motor time");
+        check(manual.authorizeManualStart(101),"explicit manual authorization");
+        check(!manual.authorizeManualStart(101.01),"duplicate Enter cannot reset timing");
+        o=manual.tick(101.1,true,{});
+        check(o.left==0 && manual.phase()==Phase::AcquireManualLane,"manual waits for line after Enter");
+        o=manual.tick(101.2,true,{true,101.2,15});
+        check(o.left==9000 && o.right==9000 && o.steer==15,"manual bypasses zebra held state");
+        check(manual.elapsed(102)==0,"manual waits for output acknowledgment");
+        manual.acknowledge(o,true,101.25);
+        check(manual.elapsed(102)==.75,"manual motor timing starts at successful output");
+        o=manual.tick(103.751,true,{});
+        check(o.left==0 && manual.stage()==2,"manual shares deadline and reverse stages");
+        Controller manualLost(manualConfig);manualLost.authorizeManualStart(1);
+        manualLost.tick(4.001,true,{});
+        check(manualLost.phase()==Phase::Fault,"manual line acquisition timeout stops");
+        Controller lateManual(manualConfig);lateManual.authorizeManualStart(1);
+        o=lateManual.tick(4.001,false,{true,4.001,0});
+        check(lateManual.phase()==Phase::Fault && o.left==0,"late valid lane cannot bypass acquisition deadline");
+        rejects([&]{auto x=manualConfig;x.enabled=false;x.validate();});
+        {std::ofstream saved(roundtrip);manualConfig.write(saved);}
+        check(Config::read(roundtrip).manual,"manual mode configuration snapshot");
+        {std::ifstream saved(roundtrip);std::string data((std::istreambuf_iterator<char>(saved)),{});
+         const auto offset=data.find("start_mode=manual");check(offset!=std::string::npos,"mode serialized");
+         data.replace(offset,17,"start_mode=invalid");saved.close();std::ofstream bad(roundtrip);bad<<data;}
+        rejects([&]{Config::read(roundtrip);});std::remove(roundtrip.c_str());
         std::cout<<"PASS "<<checks<<" automatic parking state/config/timing checks\n";return 0;
     }catch(const std::exception& e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}
 }

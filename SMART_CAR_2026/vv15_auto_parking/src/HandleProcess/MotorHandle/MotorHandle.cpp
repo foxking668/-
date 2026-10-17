@@ -306,8 +306,8 @@ void threadMotorHandle(void)
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             return true;
         };
-        // Reverse stages and fault/completion zeros outrank every legacy reversal path.
-        if (AutoParking::takeoverActive() && !AutoParking::cameraNeeded() && parkingHandled()) continue;
+        // Manual mode (including standby) and reverse/fault zeros outrank legacy reversal paths.
+        if (AutoParking::takeoverActive() && (AutoParking::manualMode() || !AutoParking::cameraNeeded()) && parkingHandled()) continue;
 
         /*
          * 红灯/人行横道急停断动力阶段。

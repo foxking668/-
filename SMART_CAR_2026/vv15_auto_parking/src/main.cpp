@@ -5,6 +5,7 @@
 #include "NewTrack/NewTrack.hpp"
 #include "Experiment/TerminalSession.hpp"
 #include <sys/file.h>
+#include <poll.h>
 #include <fstream>
 
 using namespace ImageProcess;
@@ -188,6 +189,45 @@ namespace
         }
 
         return StartupKeyAction::NORMAL_START;
+    }
+
+    // Reuse the existing terminal guard; Ctrl+C stays enabled and EOF never authorizes motion.
+    void waitManualParkingStart()
+    {
+        std::cout << "[AutoParking] MANUAL_WAIT_ENTER：电机保持零输出。现在可打开舵机，放好车后按一次Enter；Ctrl+C退出。" << std::endl;
+        TerminalRawNonblockGuard guard;
+        if (!guard.valid())
+        {
+            std::cerr << "[AutoParking] 手动入口需要交互终端；没有自动发车。" << std::endl;
+            gIsClose = true;
+            return;
+        }
+        bool otherInput = false;
+        while (!gIsClose && AutoParking::awaitingManualStart())
+        {
+            pollfd input{STDIN_FILENO, POLLIN, 0};
+            const int ready = poll(&input, 1, 100);
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready < 0 || (ready > 0 && (input.revents & (POLLHUP | POLLERR | POLLNVAL))))
+            {
+                std::cerr << "[AutoParking] 终端已断开，未授权发车。" << std::endl;
+                gIsClose = true;
+                break;
+            }
+            if (ready == 0 || !(input.revents & POLLIN)) continue;
+            const int ch = readCharNonblock();
+            if (ch == '\r' || ch == '\n')
+            {
+                if (!otherInput)
+                {
+                    if (!AutoParking::authorizeManualStart()) gIsClose = true;
+                    break;
+                }
+                otherInput = false;
+                std::cout << "[AutoParking] 请输入空行Enter授权；其他输入不会发车。" << std::endl;
+            }
+            else if (ch >= 0) otherInput = true;
+        }
     }
 
     std::string trimLocal(const std::string &s)
@@ -1328,7 +1368,8 @@ int main(int argc, char **argv)
      */
     // Wait Three Senconds
 
-    const StartupKeyAction startupAction = waitStartupDebugKey(3000);
+    const StartupKeyAction startupAction = AutoParking::manualMode() ?
+        StartupKeyAction::NORMAL_START : waitStartupDebugKey(3000);
     if (startupAction == StartupKeyAction::MOTOR_ENCODER_DEBUG && !gIsClose)
     {
         StartupDebugExitMode debugExitMode = runStartupMotorEncoderDebugMenu();
@@ -1417,6 +1458,7 @@ int main(int argc, char **argv)
          * main 本身不直接跑控制算法，只负责守住进程生命周期。
          * 只要 `gIsClose` 没有被 Ctrl+C 或其他逻辑置为 true，就每秒睡眠一次。
          */
+        if (AutoParking::manualMode() && !gIsClose) waitManualParkingStart();
         while (!gIsClose)
         {
             sleep(1);

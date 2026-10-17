@@ -13,7 +13,7 @@
 #include <utility>
 
 namespace AutoParking {
-inline constexpr const char* version = "VV15_AUTO_PARKING_20261017.1";
+inline constexpr const char* version = "VV15_AUTO_PARKING_20261017.2";
 inline constexpr std::array<const char*,6> names = {
     "前移巡线", "第一倒弯", "分支直退", "第二倒弯", "库内直退", "停止确认"};
 inline constexpr std::array<const char*,6> files = {
@@ -25,7 +25,7 @@ struct Stage {
     int pwm=0;
 };
 struct Config {
-    bool enabled=true, rightOnly=true;
+    bool enabled=true, rightOnly=true, manual=false; // Missing start_mode preserves legacy race entry.
     int zebraCount=2;
     double lineLost=.35, lineAcquire=3;
     std::array<Stage,6> stages{};
@@ -43,6 +43,7 @@ struct Config {
         return static_cast<int>(v);
     }
     void validate() const {
+        if(manual && !enabled) throw std::runtime_error("start_mode=manual requires enabled=1");
         if(zebraCount<1 || zebraCount>20 || !std::isfinite(lineLost) || lineLost<.05 || lineLost>.5 ||
            !std::isfinite(lineAcquire) || lineAcquire<.5 || lineAcquire>10)
             throw std::runtime_error("Invalid session trigger/line timeout");
@@ -90,8 +91,13 @@ struct Config {
             }
             const auto eq=line.find('=');
             if(section.empty() || eq==std::string::npos) throw std::runtime_error("Expected [section] and key=value");
-            const auto key=trim(line.substr(0,eq)); const double v=number(trim(line.substr(eq+1)));
+            const auto key=trim(line.substr(0,eq)); const auto value=trim(line.substr(eq+1));
             if(!seen.emplace(section+"."+key,true).second) throw std::runtime_error("Duplicate key: "+key);
+            if(section=="session" && key=="start_mode") {
+                if(value!="manual" && value!="race") throw std::runtime_error("start_mode must be manual or race");
+                c.manual=value=="manual";continue;
+            }
+            const double v=number(value);
             if(section=="session") {
                 if(key=="enabled") c.enabled=integer(v,0,1)!=0;
                 else if(key=="trigger_zebra_count") c.zebraCount=integer(v,1,20);
@@ -119,7 +125,7 @@ struct Config {
     }
     void write(std::ostream& out) const {
         out.precision(17);
-        out<<"[session]\nenabled="<<enabled<<"\ntrigger_zebra_count="<<zebraCount
+        out<<"[session]\nstart_mode="<<(manual?"manual":"race")<<"\nenabled="<<enabled<<"\ntrigger_zebra_count="<<zebraCount
            <<"\nreverse_right_only="<<rightOnly<<"\nline_lost_s="<<lineLost<<"\nline_acquire_s="<<lineAcquire<<'\n';
         for(int i=0;i<6;++i) {
             const auto& s=stages[i];
@@ -131,10 +137,11 @@ struct Config {
     }
 };
 
-enum class Phase {Cruise, WaitResume, Advance, Preparing, Reverse, StopConfirmation, Done, Fault};
+enum class Phase {Cruise, AwaitManualStart, AcquireManualLane, WaitResume, Advance, Preparing, Reverse, StopConfirmation, Done, Fault};
 inline const char* phaseName(Phase p) {
     switch(p) {
     case Phase::Cruise:return "正常巡航";case Phase::WaitResume:return "等待斑马线停车结束";
+    case Phase::AwaitManualStart:return "等待回车授权";case Phase::AcquireManualLane:return "手动入口等待识线";
     case Phase::Advance:return "阶段1前移巡线";case Phase::Preparing:return "停车设置倒车方向";
     case Phase::Reverse:return "倒车执行";case Phase::StopConfirmation:return "阶段6停止确认";
     case Phase::Done:return "入库完成";default:return "故障停车";
@@ -144,13 +151,18 @@ struct Lane {bool valid=false; double at=0,error=0;};
 struct Output {int left=0,right=0;double steer=0;};
 class Controller {
 public:
-    explicit Controller(Config c):c_(std::move(c)) {c_.validate();}
+    explicit Controller(Config c):c_(std::move(c)) {c_.validate();if(c_.manual) phase_=Phase::AwaitManualStart;}
     const Config& config() const {return c_;}
     Phase phase() const {return phase_;}
     int stage() const {return stage_;} // public 1..6; zero means cruise/wait
     bool active() const {return phase_!=Phase::Cruise;}
     bool finished() const {return phase_==Phase::Done || phase_==Phase::Fault;}
-    bool cameraNeeded() const {return phase_==Phase::Cruise || phase_==Phase::WaitResume || phase_==Phase::Advance;}
+    bool cameraNeeded() const {return phase_==Phase::Cruise || phase_==Phase::AwaitManualStart ||
+        phase_==Phase::AcquireManualLane || phase_==Phase::WaitResume || phase_==Phase::Advance;}
+    bool authorizeManualStart(double now) {
+        if(phase_!=Phase::AwaitManualStart || !time(now)) return false;
+        phase_=Phase::AcquireManualLane;resumeReady_=now;return true;
+    }
     const std::string& reason() const {return reason_;}
     double elapsed(double now) const {return started_?std::max(0.0,now-*started_):0;}
     bool motorStarted() const {return started_.has_value();}
@@ -163,13 +175,12 @@ public:
     Output tick(double now,bool zebraHeld,const Lane& lane) {
         Output out;
         if(!time(now) || !active() || finished()) return out;
-        if(phase_==Phase::WaitResume) {
-            if(zebraHeld) {resumeReady_.reset();return out;}
+        if(phase_==Phase::AwaitManualStart) return out;
+        if(phase_==Phase::WaitResume || phase_==Phase::AcquireManualLane) {
+            if(phase_==Phase::WaitResume && zebraHeld) {resumeReady_.reset();return out;}
             if(!resumeReady_) resumeReady_=now;
-            if(!fresh(lane,now)) {
-                if(now-*resumeReady_>=c_.lineAcquire) fault("LINE_ACQUIRE_TIMEOUT");
-                return out;
-            }
+            if(now-*resumeReady_>=c_.lineAcquire) {fault("LINE_ACQUIRE_TIMEOUT");return out;}
+            if(!fresh(lane,now)) return out;
             phase_=Phase::Advance;stage_=1;started_.reset();
         }
         if(phase_==Phase::Advance) {

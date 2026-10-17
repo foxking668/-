@@ -2,12 +2,18 @@
 
 New parking software checks:
 
-- 40 pure C++ state/config/timing checks, including output acknowledgement, zero-reverse
+- 57 pure C++ state/config/timing checks, including output acknowledgement, zero-reverse
   restart, duplicate triggers, decimal durations, stale camera, two bends, skipped stage,
-  right-only/both-wheel reverse, malformed ranges, and failed writes.
-- Native runtime bridge test with fake Motor/Steer: handoff, blocked late image write,
+  right-only/both-wheel reverse, malformed ranges, failed writes, manual standby, explicit
+  authorization, fresh post-authorization line, mode roundtrip and manual acquisition timeout.
+- Native runtime bridge tests in separate race/manual processes with fake Motor/Steer:
+  initialization-time manual ownership, zero motors/no servo before authorization, no early log
+  directory, ignored zebra events, rejected duplicate authorization, discarded pre-Enter frame,
+  race handoff, blocked late image write,
   first forward output, camera-stage deadline, reverse output, failure zeros and six CSVs.
-- Eight modified Linux translation units compiled to x86_64 Linux objects using Zig and
+- Three newly changed Linux translation units (main/runtime/motor thread) recompiled after
+  the manual-entry change; eight integrated translation units had compiled in the previous version.
+  All were compiled to x86_64 Linux objects using Zig and
   upstream OpenCV 4.10 public headers; this checks Linux source compatibility, not target linking.
 
 Baseline limitations (not introduced or repaired in this parking task):

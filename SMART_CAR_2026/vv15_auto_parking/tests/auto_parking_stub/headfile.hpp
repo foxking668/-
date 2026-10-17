@@ -4,8 +4,12 @@
 #include <iomanip>
 #include <mutex>
 #include <thread>
+#ifdef _WIN32
 #include <process.h>
 #define getpid _getpid
+#else
+#include <unistd.h>
+#endif
 namespace Contral {
 class Motor {
 public:

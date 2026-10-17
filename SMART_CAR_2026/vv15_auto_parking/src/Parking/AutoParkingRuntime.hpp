@@ -5,6 +5,9 @@ namespace Contral {class Motor;class Steer;}
 namespace AutoParking {
 void initialize(const std::string& configPath);
 bool enabled();
+bool manualMode();
+bool awaitingManualStart();
+bool authorizeManualStart();
 bool takeoverActive();
 bool cameraNeeded();
 void zebraDetected(int count);

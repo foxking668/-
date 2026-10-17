@@ -10,7 +10,7 @@ namespace {
 using Clock=std::chrono::steady_clock;
 std::mutex mutex;
 std::unique_ptr<Controller> controller;
-std::atomic<bool> enabledFlag{false},takeoverFlag{false},cameraFlag{true};
+std::atomic<bool> enabledFlag{false},manualFlag{false},takeoverFlag{false},cameraFlag{true};
 Lane latestLane;
 std::array<std::ofstream,6> logs;
 std::ofstream events;
@@ -70,10 +70,11 @@ void flush() {
 void initialize(const std::string& path) {
     std::lock_guard<std::mutex> lock(mutex);
     controller=std::make_unique<Controller>(Config::read(path));
-    latestLane={};takeoverFlag.store(false);cameraFlag.store(true);
-    reportedPhase=Phase::Cruise;reportedStage=0;lastStatus=-1;
+    latestLane={};manualFlag.store(controller->config().manual);
+    takeoverFlag.store(controller->active());cameraFlag.store(true);
+    reportedPhase=controller->phase();reportedStage=0;lastStatus=-1;
     enabledFlag.store(controller->config().enabled);
-    std::cout<<"[AutoParking] "<<version<<" enabled="<<enabled()<<" trigger_zebra_count="
+    std::cout<<"[AutoParking] "<<version<<" start_mode="<<(manualMode()?"manual":"race")<<" enabled="<<enabled()<<" trigger_zebra_count="
              <<controller->config().zebraCount<<" reverse_right_only="<<controller->config().rightOnly<<std::endl;
     for(int i=0;i<6;++i) {
         const auto& s=controller->config().stages[i];
@@ -82,6 +83,27 @@ void initialize(const std::string& path) {
     }
 }
 bool enabled() {return enabledFlag.load();}
+bool manualMode() {return manualFlag.load();}
+bool awaitingManualStart() {
+    std::lock_guard<std::mutex> lock(mutex);
+    return controller && controller->phase()==Phase::AwaitManualStart;
+}
+bool authorizeManualStart() {
+    std::lock_guard<std::mutex> lock(mutex);
+    if(!controller || controller->phase()!=Phase::AwaitManualStart) return false;
+    try {
+        openLogs();
+        const double now=nowSeconds();
+        latestLane={}; // Only a fresh post-authorization image can start the motors.
+        if(!controller->authorizeManualStart(now)) return false;
+        event("MANUAL_START_AUTHORIZED",now,"skip_zebra_stop_and_reverse");
+        std::cout<<"[AutoParking] 已授权；等待有效巡线图像，随后自动前进计时。日志="<<directory<<std::endl;
+        return true;
+    } catch(const std::exception& e) {
+        controller->fault(e.what());cameraFlag.store(false);
+        std::cerr<<"[AutoParking] 手动入口未启动: "<<e.what()<<std::endl;return false;
+    }
+}
 bool takeoverActive() {return takeoverFlag.load();}
 bool cameraNeeded() {return cameraFlag.load();}
 void zebraDetected(int count) {
@@ -108,6 +130,7 @@ bool writeCruiseSteering(Contral::Steer* steer,double error) {
 bool motorStep(Contral::Motor* motor,Contral::Steer* steer,double leftRps,double rightRps,bool held) {
     std::lock_guard<std::mutex> lock(mutex);
     if(!controller || !controller->active()) return false;
+    const bool awaitingPermission=controller->phase()==Phase::AwaitManualStart;
     try {
         const double before=nowSeconds();const int previousStage=controller->stage();
         const double previousElapsed=controller->elapsed(before);
@@ -116,7 +139,7 @@ bool motorStep(Contral::Motor* motor,Contral::Steer* steer,double leftRps,double
         cameraFlag.store(controller->cameraNeeded());
         if(controller->finished()) {
             zero(motor);
-            if(controller->phase()!=reportedPhase) steerWrite(steer,0);
+            if(!awaitingPermission && controller->phase()!=reportedPhase) steerWrite(steer,0);
         } else {
             // Stop both wheels before any between-stage steering change.
             // During motion, steer first and issue the pair only if steering succeeded.
@@ -124,7 +147,8 @@ bool motorStep(Contral::Motor* motor,Contral::Steer* steer,double leftRps,double
             if(out.left==0 && out.right==0) {
                 ok=motor!=nullptr;
                 if(motor) {const bool l=motor->setLeftPwm(0);const bool r=motor->setRightPwm(0);ok=l&&r;}
-                const bool s=steerWrite(steer,out.steer);ok=ok&&s;
+                // The manual standby gate owns zero PWM but writes no servo until Enter.
+                if(controller->phase()!=Phase::AwaitManualStart) {const bool s=steerWrite(steer,out.steer);ok=ok&&s;}
             } else {
                 ok=steerWrite(steer,out.steer) && motor!=nullptr;
                 if(ok) {const bool l=motor->setLeftPwm(out.left);const bool r=motor->setRightPwm(out.right);ok=l&&r;}
@@ -132,7 +156,7 @@ bool motorStep(Contral::Motor* motor,Contral::Steer* steer,double leftRps,double
             const double ackAt=nowSeconds();
             const bool firstOutput=!controller->motorStarted() && (out.left!=0 || out.right!=0);
             controller->acknowledge(out,ok,ackAt);
-            if(!ok) {zero(motor);steerWrite(steer,0);out={};}
+            if(!ok) {zero(motor);if(!awaitingPermission) steerWrite(steer,0);out={};}
             if(firstOutput && ok) event("MOTOR_OUTPUT_STARTED",ackAt,"stage="+std::to_string(controller->stage()));
             Other::gMotorAimSpeed=0; // Open-loop PWM is not a target rps.
         }
@@ -147,7 +171,7 @@ bool motorStep(Contral::Motor* motor,Contral::Steer* steer,double leftRps,double
             flush();
         }
         row(controller->stage(),"SAMPLE",now,out,controller->elapsed(now),leftRps,rightRps);
-        if(!controller->finished() && now-lastStatus>=1) {
+        if(!controller->finished() && controller->phase()!=Phase::AwaitManualStart && now-lastStatus>=1) {
             lastStatus=now;
             std::cout<<"[AutoParking] 当前阶段="<<controller->stage()<<" "<<phaseName(controller->phase())
                      <<" 电机计时="<<controller->elapsed(now)<<"s 左/右PWM="<<out.left<<'/'<<out.right
@@ -172,7 +196,7 @@ void cameraReleased() {
 }
 void shutdown() {
     std::lock_guard<std::mutex> lock(mutex);
-    if(!controller || !controller->active()) return;
+    if(!controller || !controller->active() || directory.empty()) return;
     try {event("PROGRAM_EXIT",nowSeconds(),controller->reason());flush();}
     catch(const std::exception& e) {std::cerr<<"[AutoParking] 保存错误: "<<e.what()<<std::endl;}
     for(auto& f:logs) f.close();
