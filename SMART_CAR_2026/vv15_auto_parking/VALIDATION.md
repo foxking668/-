@@ -1,14 +1,32 @@
 # Validation scope
 
-New parking software checks (20261017.3):
+New steering range checks (20261017.4):
+
+- 90 pure steering checks: decimal primary/correction commands beyond +/-90 accepted,
+  exact original float arithmetic at five offsets including the measured 20, output without
+  clamp/sign changes, electrical boundaries, overflow/nonfinite rejection before driver mutation,
+  field-specific preflight failures including disabled correction values, retained stage directions.
+- Race/manual runtime bridge fixtures reject an invalid later-stage pulse before any motion/logs,
+  and deliver stage_2 command -120.5 unchanged with offset20 through the actual runtime bridge.
+  Missing image parameters are refused rather than generated with a guessed offset.
+- The fixed limit is removed only from parking config magnitude validation. All stored commands
+  are preflighted before globalInit; every live output is checked using the same pulse helper.
+  Time/PWM/direction/center constraints and static center-mode -5/0/+5 probes remain.
+- Original pulse arithmetic is factored into a pure helper without changing its float operation
+  order, offset application, PWM period or hardware call order. Physical range is not inferred.
+- Three affected Linux translation units (main/runtime/steer) compile to Linux x86_64 objects
+  with Zig and upstream OpenCV 4.10 headers. This is source compatibility, not a LoongArch link.
+- Existing 57 state checks, 39 stationary checks and 17 PWM fixture checks remain part of verification.
+
+Previous parking software checks (20261017.3):
 
 - 39 stationary servo parser/output checks: motor writes stay zero, no arbitrary probe,
   zero before servo, failed motor-zero blocks steering, malformed/duplicate/nonfinite settings.
 - 17 actual PwmController filesystem-fixture checks: existing channel reused without export,
   repeated initialization, delayed node creation, acknowledged zero writes, incomplete channels,
   invalid enable metadata, missing chip and failed writes preserving the last acknowledged cached value.
-- Original Steer pulse formula, Global initialization sequence, motor direction mapping,
-  lane algorithm, image_params.txt and all numeric parking stage parameters are unchanged.
+- Original Steer pulse arithmetic, Global initialization sequence, motor direction mapping,
+  lane algorithm, image_params.txt and all numeric parking stage parameters are preserved.
 - Packaging fixture validates both manifests, preservation of board tuning and refusal of x86 binaries.
 - Updated build/launch scripts handle the actual VM download folder and board OpenCV paths.
 

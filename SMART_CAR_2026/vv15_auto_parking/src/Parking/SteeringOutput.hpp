@@ -1,10 +1,11 @@
 #pragma once
-#include <cmath>
+#include "Contral/Steer/SteeringPulse.hpp"
 namespace AutoParking {
-// Shared adapter; the original VV pulse formula remains solely in Steer::setAngle.
+// Shared adapter; preflight and the actual driver use the same original VV formula.
 template<class Steer>
 bool writeSteeringCommand(Steer* steer,double command,double offset) {
-    if(!steer || !std::isfinite(command) || !std::isfinite(offset)) return false;
+    float duty;
+    if(!steer || !Contral::SteeringPulse::commandToDuty(command,offset,duty)) return false;
     steer->setSteerOffset(static_cast<float>(offset));
     return steer->setAngle(static_cast<float>(90.0+command));
 }

@@ -168,7 +168,7 @@ namespace Contral
          * 那么实际参与 PWM 计算的角度为：
          *     angle = 95
          */
-        angle += this->steer_offset;
+        // The shared pulse helper below applies this offset exactly once.
 
         /*
          * 根据角度计算 PWM 高电平时间 duty。
@@ -231,15 +231,15 @@ namespace Contral
          *         duty = 1520000 + 1000000 = 2520000ns
          *         即 2.52ms
          *
-         * 所以该公式大致将：
+         * 上面20ms是假设示例。本车实际周期3040000ns，在偏移为0时：
          *
-         *     0°   映射为 0.52ms
-         *     90°  映射为 1.52ms
-         *     180° 映射为 2.52ms
+         *     输入0   映射为 1.368ms
+         *     输入90  映射为 1.520ms
+         *     输入180 映射为 1.672ms
          *
-         * 这符合常见舵机通过 PWM 脉宽控制角度的方式。
+         * 输入不是实测轮角，以上也不是本车机械安全范围。
          */
-         float duty = (((angle - 90.0f) / 90.0f) * 5.0f) * (float)(this->period / 100.0f) + 1520000.0f;
+         const float duty = SteeringPulse::dutyForAngle(angle,this->steer_offset,this->period);
 
         /*
          * 下面这一行是另一种舵机占空比计算公式，
@@ -270,7 +270,7 @@ namespace Contral
          * 高电平时间越小，
          * 舵机通常会转向另一个方向。
          */
-        if (!std::isfinite(duty) || duty < 0 || duty > this->period) return false;
+        if (!SteeringPulse::validDuty(duty,this->period)) return false;
         return pwmTemp->setDutyCycle(static_cast<unsigned int>(duty));
     }
 

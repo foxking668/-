@@ -1,5 +1,6 @@
 #pragma once
 #include "headfile.hpp"
+#include "SteeringPulse.hpp"
 
 namespace Contral
 {
@@ -13,7 +14,7 @@ namespace Contral
     {
     private:
         void *pwmCtrl = nullptr;
-        const int period = 3040000;
+        const int period = SteeringPulse::periodNs;
         //const int period = 2000000;
         float steer_offset = 0;
 

@@ -27,5 +27,5 @@ public:
 namespace Other {
 inline bool gMotorStop=false;
 inline float gMotorAimSpeed=0;
-namespace RuntimeConfig {inline double getSteerOffsetDeg(){return 95;}}
+namespace RuntimeConfig {inline double getSteerOffsetDeg(){return 20;}}
 }

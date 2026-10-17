@@ -1,10 +1,14 @@
 # VV15 手动入口 / 第二圈斑马线自动倒车入库
 
-版本：VV15_AUTO_PARKING_20261017.3。默认start_mode=manual，只有按一次Enter后才允许起步。
+版本：VV15_AUTO_PARKING_20261017.4。默认start_mode=manual，只有按一次Enter后才允许起步。
 完整参数解释、范围和调整顺序见[PARKING_PARAMETERS.md](PARKING_PARAMETERS.md)。
 
 源码基线是用户提供的 vv(15).zip。原程序的斑马线识别判据、巡线算法、PWM2舵机、
-3040000ns周期、偏移95、电机通道及初始化顺序继续使用。
+3040000ns周期、电机通道及初始化顺序继续使用；偏移读取image_params.txt，板端保留你已测好的20。
+
+本版取消steer_command和correction_steer_command的固定±90校验，支持更大幅度及小数。
+启动前和实际写入均复用原VV脉宽公式检查PWM合法性，不推定机械安全范围。
+阶段方向、停车要求、电机参数、巡线和计时流程继续使用；模板数值未替你加大。
 
 ## 命令0仍偏转时先静止调回中
 
@@ -102,7 +106,7 @@ sh ./run_auto_parking.sh
 
 入库只改`config/parking_tuning.vv.ini`，保存后重新启动。运行中不热改动作序列。
 原巡线仍使用`image_params.txt`中的center_pratio、error_gain、steer_offset_deg及new_track_*参数。
-零命令表示原VV的90+偏移95，不表示已测量的前轮机械直行。代码约定负左正右。
+零命令表示原VV的90+当前安装偏移；你已测得偏移20时回中，负左正右。
 
 | 参数 | 含义与范围 |
 |---|---|
@@ -114,7 +118,7 @@ sh ./run_auto_parking.sh
 | line_acquire_s | 斑马线停车结束后等待识线的上限，0.5..10秒 |
 | motor_pwm_ns | 各阶段独立PWM，0或100..50000纳秒；方向由阶段决定 |
 | motor_run_time_s | 首笔非零输出成功后的总运行秒数，0..120，支持小数 |
-| steer_command | 固定转向命令，-90..90；阶段1固定0，运行时由巡线覆盖 |
+| steer_command | 固定转向命令，有限数值、支持小数，无固定±90限幅；须通过实际PWM校验；阶段1固定0，运行时由巡线覆盖 |
 | settle_time_s | 阶段2..5停车设置方向后的等待，0.5..5秒；阶段1/6字段不使用 |
 | hold_time_s | 主转向保持时间，0..120秒；0为整个本阶段保持 |
 | correction_steer_command | 仅阶段2/4支持；第一弯修正为正，第二弯为负 |

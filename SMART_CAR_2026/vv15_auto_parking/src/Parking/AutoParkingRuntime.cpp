@@ -1,6 +1,7 @@
 #include "Parking/AutoParking.hpp"
 #include "Parking/AutoParkingRuntime.hpp"
 #include "Parking/SteeringOutput.hpp"
+#include "Parking/SteeringValidation.hpp"
 #include "headfile.hpp"
 #include <atomic>
 #include <filesystem>
@@ -68,13 +69,22 @@ void flush() {
 }
 void initialize(const std::string& path) {
     std::lock_guard<std::mutex> lock(mutex);
-    controller=std::make_unique<Controller>(Config::read(path));
+    const Config config=Config::read(path);
+    // The check-only entry must not generate a default image file and guess its offset.
+    if(!std::ifstream("image_params.txt").good())
+        throw std::runtime_error("Cannot read image_params.txt for actual steering offset preflight");
+    const double offset=Other::RuntimeConfig::getSteerOffsetDeg();
+    validateSteeringCommands(config,offset);
+    controller=std::make_unique<Controller>(config);
     latestLane={};manualFlag.store(controller->config().manual);
     takeoverFlag.store(controller->active());cameraFlag.store(true);
     reportedPhase=controller->phase();reportedStage=0;lastStatus=-1;
     enabledFlag.store(controller->config().enabled);
     std::cout<<"[AutoParking] "<<version<<" start_mode="<<(manualMode()?"manual":"race")<<" enabled="<<enabled()<<" trigger_zebra_count="
              <<controller->config().zebraCount<<" reverse_right_only="<<controller->config().rightOnly<<std::endl;
+    std::cout<<"[AutoParking] steering_fixed_limit=none steer_offset_deg="<<offset
+             <<" servo_period_ns="<<Contral::SteeringPulse::periodNs
+             <<" pulse_preflight=passed; not a mechanical range guarantee"<<std::endl;
     for(int i=0;i<6;++i) {
         const auto& s=controller->config().stages[i];
         std::cout<<"[AutoParking] stage="<<i+1<<" "<<names[i]<<" pwm="<<s.pwm<<" time="<<s.seconds

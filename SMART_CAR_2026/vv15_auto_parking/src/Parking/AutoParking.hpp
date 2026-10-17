@@ -13,7 +13,7 @@
 #include <utility>
 
 namespace AutoParking {
-inline constexpr const char* version = "VV15_AUTO_PARKING_20261017.3";
+inline constexpr const char* version = "VV15_AUTO_PARKING_20261017.4";
 inline constexpr std::array<const char*,6> names = {
     "前移巡线", "第一倒弯", "分支直退", "第二倒弯", "库内直退", "停止确认"};
 inline constexpr std::array<const char*,6> files = {
@@ -51,8 +51,8 @@ struct Config {
             const auto& s=stages[i];
             for(double t:{s.settle,s.hold,s.seconds,s.correctionSeconds})
                 if(!std::isfinite(t) || t<0 || t>120) throw std::runtime_error("Invalid stage time");
-            if(s.settle<.5 || s.settle>5 || !std::isfinite(s.steer) || std::abs(s.steer)>90 ||
-               !std::isfinite(s.correction) || std::abs(s.correction)>90 || s.pwm<0 || s.pwm>50000 ||
+            if(s.settle<.5 || s.settle>5 || !std::isfinite(s.steer) ||
+               !std::isfinite(s.correction) || s.pwm<0 || s.pwm>50000 ||
                (s.pwm>0 && s.pwm<100)) throw std::runtime_error("Invalid steering/PWM/settle in stage_"+std::to_string(i+1));
             if(i<5 && s.seconds>0 && s.pwm==0) throw std::runtime_error("Enabled stage requires motor_pwm_ns>0");
             if(s.correctionSeconds>0) {

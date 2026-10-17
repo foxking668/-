@@ -11,6 +11,12 @@ per-stage raw PWM, motor-thread timers, output acknowledgements and CSV recordin
 PWM file writes now check stream errors; motor/steer setters return write success.
 Only the parking stage uses these acknowledgements to start its timer.
 
+Version 20261017.4 removes only the parking command's fixed +/-90 range checks.
+The original Steer pulse arithmetic (including float operation order) is factored into
+SteeringPulse.hpp for identical preflight and actual output checks. Hardware initialization,
+direction mapping and numeric example parameters are preserved. Keep the board's measured
+steer_offset_deg=20 by excluding image_params.txt when updating its program package.
+
 The IMU debug command inherited from VV15 is not used for parking. No IMU feedback,
 ultrasonic terminal positioning, or visual reverse-stage control is introduced.
 
