@@ -1,0 +1,15 @@
+vv 视频与锥桶版 VV_VIDEO_CONE_V4
+
+将单独提供的image_params.txt放在解压后的vv工程根目录。
+编译：cd /home/root/smartcar/vv 然后 bash build.sh。
+正常：chmod +x vv vvv 然后 ./vv。
+录像：./vvv（不要与./vv同时运行）。
+录像位置：/home/root/smartcar/vv/video/run_日期时间_进程号_毫秒/processed.avi。
+video_timestamps.csv：每个已保存帧的实际采集时间、状态、控制命令与逐行边界。
+默认10fps抽帧，队列4；结束Ctrl+C后等[ProcessedVideo] CLOSED再断电。
+
+出库：右偏5，400ms。蓝锥启用：左锥替左界，右锥替右界，余量4px。
+环岛：黑块门控降速5，八邻域入口/有开口的3秒兜底左探，left减少且路宽增加连续确认入环。
+“6行”是基准帧和当前帧相同y的6组有效边界，不要求相邻，不是拐点数量。
+底部30%的倒Y才正式确认，人行横道停车期间及结束后1200ms不计圈。
+详细改动、验证和适用范围请读本次修改说明.md。

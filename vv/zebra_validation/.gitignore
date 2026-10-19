@@ -1,0 +1,16 @@
+/.validation/
+/build*/
+/logs/
+/video/
+/experiment_logs/
+*.avi
+*.mp4
+*.zip
+*.exe
+*.obj
+*.o
+*.pdb
+*.lib
+/vv
+/vv_zebra_test
+__pycache__/
