@@ -37,6 +37,14 @@ int main() {
         // Shrinking a period below the OLD duty must succeed by clearing duty first.
         channel(left,"3040000","1640042","0");
         {Contral::PwmController p(8,2,pwm.string());check(p.prepare(50000));check(p.readDutyCycle()==0);check(p.readPeriod()==50000);}
+        // Linux requires a nonzero period even when writing zero duty on a fresh export.
+        channel(left,"0","0","0");
+        {Contral::PwmController p(8,2,pwm.string());check(p.initialize());check(!p.setDutyCycle(0));
+            check(p.prepare(50000));check(p.readPeriod()==50000);check(p.enable());}
+        check(get(left/"enable")=="0");
+        channel(left,"0","0","1");
+        {Contral::PwmController p(8,2,pwm.string());check(!p.initialize());}
+        channel(left);
         // Repeated startup after clean shutdown reuses the same nodes.
         {Contral::PwmController p(8,2,pwm.string());check(p.prepare(50000));check(p.enable());}
         check(get(left/"enable")=="0");

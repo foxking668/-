@@ -31,7 +31,7 @@ bool PwmController::readState(int& period, int& duty, int& enabled) {
         if (!node.eof()) { set("PWM_METADATA",path_+names[i],EINVAL); return false; }
         *values[i]=static_cast<int>(value);
     }
-    if (duty>period || enabled>1) { set("PWM_METADATA",path_,ERANGE); return false; }
+    if (duty>period || enabled>1 || (period==0 && enabled!=0)) { set("PWM_METADATA",path_,ERANGE); return false; }
     return true;
 }
 
@@ -77,7 +77,11 @@ bool PwmController::verify(int expectedEnable) {
 }
 bool PwmController::prepare(unsigned int periodNs,unsigned int dutyNs) {
     if (periodNs==0 || periodNs>INT_MAX || dutyNs>periodNs) { set("PWM_CONFIG_RANGE",path_,ERANGE); return false; }
-    return initialize() && disable() && setDutyCycle(0) && setPeriod(periodNs) && setDutyCycle(dutyNs) && verify(0);
+    if (!initialize()) return false;
+    // Fresh exports can be 0/0/disabled. Linux rejects even enable=0 or duty=0
+    // while period is zero. Establish a period in this verified inactive case first.
+    if (period_==0 && !setPeriod(periodNs)) return false;
+    return disable() && setDutyCycle(0) && setPeriod(periodNs) && setDutyCycle(dutyNs) && verify(0);
 }
 bool PwmController::enable() { return writeValue(path_+"enable","1") && verify(1); }
 bool PwmController::disable() { return writeValue(path_+"enable","0") && verify(0); }
@@ -87,7 +91,7 @@ bool PwmController::setPeriod(unsigned int value) {
     period_=static_cast<int>(value); return true;
 }
 bool PwmController::setDutyCycle(unsigned int value) {
-    if (value>static_cast<unsigned int>(period_)) { set("PWM_DUTY_RANGE",path_+"duty_cycle",ERANGE); return false; }
+    if (period_<=0 || value>static_cast<unsigned int>(period_)) { set("PWM_DUTY_RANGE",path_+"duty_cycle",ERANGE); return false; }
     if (!writeValue(path_+"duty_cycle",std::to_string(value))) return false;
     duty_=static_cast<int>(value); return true;
 }

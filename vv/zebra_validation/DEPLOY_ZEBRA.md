@@ -72,3 +72,9 @@ sh ./run_zebra_test.sh
 - 本次未改识别阈值、速度、右轮反转参数、3秒时间或现场图像模板。没有实现横杆检测。
 
 新增回归用模拟文件节点，不是实际Linux内核驱动或电气行为；本修复版还需要在龙芯板重新编译并实车确认。
+
+首次导出的0周期/0占空比/禁用通道会先建立非零周期，再进入统一配置流程；0周期却启用的异常元数据拒绝。
+此分支依据Linux PWM core.c pwm_apply_state的非零周期校验及sysfs.c的状态应用方式处理：
+https://github.com/torvalds/linux/blob/v6.6/drivers/pwm/core.c#L481-L483
+https://github.com/torvalds/linux/blob/v6.6/drivers/pwm/sysfs.c#L125-L138
+这是通用内核接口依据，并非声称已核对板子当前内核源码。
