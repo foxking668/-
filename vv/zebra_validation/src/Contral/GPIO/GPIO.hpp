@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include "headfile.hpp"
+#include <string>
 
 namespace Contral
 {
@@ -32,7 +32,9 @@ namespace Contral
          *
          * @param gpioNum GPIO 编号，用于配置方向或电平读写引脚。
          */
-        GPIO(int gpioNum);
+        GPIO(int gpioNum, const std::string& root="/sys/class/gpio");
+        GPIO(const GPIO&) = delete;
+        GPIO& operator=(const GPIO&) = delete;
         /**
          * @brief 析构 GPIO 对象
          *

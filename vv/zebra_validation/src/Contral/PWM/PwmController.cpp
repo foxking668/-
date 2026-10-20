@@ -1,167 +1,94 @@
 #include "PwmController.hpp"
-#include "ZebraTest/IoStatus.hpp"
+#include "ZebraTest/SysfsIo.hpp"
+#include <chrono>
+#include <climits>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <thread>
 
-namespace Contral
-{
-    /*
-     * 记录 PWM 芯片号与通道号，并拼接 sysfs 路径。
-     * 实际导出动作在 `initialize()` 中执行。
-     */
-    /**
-     * @brief 构造 PwmController 对象
-     *
-     * @details
-     * 创建 Contral / PWM 模块对象并初始化成员变量，使后续硬件访问、图像处理或控制算法调用具备有效上下文。
-     *
-     * @param pwmChip PWM 芯片编号，对应 /sys/class/pwm/pwmchipN。
-     * @param pwmNumber PWM 通道编号，对应 pwmchip 下的 pwmN。
-     */
-    PwmController::PwmController(int pwmChip, int pwmNumber)
-        : pwm_chip(pwmChip), pwm_number(pwmNumber)
-    {
-        this->pwm_path = "/sys/class/pwm/pwmchip" + std::to_string(pwmChip) + "/pwm" + std::to_string(pwmNumber) + "/";
-    }
+namespace Contral {
+using ZebraTest::IoStatus::set;
+using ZebraTest::SysfsIo::writeValue;
+PwmController::PwmController(int chip, int channel, const std::string& root)
+    : path_(root+"/pwmchip"+std::to_string(chip)+"/pwm"+std::to_string(channel)+"/"),
+      exportPath_(root+"/pwmchip"+std::to_string(chip)+"/export"), chip_(chip), channel_(channel) {}
+PwmController::~PwmController() { if (initialized_) disable(); }
 
-    /**
-     * @brief 析构 PwmController 对象
-     *
-     * @details
-     * 释放 Contral / PWM 模块在对象生命周期中申请或占用的文件描述符、映射内存、PWM/GPIO 句柄等资源，避免资源泄漏。
-     */
-    PwmController::~PwmController()
-    {
-        this->disable();
-    }
-
-    /**
-     * @brief 获取 readPeriod 对应数据
-     *
-     * @details
-     * 从 Contral / PWM 模块的内部状态、硬件接口或缓存结构中读取数据，并按函数返回类型交给调用方继续使用。
-     *
-     * @return 返回整型结果，具体含义由函数功能决定，例如数量、状态码、文件描述符或字节数。
-     */
-    int PwmController::readPeriod()
-    {
-        return this->period;
-    }
-
-    /**
-     * @brief 获取 readDutyCycle 对应数据
-     *
-     * @details
-     * 从 Contral / PWM 模块的内部状态、硬件接口或缓存结构中读取数据，并按函数返回类型交给调用方继续使用。
-     *
-     * @return 返回整型结果，具体含义由函数功能决定，例如数量、状态码、文件描述符或字节数。
-     */
-    int PwmController::readDutyCycle()
-    {
-        return this->duty_cycle;
-    }
-
-    /**
-     * @brief 初始化 initialize 相关资源
-     *
-     * @details
-     * 完成 Contral / PWM 模块运行前所需的资源申请、参数写入和状态复位，确保后续调用处于可用状态。
-     *
-     * @return 返回布尔结果；true 表示操作成功或条件成立，false 表示失败或条件不成立。
-     */
-    bool PwmController::initialize()
-    {
-        std::string exportPath = "/sys/class/pwm/pwmchip" + std::to_string(this->pwm_chip) + "/export";
-        return writeToFile(exportPath, std::to_string(this->pwm_number));
-    }
-
-    // 启用PWM
-    /**
-     * @brief 使能 enable 功能
-     *
-     * @details
-     * 打开 Contral / PWM 模块对应的硬件输出或软件功能，让控制信号开始生效。
-     *
-     * @return 返回布尔结果；true 表示操作成功或条件成立，false 表示失败或条件不成立。
-     */
-    bool PwmController::enable()
-    {
-        return writeToFile(this->pwm_path + "enable", std::to_string(1));
-    }
-
-    // 禁用PWM
-    /**
-     * @brief 关闭 disable 功能
-     *
-     * @details
-     * 关闭 Contral / PWM 模块对应的硬件输出或软件功能，用于停止输出或进入安全状态。
-     *
-     * @return 返回布尔结果；true 表示操作成功或条件成立，false 表示失败或条件不成立。
-     */
-    bool PwmController::disable()
-    {
-        return writeToFile(this->pwm_path + "enable", std::to_string(0));
-    }
-
-    // 设置周期（以纳秒为单位）
-    /**
-     * @brief 设置 setPeriod 对应参数
-     *
-     * @details
-     * 根据传入参数更新 Contral / PWM 模块的配置、控制目标或硬件寄存器，使后续控制/处理逻辑按新参数运行。
-     *
-     * @param period_ns PWM 周期，单位为纳秒。
-     *
-     * @return 返回布尔结果；true 表示操作成功或条件成立，false 表示失败或条件不成立。
-     */
-    bool PwmController::setPeriod(unsigned int period_ns)
-    {
-        this->period = period_ns;
-        return writeToFile(this->pwm_path + "period", std::to_string(period_ns));
-    }
-
-    // 设置低电平时间（以纳秒为单位）
-    /**
-     * @brief 设置 setDutyCycle 对应参数
-     *
-     * @details
-     * 根据传入参数更新 Contral / PWM 模块的配置、控制目标或硬件寄存器，使后续控制/处理逻辑按新参数运行。
-     *
-     * @param duty_cycle_ns PWM 占空时间，单位为纳秒。
-     *
-     * @return 返回布尔结果；true 表示操作成功或条件成立，false 表示失败或条件不成立。
-     */
-    bool PwmController::setDutyCycle(unsigned int duty_cycle_ns)
-    {
-        this->duty_cycle = duty_cycle_ns;
-        return writeToFile(this->pwm_path + "duty_cycle", std::to_string(duty_cycle_ns));
-    }
-
-    // 向文件写入值的辅助函数
-    /**
-     * @brief 写入 writeToFile 对应数据
-     *
-     * @details
-     * 将调用方提供的数据写入 Contral / PWM 模块管理的文件、设备节点或硬件寄存器，并返回写入结果。
-     *
-     * @param path 目标文件路径或设备节点路径。
-     * @param value 待写入、提交或计算的数值，具体含义由调用场景决定。
-     *
-     * @return 返回布尔结果；true 表示操作成功或条件成立，false 表示失败或条件不成立。
-     */
-    bool PwmController::writeToFile(const std::string &path, const std::string &value)
-    {
+bool PwmController::readState(int& period, int& duty, int& enabled) {
+    int* values[] = {&period, &duty, &enabled};
+    const char* names[] = {"period", "duty_cycle", "enable"};
+    for (int i=0; i<3; ++i) {
         errno=0;
-        std::ofstream file(path);
-        if (!file.is_open())
-        {
-            ZebraTest::IoStatus::set("PWM_OPEN",path,errno);
-            return false;
+        // Require existing read/write nodes, but do not modify them during a readiness check.
+        std::fstream node(path_+names[i], std::ios::in|std::ios::out);
+        if (!node.is_open()) { set("PWM_NODE_OPEN",path_+names[i],errno?errno:EIO); return false; }
+        long long value=-1;
+        if (!(node>>value) || value<0 || value>INT_MAX) {
+            set("PWM_METADATA",path_+names[i],EINVAL); return false;
         }
-        file << value;
-        file.flush();
-        const bool success = file.good();
-        file.close();
-        const bool ok=success && !file.fail();
-        if(!ok)ZebraTest::IoStatus::set("PWM_WRITE",path,errno);
-        return ok;
+        node>>std::ws;
+        if (!node.eof()) { set("PWM_METADATA",path_+names[i],EINVAL); return false; }
+        *values[i]=static_cast<int>(value);
     }
+    if (duty>period || enabled>1) { set("PWM_METADATA",path_,ERANGE); return false; }
+    return true;
+}
+
+bool PwmController::initialize() {
+    if (chip_<0 || channel_<0) { set("PWM_CHANNEL",path_,EINVAL); return false; }
+    int enabled=0;
+    if (readState(period_,duty_,enabled)) {
+        initialized_=true;
+        std::cout<<"[PWM_INIT] channel="<<path_<<" mode=reused"<<std::endl;
+        return true;
+    }
+    std::error_code error;
+    const bool exists=std::filesystem::is_directory(path_,error);
+    if (error && error!=std::errc::no_such_file_or_directory) {
+        set("PWM_DIRECTORY",path_,error.value()); return false;
+    }
+    std::string exportError;
+    if (!exists && !writeValue(exportPath_,std::to_string(channel_)))
+        exportError=ZebraTest::IoStatus::lastError;
+    // A competing exporter or delayed sysfs nodes are accepted ONLY after all nodes validate.
+    for (int attempt=0; attempt<50; ++attempt) {
+        if (readState(period_,duty_,enabled)) {
+            initialized_=true;
+            std::cout<<"[PWM_INIT] channel="<<path_<<" mode="<<(exists||!exportError.empty()?"reused":"exported")<<std::endl;
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    if (!exportError.empty()) ZebraTest::IoStatus::lastError += " export_error={"+exportError+"}";
+    return false;
+}
+
+bool PwmController::verify(int expectedEnable) {
+    int period=0,duty=0,enabled=0;
+    if (!readState(period,duty,enabled)) return false;
+    if (period!=period_ || duty!=duty_ || enabled!=expectedEnable) {
+        set("PWM_READBACK",path_,EIO);
+        ZebraTest::IoStatus::lastError += " expected="+std::to_string(period_)+"/"+std::to_string(duty_)+"/"+std::to_string(expectedEnable)
+            +" actual="+std::to_string(period)+"/"+std::to_string(duty)+"/"+std::to_string(enabled);
+        return false;
+    }
+    return true;
+}
+bool PwmController::prepare(unsigned int periodNs,unsigned int dutyNs) {
+    if (periodNs==0 || periodNs>INT_MAX || dutyNs>periodNs) { set("PWM_CONFIG_RANGE",path_,ERANGE); return false; }
+    return initialize() && disable() && setDutyCycle(0) && setPeriod(periodNs) && setDutyCycle(dutyNs) && verify(0);
+}
+bool PwmController::enable() { return writeValue(path_+"enable","1") && verify(1); }
+bool PwmController::disable() { return writeValue(path_+"enable","0") && verify(0); }
+bool PwmController::setPeriod(unsigned int value) {
+    if (value==0 || value>INT_MAX || duty_>static_cast<int>(value)) { set("PWM_PERIOD_RANGE",path_+"period",ERANGE); return false; }
+    if (!writeValue(path_+"period",std::to_string(value))) return false;
+    period_=static_cast<int>(value); return true;
+}
+bool PwmController::setDutyCycle(unsigned int value) {
+    if (value>static_cast<unsigned int>(period_)) { set("PWM_DUTY_RANGE",path_+"duty_cycle",ERANGE); return false; }
+    if (!writeValue(path_+"duty_cycle",std::to_string(value))) return false;
+    duty_=static_cast<int>(value); return true;
+}
 }

@@ -1,15 +1,16 @@
-这是独立人行横道验证源码，不是旧vv的另一个名字。
+版本：VV17_ZEBRA_TEST_20261020.2（修复PWM重复导出误报及初始化检查）
+完整命令：DEPLOY_ZEBRA.md
 
-先在原Linux虚拟机编译：
-OPENCV_DIR="/home/gy/下载/opencv-4.11.0/loongson/install/lib/cmake/opencv4" bash build_zebra.sh
+Windows源码：F:\共享文件夹\vv_zebra_test
+虚拟机编译并自动打包：
+cd /mnt/hgfs/share/vv_zebra_test && bash build_zebra.sh
 
-生成vv_zebra_test后，将程序、run_zebra_test.sh、config/zebra_test.ini及本车现场image_params.txt放在同一目录。
-小车运行：./run_zebra_test.sh
+上传该目录新生成的vv_zebra_test_board.zip到板子/home/root/gy2/vv_zebra_test。
+不要再上传之前手动生成的旧包。新的ZIP不包含image_params.txt。
+解压保留现场image_params.txt和config/zebra_test.ini，具体命令见DEPLOY_ZEBRA.md。
 
-流程：巡线→横道确认→右轮反转/左轮0→停稳→保持3秒→巡线驶离→重新识别。
-录像/实时状态/错误自动保存到程序旁的logs/run_.../。
-调参文件：config/zebra_test.ini，逐项中文说明，改后重启。
-完整说明：ZEBRA_TEST.md；测试范围：VALIDATION.md。
-旧比赛附属脚本只保留在reference_vv17/，不要把它们当作本验证程序的启动方式。
-退出按Ctrl+C，等[ZebraTest] CLOSED，再检查recording_status.txt是否CLOSED。
-本次未完成真实龙芯板编译链接和实车制动/停车位置标定。
+运行：cd /home/root/gy2/vv_zebra_test && sh ./run_zebra_test.sh
+初始化全部成功后约3秒自动巡线，无需Enter；Ctrl+C取消或结束。
+流程：巡线→横道确认→右轮反转/左轮0→停稳→保持至少3秒→巡线驶离。
+录像、状态和错误自动保存到logs/run_.../。
+首次上板还需重新编译并核对初始化日志，本机模拟节点测试不代替实车验证。

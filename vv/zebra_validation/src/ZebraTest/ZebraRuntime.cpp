@@ -1,6 +1,7 @@
 #include "ZebraRuntime.hpp"
 #include "ZebraDetector.hpp"
 #include "IoStatus.hpp"
+#include "Version.hpp"
 #include "Experiment/VideoRecorder.hpp"
 #include "Experiment/ProcessedRecording.hpp"
 #include "Contral/Motor/Motor.hpp"
@@ -203,13 +204,16 @@ bool initialize(const std::string& path,std::string& error) {
         for(const auto& p:{path,std::string("image_params.txt")})fs::copy_file(p,fs::path(directory)/"config_snapshot"/fs::path(p).filename());
         if(fs::space(directory).available<static_cast<std::uintmax_t>(settings.minimum_free_mb)*1024*1024)throw std::runtime_error("DISK_SPACE_LOW");
         std::ofstream info(directory+"/run_info.json");
-        info<<"{\"version\":\"VV17_ZEBRA_TEST_1\",\"time_source\":\"steady_clock nanoseconds\",\"encoder_units\":\"VV17 RPS convention\",\"brake\":\"right_only\",\"config_reload\":\"restart_required\",\"build\":"<<json(__DATE__ " " __TIME__)<<"}";info.flush();
+        info<<"{\"version\":"<<json(Version)<<",\"time_source\":\"steady_clock nanoseconds\",\"encoder_units\":\"VV17 RPS convention\",\"brake\":\"right_only\",\"config_reload\":\"restart_required\",\"build\":"<<json(__DATE__ " " __TIME__)<<"}";info.flush();
         if(!info)throw std::runtime_error("RUN_INFO_WRITE_FAILED");
         if(!logger.start(directory,settings,error))return false;
         enabled=true;event("STARTUP","config="+path+" logs="+directory);return true;
     }catch(const std::exception& e){error=e.what();return false;}
 }
 void cameraFailure(const std::string& reason) {if(enabled)fail(reason);}
+void hardwareStartupFailure(const std::string& reason) {
+    if(enabled){event("HARDWARE_INIT_FAILED",reason);fail("HARDWARE_INIT_FAILED: "+reason);}
+}
 void onFrame(const cv::Mat& original,const cv::Mat& gray,const cv::Mat& raw,
              const std::vector<int>& left,const std::vector<int>& right,bool valid,bool quality,float steer,long long capture) {
     if(!enabled)return;

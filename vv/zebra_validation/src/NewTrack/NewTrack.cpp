@@ -23,6 +23,8 @@ namespace NewTrack
 {
 namespace
 {
+    static bool zebraValidationMode=false;
+    static int zebraIlluminationBandRows=0;
     using Clock = std::chrono::steady_clock;
 
     // One capture clock per frame; the motor thread still reads the real clock.
@@ -878,6 +880,11 @@ namespace
         if (!configPrinted || changed)
         {
             configPrinted = true;
+            if(zebraValidationMode) {
+                std::cout<<"[NewTrack] mode=INDEPENDENT_ZEBRA lane="<<config.laneMethod
+                         <<" ring=0 cone=0 legacy_zebra=0 crossing=0 garage=0 lap_gate=0 startup_right=0"
+                         <<" illumination_band_rows="<<zebraIlluminationBandRows<<std::endl;
+            } else
             std::cout << "[NewTrack] revision=VV_LOW_CAMERA_OTSU_V5 enable=" << config.enable
                       << " binary=" << (config.binarySettings.mode?"ROAD_ROI_OTSU":"LEGACY_HSV")
                       << " binary_roi=" << config.binarySettings.roiTopPercent << "/" << config.binarySettings.roiBottomPercent
@@ -921,9 +928,6 @@ namespace
                       << " traffic_light=BYPASSED" << std::endl;
         }
     }
-
-    static bool zebraValidationMode=false;
-    static int zebraIlluminationBandRows=0;
 
     static Config cfg()
     {
@@ -2637,7 +2641,8 @@ static FrameResult processFrameImpl(const cv::Mat &frameBlock, bool buildDebugFr
         processStarted=true;
         processStart=frameNow();
         lapEpoch=processStart;
-        std::cout << "【发车】先寻找起点倒Y交叉口；若未识别，约" << c.startupCrossingFallbackMs/1000.0
+        if(zebraValidationMode) std::cout<<"[ZebraTest] 巡线图像有效，横道独立检测开始；无比赛计圈时间屏蔽。"<<std::endl;
+        else std::cout << "【发车】先寻找起点倒Y交叉口；若未识别，约" << c.startupCrossingFallbackMs/1000.0
                   << "秒后自动按已通过起点交叉口处理。同步后：" << c.ringStartupBlockMs/1000.0
                   << "秒开放环岛门控，" << c.zebraStartupBlockMs/1000.0
                   << "秒开放人行横道，" << c.crossingStartupBlockMs/1000.0

@@ -75,3 +75,15 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 
 add_executable(zebra_unit_tests tests/zebra_unit_tests.cpp src/ZebraTest/ZebraTest.cpp src/ZebraTest/ZebraDetector.cpp)
 target_link_libraries(zebra_unit_tests PRIVATE ${OpenCV_LIBS})
+
+# Standalone sysfs checks can also be compiled on a host without OpenCV.
+add_executable(zebra_sysfs_tests tests/zebra_sysfs_tests.cpp src/Contral/PWM/PwmController.cpp src/Contral/GPIO/GPIO.cpp src/ZebraTest/IoStatus.cpp)
+target_link_libraries(zebra_sysfs_tests PRIVATE pthread stdc++fs)
+add_executable(zebra_hardware_tests tests/zebra_hardware_tests.cpp
+    src/Contral/Motor/Motor.cpp src/Contral/Steer/Steer.cpp
+    src/Contral/PWM/PwmController.cpp src/Contral/GPIO/GPIO.cpp src/ZebraTest/IoStatus.cpp
+    src/Contral/PID/PID.c src/Other/Log/Log.cpp)
+target_link_libraries(zebra_hardware_tests PRIVATE ${OpenCV_LIBS} pthread stdc++fs)
+foreach(test_target zebra_unit_tests zebra_sysfs_tests zebra_hardware_tests)
+    target_compile_options(${test_target} PRIVATE -UNDEBUG)
+endforeach()

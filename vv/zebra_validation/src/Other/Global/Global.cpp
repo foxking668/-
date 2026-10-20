@@ -139,10 +139,9 @@ namespace Other
          * 由于舵机安装可能不是绝对居中，因此通过 offset 修正中位角。
          */
         Steer *steer = (Steer *)gSteer;
-        steer->init();
-        // 【舵机机械零点】不再写死 -15：改由热加载参数 steer_offset_deg 控制，
-        // 并且 ImageHandle 每帧都会再刷新一次，换舵机后不用重编译就能重标。
+        // Apply the car's calibrated offset before the FIRST enabled steering pulse.
         steer->setSteerOffset(static_cast<float>(RuntimeConfig::getSteerOffsetDeg()));
+        steer->init();
 
         /*
          * 第八步：初始化语音播报模块。
@@ -188,10 +187,10 @@ namespace Other
          * 这里负责清理所有通过 `new` 创建的底层控制对象，
          * 防止程序退出时泄漏硬件资源。
          */
-        delete (Motor *)gMotor;
-        delete (Encoder *)gLeftEncoder;
-        delete (Encoder *)gRightEncoder;
-        delete (Camera *)gCamera;
-        delete (Steer *)gSteer;
+        delete (Motor *)gMotor; gMotor=nullptr;
+        delete (Encoder *)gLeftEncoder; gLeftEncoder=nullptr;
+        delete (Encoder *)gRightEncoder; gRightEncoder=nullptr;
+        delete (Camera *)gCamera; gCamera=nullptr;
+        delete (Steer *)gSteer; gSteer=nullptr;
     }
 }

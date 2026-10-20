@@ -61,7 +61,7 @@ namespace Contral
          * @param dir_right_index 右电机方向 GPIO 编号。
          * @param motor_enable_pin 电机驱动使能 GPIO 编号。
          */
-        Motor(int pwm_left_chip, int pwm_left_index, int dir_left_index, int pwm_right_chip, int pwm_right_index, int dir_right_index, int motor_enable_pin);
+        Motor(int pwm_left_chip, int pwm_left_index, int dir_left_index, int pwm_right_chip, int pwm_right_index, int dir_right_index, int motor_enable_pin, const std::string& pwmRoot="/sys/class/pwm", const std::string& gpioRoot="/sys/class/gpio");
 
         /**
          * @brief 设置 setLeftPwm 对应参数

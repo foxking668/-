@@ -1,5 +1,6 @@
 #include "headfile.hpp"
 #include "ZebraTest/ZebraRuntime.hpp"
+#include "ZebraTest/Version.hpp"
 #include "Experiment/VideoRecorder.hpp"
 #include "Experiment/ProcessedRecording.hpp"
 #include "NewTrack/NewTrack.hpp"
@@ -152,7 +153,8 @@ namespace
 
     StartupKeyAction waitStartupDebugKey(int waitMs)
     {
-        std::cout << "[StartupDebug] 3秒内按 C 进入电机/编码器调试；按 D 进入JY62实时角度测试；不按则正常启动。" << std::endl;
+        std::cout << "[ZebraTest] 硬件初始化完成，约3秒后自动巡线；无需按Enter。Ctrl+C取消。" << std::endl;
+        std::cout << "[StartupDebug] C保留电机/编码器调试入口；D是原JY62专用入口，无对应硬件请勿使用。" << std::endl;
 
         TerminalRawNonblockGuard guard;
         if (!guard.valid())
@@ -1277,7 +1279,17 @@ int zebraBaseMain(int argc, char **argv)
      * - 舵机；
      * - 左右轮 PID 控制器。
      */
-    globalInit();
+    try {
+        globalInit();
+    } catch(const std::exception& e) {
+        // No driving threads exist yet. Release every object already created, including PWM.
+        const std::string reason=e.what();
+        gIsClose=true;
+        globalDestroy();
+        ZebraTest::hardwareStartupFailure(reason);
+        std::cerr<<"[ZebraTest] STARTUP REJECTED: "<<reason<<std::endl;
+        return 2;
+    }
     static_cast<Camera*>(gCamera)->retainOriginalFrame(true);
 
     /*
@@ -1288,7 +1300,7 @@ int zebraBaseMain(int argc, char **argv)
      */
     gIsStart = true;
 
-    log.logOutputConsole("Init Success", LOG_INFO);
+    log.logOutputConsole("Hardware Initialize Success", LOG_INFO);
 
     /*
      * 第七步：初始化完成后的短暂缓冲。
@@ -1301,7 +1313,7 @@ int zebraBaseMain(int argc, char **argv)
         usleep(1000 * 100);
     }
 
-    log.logOutputConsole("Wait Key", LOG_INFO);
+    log.logOutputConsole("Automatic startup countdown follows (no Enter required)", LOG_INFO);
 
     /*
      * 第八步：等待启动条件。
@@ -1497,6 +1509,8 @@ int zebraBaseMain(int argc, char **argv)
 // Independent entry; preserve VV17 startup and original driving threads.
 int main(int argc,char** argv) {
     if(argc!=1){std::cerr<<"Run ./run_zebra_test.sh without additional options."<<std::endl;return 2;}
+    std::cout<<"[ZebraTest] "<<ZebraTest::Version<<std::endl;
+    std::cout<<"[ZebraTest] mode=independent_zebra tasks=lane/right_brake/hold3s/resume"<<std::endl;
     std::string error;
     if(!ZebraTest::initialize("./config/zebra_test.ini",error)){std::cerr<<"[ZebraTest] STARTUP REJECTED: "<<error<<std::endl;return 2;}
     NewTrack::setZebraValidationMode(true,ZebraTest::illuminationBandRows());

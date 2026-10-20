@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")"
+command -v python3 >/dev/null || { echo 'python3 is required to package the board ZIP.' >&2; exit 2; }
 args=()
 build_dir=build-zebra-cross
 if [[ "${ZEBRA_NATIVE:-0}" == 1 ]]; then args+=(-DZEBRA_NATIVE=ON); build_dir=build-zebra-native; fi
@@ -12,7 +13,8 @@ if [[ -z "${OPENCV_DIR:-}" ]]; then
   done
 fi
 cmake -S . -B "$build_dir" "${args[@]}"
-cmake --build "$build_dir" --target vv_zebra_test zebra_unit_tests -j"${JOBS:-2}"
+cmake --build "$build_dir" --target vv_zebra_test zebra_unit_tests zebra_sysfs_tests zebra_hardware_tests -j"${JOBS:-2}"
 cp "$build_dir/vv_zebra_test" ./vv_zebra_test
 chmod +x ./vv_zebra_test ./run_zebra_test.sh
-printf '\nBuilt vv_zebra_test. Run bash run_zebra_test.sh on the car.\n'
+python3 tools/package_zebra.py
+printf '\nUpload vv_zebra_test_board.zip; see DEPLOY_ZEBRA.md.\n'

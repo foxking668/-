@@ -42,11 +42,11 @@ TOOLCHAIN_DIR="/实际/LoongArch工具链目录" OPENCV_DIR="/实际/OpenCV/lib/
 ZEBRA_NATIVE=1 OPENCV_DIR="/本机/OpenCV/lib/cmake/opencv4" bash build_zebra.sh
 ```
 
-本次交付为源码，不附带冒充新版本的旧vv二进制。build_zebra.sh 生成 ./vv_zebra_test，不修改原 build.sh，不清空旧构建目录。
+本次交付为源码，不附带旧vv二进制。build_zebra.sh生成 ./vv_zebra_test 并自动生成 vv_zebra_test_board.zip，程序带 VV17_ZEBRA_TEST_20261020.2 标记。完整更新/保留现场参数命令见 DEPLOY_ZEBRA.md。
 
 ## 小车运行
 
-例如上传到 /home/root/smartcar/vv_zebra_test/，至少保留：
+现场上传到 /home/root/gy2/vv_zebra_test/，至少保留：
 
 ```text
 vv_zebra_test
@@ -58,12 +58,12 @@ config/zebra_test.ini
 在小车终端执行：
 
 ```bash
-cd /home/root/smartcar/vv_zebra_test
+cd /home/root/gy2/vv_zebra_test
 chmod +x vv_zebra_test run_zebra_test.sh
 ./run_zebra_test.sh
 ```
 
-沿用原程序启动调试窗口，正常验证无需按C/D。录像与日志自动开启，不需要再运行vvv，也不要同时运行其他小车控制程序。保留与原程序兼容的 /tmp/cc_terminal_run.lock 进程锁。
+沿用原程序启动调试窗口，正常验证无需按C/D或Enter，硬件成功后约3秒自动启动。录像与日志自动开启，不需要再运行vvv，也不要同时运行其他小车控制程序。保留与原程序兼容的 /tmp/cc_terminal_run.lock 进程锁。
 
 结束按 Ctrl+C：先等待原图像/电机线程退出、双轮停止，再排空录像队列并逐帧校验视频；等 [ZebraTest] CLOSED 后再断电。该提示表示关闭流程完成，成功与否还要看recording_status.txt的CLOSED/INCOMPLETE及各错误字段。
 
@@ -130,3 +130,7 @@ events.jsonl记录状态转换、制动结束原因、语音发送结果、摄�
 ## 验证边界
 
 具体主机测试、650帧实拍回放及Linux编译检查见VALIDATION.md。未执行真实龙芯链接、刷写和实车闭环，不能据此保证制动距离与真实停车位置。当前不具备横杆等待功能，故不代表已完成整套比赛规则。
+
+## 20261020.2 初始化修复
+
+已导出PWM/GPIO检查后复用；真正的初始化写入/回读失败会记录HARDWARE_INIT_FAILED并拒绝发车。配置PWM先禁用、占空比清零，再改周期和目标脉宽；电机驱动总使能在准备阶段保持低电平。舵机首次脉冲即使用现场偏移。比赛配置打印已改成有效独立模式，去掉误导性的旧比赛任务启动提示。详细行为与命令见DEPLOY_ZEBRA.md。

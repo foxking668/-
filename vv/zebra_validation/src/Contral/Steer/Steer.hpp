@@ -12,10 +12,12 @@ namespace Contral
     class Steer
     {
     private:
+        std::string pwm_root_;
         void *pwmCtrl = nullptr;
         const int period = 3040000;
         //const int period = 2000000;
         float steer_offset = 0;
+        bool dutyForAngle(float angle, unsigned int& duty) const;
 
     public:
         /**
@@ -24,7 +26,7 @@ namespace Contral
          * @details
          * 创建 Contral / Steer 模块对象并初始化成员变量，使后续硬件访问、图像处理或控制算法调用具备有效上下文。
          */
-        Steer();
+        explicit Steer(const std::string& pwmRoot="/sys/class/pwm");
         /**
          * @brief 初始化 init 相关资源
          *

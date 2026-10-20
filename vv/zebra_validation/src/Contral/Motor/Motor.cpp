@@ -1,5 +1,6 @@
 #include "Motor.hpp"
 #include "ZebraTest/IoStatus.hpp"
+#include <memory>
 
 using namespace Other;
 
@@ -44,68 +45,41 @@ namespace Contral
                  int pwm_right_chip,
                  int pwm_right_index,
                  int dir_right_index,
-                 int motor_enable_pin)
+                 int motor_enable_pin, const std::string& pwmRoot, const std::string& gpioRoot)
     {
         Log log(LOG_LEVEL_GLOBAL);
 
         log.logOutputConsole("Initialize Motor", LOG_INFO);
 
-        this->pwm_left = new PwmController(pwm_left_chip, pwm_left_index);
-        this->pwm_right = new PwmController(pwm_right_chip, pwm_right_index);
-        this->dir_left = new GPIO(dir_left_index);
-        this->dir_right = new GPIO(dir_right_index);
-        this->motor_enable_gpio = new GPIO(motor_enable_pin);
-
-        if (this->pwm_left == nullptr ||
-            this->pwm_right == nullptr ||
-            this->dir_left == nullptr ||
-            this->dir_right == nullptr ||
-            this->motor_enable_gpio == nullptr)
-        {
-            log.logOutputConsole("Initialize Motor Failed", LOG_ERROR);
+        using ZebraTest::IoStatus::require;
+        // Keep nSLEEP low until BOTH zero-duty PWM channels and direction GPIOs are ready.
+        auto enable=std::make_unique<GPIO>(motor_enable_pin,gpioRoot);
+        require(enable->setDirection("low"),"Motor nSLEEP low");
+        auto left=std::make_unique<PwmController>(pwm_left_chip,pwm_left_index,pwmRoot);
+        auto right=std::make_unique<PwmController>(pwm_right_chip,pwm_right_index,pwmRoot);
+        auto leftDir=std::make_unique<GPIO>(dir_left_index,gpioRoot);
+        auto rightDir=std::make_unique<GPIO>(dir_right_index,gpioRoot);
+        try {
+            require(left->prepare(MOTOR_PWM_PERIOD),"Left motor PWM prepare");
+            require(right->prepare(MOTOR_PWM_PERIOD),"Right motor PWM prepare");
+            require(leftDir->setDirection("out"),"Left motor direction output");
+            require(leftDir->setValue(true),"Left motor initial direction");
+            require(rightDir->setDirection("out"),"Right motor direction output");
+            require(rightDir->setValue(true),"Right motor initial direction");
+            require(left->enable(),"Left motor PWM enable");
+            require(right->enable(),"Right motor PWM enable");
+            require(enable->setValue(true),"Motor nSLEEP enable");
+        } catch(...) {
+            const std::string cause=ZebraTest::IoStatus::lastError;
+            enable->setValue(false);
+            ZebraTest::IoStatus::lastError=cause;
+            throw;
         }
-
-        PwmController *pwmControllerLeft = (PwmController *)this->pwm_left;
-
-        if (pwmControllerLeft->initialize())
-        {
-            log.logOutputConsole("Left Motor Initialize Success", LOG_INFO);
-        }
-        else
-        {
-            log.logOutputConsole("Left Motor Initialize Failed", LOG_ERROR);
-        }
-
-        pwmControllerLeft->enable();
-        pwmControllerLeft->setPeriod(MOTOR_PWM_PERIOD);
-        pwmControllerLeft->setDutyCycle(0);
-
-        PwmController *pwmControllerRight = (PwmController *)this->pwm_right;
-
-        if (pwmControllerRight->initialize())
-        {
-            log.logOutputConsole("Right Motor Initialize Success", LOG_INFO);
-        }
-        else
-        {
-            log.logOutputConsole("Right Motor Initialize Failed", LOG_ERROR);
-        }
-
-        pwmControllerRight->enable();
-        pwmControllerRight->setPeriod(MOTOR_PWM_PERIOD);
-        pwmControllerRight->setDutyCycle(0);
-
-        GPIO *gpio = (GPIO *)this->dir_left;
-        gpio->setDirection("out");
-        gpio->setValue(true);
-
-        gpio = (GPIO *)this->dir_right;
-        gpio->setDirection("out");
-        gpio->setValue(true);
-
-        gpio = (GPIO *)this->motor_enable_gpio;
-        gpio->setDirection("out");
-        gpio->setValue(true);
+        this->pwm_left=left.release(); this->pwm_right=right.release();
+        this->dir_left=leftDir.release(); this->dir_right=rightDir.release();
+        this->motor_enable_gpio=enable.release();
+        log.logOutputConsole("Left Motor Initialize Success",LOG_INFO);
+        log.logOutputConsole("Right Motor Initialize Success",LOG_INFO);
 
         this->aim_value = 0;
         this->left_true_speed = 0;
@@ -295,6 +269,8 @@ namespace Contral
 
     Motor::~Motor()
     {
+        if(this->motor_enable_gpio!=nullptr)
+            static_cast<GPIO*>(this->motor_enable_gpio)->setValue(false);
         if (this->pwm_left != nullptr)
         {
             PwmController *pwmController = (PwmController *)this->pwm_left;

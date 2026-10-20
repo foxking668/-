@@ -10,6 +10,7 @@ void shutdown();
 bool active();
 int illuminationBandRows();
 void cameraFailure(const std::string& reason);
+void hardwareStartupFailure(const std::string& reason);
 void onFrame(const cv::Mat& original,const cv::Mat& gray,const cv::Mat& raw,
              const std::vector<int>& left,const std::vector<int>& right,bool valid,bool quality,
              float steerError,long long captureTimeNs);

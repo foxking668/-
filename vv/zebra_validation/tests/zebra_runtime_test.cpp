@@ -8,7 +8,7 @@
 namespace Other {float gMotorAimSpeed=0;int WonderEchoSpeakZebra(){return 0;}}
 namespace NewTrack {std::string diagnosticCsvHeader(){return "unused_legacy_recorder";}}
 namespace Contral {
-Motor::Motor(int,int,int,int,int,int,int){pwm_left_value=pwm_right_value=0;}
+Motor::Motor(int,int,int,int,int,int,int,const std::string&,const std::string&){pwm_left_value=pwm_right_value=0;}
 Motor::~Motor(){}
 bool Motor::setLeftPwm(int pwm){pwm_left_value=pwm;left_write_ok_=true;return true;}
 bool Motor::setRightPwm(int pwm){pwm_right_value=pwm;right_write_ok_=true;return true;}
@@ -16,8 +16,14 @@ int Motor::getLeftPwm(){return pwm_left_value;}
 int Motor::getRightPwm(){return pwm_right_value;}
 }
 long long timestamp(){return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();}
-int main(){
+int main(int argc,char** argv){
     std::string error;if(!ZebraTest::initialize("config/zebra_test.ini",error)){std::cerr<<error<<'\n';return 1;}
+    if(argc==2 && std::string(argv[1])=="--startup-failure") {
+        ZebraTest::hardwareStartupFailure("injected PWM_NODE_OPEN path=/fake/pwmchip8/pwm1/period errno=2");
+        const bool faulted=ZebraTest::failed();ZebraTest::shutdown();
+        if(!faulted)return 1;
+        std::cout<<"PASS hardware startup rejection log (injected fault, no hardware)\n";return 0;
+    }
     Contral::Motor motor(0,0,0,0,0,0,0);std::vector<int> left(60,5),right(60,74);
     cv::Mat road(60,80,CV_8UC1,cv::Scalar(255));cv::line(road,{40,0},{40,59},0,2);
     cv::Mat zebra=road.clone();for(int x:{12,24,48,60})cv::rectangle(zebra,{x,28,5,14},0,-1);

@@ -13,4 +13,7 @@
 *.lib
 /vv
 /vv_zebra_test
+/ZEBRA_BUILD_INFO.txt
+/ZEBRA_PROGRAM_SHA256SUMS
+/.zebra-board-*.tmp
 __pycache__/

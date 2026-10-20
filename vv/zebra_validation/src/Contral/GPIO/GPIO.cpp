@@ -9,7 +9,10 @@
  * Copyright (c) 2024 by ${git_name_email}, All Rights Reserved.
  */
 #include "GPIO.hpp"
-#include "ZebraTest/IoStatus.hpp"
+#include "ZebraTest/SysfsIo.hpp"
+#include <chrono>
+#include <filesystem>
+#include <thread>
 
 namespace Contral
 {
@@ -25,22 +28,30 @@ namespace Contral
      *
      * @param gpioNum GPIO 编号，用于配置方向或电平读写引脚。
      */
-    GPIO::GPIO(int gpioNum) : gpioNum(gpioNum), fd(-1)
+    GPIO::GPIO(int gpioNum, const std::string& root) : gpioNum(gpioNum), fd(-1)
     {
-        gpioPath = "/sys/class/gpio/gpio" + std::to_string(gpioNum);
-
-        // 导出 GPIO
-        if (!writeToFile("/sys/class/gpio/export", std::to_string(gpioNum)))
-        {
-            throw std::runtime_error("Failed to export GPIO " + std::to_string(gpioNum));
+        gpioPath=root+"/gpio"+std::to_string(gpioNum);
+        if(gpioNum<0) {
+            ZebraTest::IoStatus::set("GPIO_NUMBER",gpioPath,EINVAL);
+            ZebraTest::IoStatus::require(false,"GPIO initialize");
         }
-
-        // 打开 value 文件，读写方式
-        fd = open((gpioPath + "/value").c_str(), O_RDWR);
-        if (fd == -1)
-        {
-            throw std::runtime_error("Failed to open GPIO value file: " + std::string(strerror(errno)));
+        std::error_code error;
+        const bool exists=std::filesystem::is_directory(gpioPath,error);
+        if(error && error!=std::errc::no_such_file_or_directory) {
+            ZebraTest::IoStatus::set("GPIO_DIRECTORY",gpioPath,error.value());
+            ZebraTest::IoStatus::require(false,"GPIO initialize");
         }
+        std::string exportError;
+        if(!exists && !writeToFile(root+"/export",std::to_string(gpioNum)))
+            exportError=ZebraTest::IoStatus::lastError;
+        for(int attempt=0;attempt<50;++attempt) {
+            fd=::open((gpioPath+"/value").c_str(),O_RDWR);
+            if(fd>=0) return;
+            ZebraTest::IoStatus::set("GPIO_VALUE_OPEN",gpioPath+"/value",errno);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if(!exportError.empty())ZebraTest::IoStatus::lastError+=" export_error={"+exportError+"}";
+        ZebraTest::IoStatus::require(false,"GPIO initialize");
     }
 
     /**
@@ -107,9 +118,14 @@ namespace Contral
 
         // 使用文件描述符写入 GPIO 值 ('1' 或 '0')
         const char *val_str = value ? "1" : "0";
-        if (write(fd, val_str, 1) != 1)
+        if(lseek(fd,0,SEEK_SET)<0) {
+            ZebraTest::IoStatus::set("GPIO_SEEK",gpioPath+"/value",errno);return false;
+        }
+        decltype(write(fd,val_str,1)) written;
+        do { written=write(fd,val_str,1); } while(written<0 && errno==EINTR);
+        if (written != 1)
         {
-            ZebraTest::IoStatus::set("GPIO_WRITE",gpioPath+"/value",errno);
+            ZebraTest::IoStatus::set("GPIO_WRITE",gpioPath+"/value",written<0?errno:EIO);
             return false;
         }
         return true;
@@ -170,13 +186,6 @@ namespace Contral
      */
     bool GPIO::writeToFile(const std::string &path, const std::string &value)
     {
-        std::ofstream file(path);
-        if (!file.is_open())
-        {
-            /* quiet: GPIO open failed */
-            return false;
-        }
-        file << value;
-        return file.good();
+        return ZebraTest::SysfsIo::writeValue(path,value);
     }
 }
