@@ -1,0 +1,6 @@
+build*/
+runs/
+vv_parking_test
+vv_parking_test.exe
+.parking_test.lock
+__pycache__/

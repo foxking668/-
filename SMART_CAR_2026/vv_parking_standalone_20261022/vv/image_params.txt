@@ -1,0 +1,298 @@
+# ============================================================
+#  VV 智能车 · 参数文件
+#
+#  ⚠️ config_version 绝对不能删！
+#     程序启动时读它：若 < 模板版本 2026083101，会用内嵌默认模板
+#     【覆盖整个文件】（steer_offset_deg 会变成 -15 等）
+#     被覆盖前的原文件备份为 ./image_params.txt.bak
+#
+#  ⚠️ 下面 4 个开关必须显式写 0（代码默认值是 1，不写会打开）
+#  ⚠️ 改完保存后下一帧自动生效，不用重启程序
+# ============================================================
+config_version=2026083101                            # ★绝对不能删！版本号，删了会被默认模板覆盖
+
+# ============================================================
+
+# ==========================================================
+# 一、顶层开关（8 项）
+# ==========================================================
+new_track_enable=1                                   # 总开关 1=启用
+new_track_lane_method=4                              # 车道线提取方法 4=二阶拟合（默认）
+new_track_work_mode=1                                # 1=比赛模式
+new_track_debug_print=1                              # 1=打印调试日志
+
+# ---- 未启用功能的总开关（必须显式写 0；不写会用代码默认值 1 = 打开！）----
+new_track_blue_cone_enable=0                         # 蓝锥避障（代码默认1，必须写0）
+new_track_ring_side_enable=0                         # 环岛右侧模板匹配（代码默认1，必须写0）
+traffic_red_enable=0                                 # 红绿灯识别（代码默认1，必须写0）
+emergency_reverse_enable=0                           # 急停反转（代码默认1，必须写0）
+
+# ==========================================================
+# 二、相机 / 裁剪（4 项）
+# ==========================================================
+new_track_top_crop_ratio=0.05                        # 上边裁掉的比例
+new_track_bottom_crop_ratio=0.02                     # 下边裁掉的比例
+new_track_left_crop_ratio=0.00                       # 左边裁掉的比例
+new_track_right_crop_ratio=0.00                      # 右边裁掉的比例
+
+# ==========================================================
+# 三、转向 / 舵机（4 项）
+# ==========================================================
+center_pratio=0.48                                   # ★巡线基准：期望车道中心在画面宽度的比例（0.20~0.80）
+error_gain=3.5                                         # 转向误差增益
+steer_offset_deg=95                                  # 沿用正常巡线安装补偿；入库中位由 post_stop_center_deg 单独配置
+new_track_steer_target_max_step_px=12                # 每帧转向目标最大跳变（像素）
+
+# ==========================================================
+# 四、电机 / PID（3 项）
+# ==========================================================
+motor_aim_speed=7                                    # ★比赛巡航速度（闭环 rps）
+pid_recover_delay_ms=0                               # PID 恢复延时
+motor_pid_clear_on_stop_enable=0                     # 停车时清 PID 1=清
+
+# ==========================================================
+# 五、巡线 · 黑线居中（8 项）
+# ==========================================================
+new_track_center_black_enable=1                      # 1=启用中心黑线跟随
+new_track_center_black_min_run=2                     # 黑线最短连续像素
+new_track_center_black_max_run=18                    # 黑线最长连续像素
+new_track_center_black_max_step=24                   # 黑线最大跳变
+new_track_center_black_min_valid_rows=8              # 最少有效行数
+new_track_center_black_min_near_rows=2               # 近处最少行数
+new_track_center_black_min_white_margin=2            # 黑线两侧最少白边
+new_track_center_black_loose_bounds=1                # 1=放宽边界约束
+
+# ==========================================================
+# 六、巡线 · 单边沿（2 项）
+# ==========================================================
+new_track_single_edge_enable=1                       # 1=启用单边沿跟随
+new_track_single_edge_bias_px=8                      # 单边沿时的像素补偿
+
+# ==========================================================
+# 七、巡线 · 局部黑块辅助（4 项）
+# ==========================================================
+new_track_partial_black_assist_enable=1              # 1=启用局部黑块辅助
+new_track_partial_black_min_valid_rows=3             # 最少有效行
+new_track_partial_black_min_near_rows=1              # 近处最少行
+new_track_partial_black_blend_percent=70             # 混合百分比
+
+# ==========================================================
+# 八、巡线 · 丢线（2 项）
+# ==========================================================
+new_track_lost_lane_stop_frames=0                    # ★连续丢线多少帧停车（0=永不停车）
+new_track_lost_lane_recover_frames=4                 # 丢线恢复帧数
+
+# ==========================================================
+# 九、二值化（7 项）
+# ==========================================================
+new_track_binary_mode=1                              # 二值化模式
+new_track_binary_roi_top_percent=35                  # 二值化 ROI 起始（画面高度%）
+new_track_binary_roi_bottom_percent=95               # 二值化 ROI 结束（画面高度%）
+new_track_binary_threshold_offset=0                  # 阈值偏移
+new_track_binary_denoise=1                           # 1=去噪
+new_track_binary_blur_kernel=1                       # 模糊核大小
+new_track_gray_threshold=0                           # 固定灰度阈值（0=自动OTSU）
+
+# ==========================================================
+# 十、起跑（8 项）
+# ==========================================================
+new_track_start_right_enable=1                       # 1=发车短时右偏
+new_track_start_right_duration_ms=400                # 短时右偏持续
+new_track_start_right_error=5                        # 右偏误差值
+new_track_start_right_speed=7                        # 右偏时的速度
+new_track_startup_crossing_sync_enable=1             # 1=发车后强制同步"已过起点交叉口"
+new_track_startup_crossing_fallback_ms=2800          # 同步兜底时间（ms）
+new_track_startup_crossing_min_detect_ms=700         # 同步最早检测时间
+new_track_startup_crossing_confirm_frames=3          # 同步确认帧数
+
+# ==========================================================
+# 十一、环岛 · 入环之前（虚线段检测 / 延时 / 停车 / 强制左转 / 冷却）（32 项）
+# ==========================================================
+new_track_ring_entry_confirm_frames=3                # 虚线段判据连续确认帧数
+new_track_ring_entry_stable_px80=5                   # 虚线段稳定性（80宽像素）
+new_track_ring_entry_stable_rows60=6                 # 虚线段稳定性（60高行数）
+new_track_ring_entry_timeout_ms=1600                 # 入口判据超时
+new_track_ring_entry_assist_ms=800                   # 入口辅助时长
+new_track_ring_entry_cue_enable=1                    # ★1=启用虚线段判据（实际在用的环岛检测）
+new_track_ring_entry_cue_mode=2                      # 2=双进程(原相机取黑线 + 环岛另算)
+new_track_ring_entry_dash_min_blocks=4               # ★虚线段最少块数（<=(此值-1)强制停车）
+new_track_ring_entry_dash_need_frames=2              # ★虚线段连续确认帧数
+new_track_ring_entry_dash_window_ms=3000             # 虚线段检测时间窗
+new_track_ring_entry_dash_max_x_spread=18            # ★虚线段x方向最大散布（>此值判为斜线不算）
+new_track_ring_entry_dash_min_gap_rows=3             # ★虚线段块之间最小行间隔（区分虚线/实线）
+new_track_ring_entry_delay_ms=1300                   # ★检出虚线段后多久开始动作
+new_track_ring_entry_narrow_w=20                     # 窄处宽度阈值
+new_track_ring_entry_narrow_h=45                     # 窄处高度阈值
+new_track_ring_entry_stop_by_y=0                     # ★1=按位置停车 0=纯延时停车
+new_track_ring_entry_stop_few_blocks=3               # ★块数少于此值触发停车
+new_track_ring_entry_stop_min_y=45                   # ★停车最低点y阈值
+new_track_ring_entry_stop_drop_px=10                 # ★最低点消失判定（像素）
+new_track_ring_entry_stop_gone_frames=3              # ★最低点消失连续帧数
+new_track_ring_entry_stop_min_delay_pct=67           # ★至少等延时的百分之多少（默认2/3）
+new_track_ring_entry_stop_y_percent=60               # ★停车判据y百分比（画面60%=60）
+new_track_ring_entry_start_ms=7000                   # ★每圈前多久不检测环岛（出库后N秒）
+new_track_ring_entry_start_ms_2nd=2000                 # ★第2圈前多久不检测环岛（第2圈起点在赛道中段）
+new_track_ring_entry_max_ms=90000                    # ★每圈多久后不再检测环岛
+new_track_ring_entry_stop_ms=2000                    # ★入环前停车时长
+new_track_ring_entry_left_ms=1800                    # ★入环强制左转时长
+new_track_ring_entry_left_error=-175                 # ★入环强制左转的误差值（负=左）
+new_track_ring_entry_left_speed=4                    # ★入环左转时的速度
+
+# ==========================================================
+# 十二、环岛 · 入环之后（绕环中 / 屏蔽黑线 / 屏蔽斑马线）（8 项）
+# ==========================================================
+new_track_ring_speed=4                               # ★绕环时的速度（虚线段环岛绕环用）
+new_track_ring_entry_circle_enable=1                 # 1=启用绕环
+new_track_ring_task_zebra_block_enable=1             # ★1=整个环岛任务内(phase1~6)不检测人行横道
+new_track_ring_entry_after_left_stop_ms=500          # ★左转后停车多久再开始绕环
+new_track_ring_entry_black_block_ms=0                # 入环后多久内屏蔽中心黑线跟随
+new_track_ring_entry_circle_left_ms=0                # 绕环时额外左打时长（0=不用）
+new_track_ring_entry_stop_turn_left=0                # 停车期间原地左打方向（0=不用）
+
+# ==========================================================
+# 十三、环岛 · 出环（9 项）
+# ==========================================================
+new_track_ring_exit_enable=1                         # 1=启用出环动作
+new_track_ring_exit_after_ms=2900                    # ★绕环多久后开始出环
+new_track_ring_exit_rearm_ms=5000                    # ★出环后多久内不再检测环岛
+new_track_ring_exit_zebra_block_ms=5000              # ★出环岛后这么久内不检测人行横道
+new_track_ring_exit_left_error=-165                  # ★出环强制左转误差
+new_track_ring_exit_left_ms=0                        # 出环左转时长（0=沿用lock_ms）
+new_track_ring_exit_left_speed=4                     # 出环左转速度（0=沿用入环速度）
+new_track_ring_exit_lock_ms=2000                     # ★出环左转锁定时长
+new_track_ring_exit_stop_ms=2000                     # ★出环前停车时长
+
+# ==========================================================
+# 十四、环岛 · 第二圈独立参数（13 项）
+# ==========================================================
+# ★【第二圈专用】lapCounter>0 时，环岛全部时序用这里的值；第一圈仍用上面 entry_*/exit_*
+#   默认值 = 当前第一圈的值，所以不改 = 行为不变。要单独调第二圈就改这里。
+new_track_ring_lap2_entry_delay_ms=1300              # ★第2圈：检出虚线段后多久开始动作
+new_track_ring_lap2_entry_stop_ms=2000                 # ★第2圈：入环前停车时长
+new_track_ring_lap2_entry_left_ms=2000               # ★第2圈：入环强制左转时长
+new_track_ring_lap2_entry_left_error=-180            # ★第2圈：入环强制左转误差（负=左）
+new_track_ring_lap2_entry_left_speed=4                   # ★第2圈：入环左转时速度
+new_track_ring_lap2_entry_after_left_stop_ms=500         # ★第2圈：左转后停车多久再开始绕环
+new_track_ring_lap2_entry_circle_enable=1                # ★第2圈：1=启用绕环
+new_track_ring_lap2_exit_after_ms=3600               # ★第2圈：绕环多久后开始出环
+new_track_ring_lap2_exit_stop_ms=2000                    # ★第2圈：出环前停车时长
+new_track_ring_lap2_exit_left_error=-180             # ★第2圈：出环强制左转误差
+new_track_ring_lap2_exit_left_ms=0                       # ★第2圈：出环左转时长（0=沿用 lock_ms）
+new_track_ring_lap2_exit_left_speed=4                # ★第2圈：出环左转速度（0=沿用入环速度）
+new_track_ring_lap2_exit_lock_ms=2000                # ★第2圈：出环左转锁定时长
+
+# ==========================================================
+# 十五、中心偏置率（6 项）
+# ==========================================================
+# ★【第1圈】起步后 delay_ms 起，hold_ms 内临时用 start_center_pratio
+#   例：起步 5 秒后开始，持续 3 秒，0.7 → start_center_delay_ms=5000 hold_ms=3000 pratio=0.7
+#   0 = 关闭。k 越大目标越靠右。
+new_track_start_center_pratio=0.0                          # 第1圈：起步后临时 center_pratio（0=关）
+new_track_start_center_delay_ms=0                          # 第1圈：起步后多久开始（ms）
+new_track_start_center_hold_ms=0                           # 第1圈：持续多久（ms，0=关）
+
+# ★【第2圈】计第2圈那一刻起，delay_ms 起，hold_ms 内临时用 lap2_center_pratio
+#   例：第2圈开始 2 秒后，持续 4 秒，0.6 → lap2_center_delay_ms=2000 hold_ms=4000 pratio=0.6
+#   0 = 关闭（第2圈用普通 center_pratio）。
+new_track_lap2_center_pratio=0.50                    # ★第2圈：计圈后临时 center_pratio（0=关）
+new_track_lap2_center_delay_ms=0                           # ★第2圈：计圈后多久开始（ms）
+new_track_lap2_center_hold_ms=4000                   # ★第2圈：持续多久（ms，0=关）
+
+# 优先级：第2圈偏置 > 第1圈偏置 > 第1次横道起步后偏置（zebra_first_bias）
+
+# ==========================================================
+# 十六、人行横道（41 项）
+# ==========================================================
+new_track_zebra_near_fallback_confirm_frames=3       # ★强近区兜底确认帧数（不等远区）
+new_track_zebra_enable=1                             # ★1=启用斑马线检测
+new_track_zebra_stop_every_time=1                    # 1=每次见到都停 0=整场只停一次
+new_track_zebra_startup_block_ms=7000                # ★每圈前多久不检测斑马线
+new_track_zebra_stop_ms=3200                         # ★检测到斑马线后停车时长（范围2500~10000）
+new_track_zebra_reverse_pwm=12000                    # 第1次斑马线后右电机反向 PWM
+new_track_zebra_reverse_ms=800                       # 第1次斑马线后反向时长
+new_track_zebra_reverse_left_enable=0                # 1=倒车时左轮也倒
+new_track_zebra_final_stop_lap=0                     # 按圈号终停（0=不用）
+new_track_zebra_finish_after_stops=2                 # 旧计数参数保留；本版入库只由第二圈斑马线停车触发
+new_track_zebra_finish_stop_delay_ms=4000            # 第二圈斑马线停车结束、恢复前进指令起，巡线多久再参数入库；0=直接入库
+new_track_zebra_first_bias_pratio=0.7                  # 第 1 次横道起步后临时使用的 center_pratio
+new_track_zebra_first_bias_delay_ms=5000             # ★起步后多久开始偏置
+new_track_zebra_first_bias_hold_ms=3000              # ★偏置持续时长
+new_track_zebra_crop_left_percent=8                  # 近区左裁%
+new_track_zebra_crop_right_percent=8                 # 近区右裁%
+new_track_zebra_far_y_start_percent=20               # 远区扫描起始行（画面高度%）
+new_track_zebra_far_y_end_percent=55                 # 远区扫描结束行
+new_track_zebra_near_y_start_percent=38              # 近区扫描起始行
+new_track_zebra_near_y_end_percent=92                # 近区扫描结束行
+new_track_zebra_far_black_area_min_percent=4         # 远区黑占比下限%
+new_track_zebra_far_black_area_max_percent=35        # 远区黑占比上限%
+new_track_zebra_far_confirm_frames=3                 # 远区锁存需要连续帧数
+new_track_zebra_approach_speed=7                     # 远区预警后降速到
+new_track_zebra_near_min_transitions=3               # ★近区每行最少黑白跳变次数
+new_track_zebra_near_min_stripes=2                   # ★近区每行最少条纹数
+new_track_zebra_near_min_rows=2                      # 近区最少满足行数=visible
+new_track_zebra_near_black_area_min_percent=5        # 近区黑占比下限%
+new_track_zebra_near_black_area_max_percent=65       # 近区黑占比上限%
+new_track_zebra_far_near_hold_ms=6000                # 远区锁存保持时长
+new_track_zebra_near_after_far_min_delay_ms=150      # ★远区锁存后至少等多久才确认近区
+new_track_zebra_require_far_near=1                   # 1=必须先远区再近区
+new_track_zebra_confirm_frames=2                     # ★近区确认帧数
+new_track_zebra_release_frames=6                     # ★连续多少帧看不到才解锁
+new_track_zebra_cooldown_ms=10000                    # ★触发后冷却时长
+zebra_far_slow_enable=0                              # 【旧版保留】1=斑马线远区降速
+zebra_slow_aim_speed=7                               # 【旧版保留】降速后的速度
+zebra_slow_hold_ms=1000                              # 【旧版保留】降速保持时长
+zebra_ignore_after_detect_ms=10000                   # 检测到后多久不重复检测（旧机制）
+zebra_ignore_after_traffic_resume_ms=7000            # 红灯停车并由黄/绿灯放行、真正恢复行驶后，暂停人行横道识别7秒。
+zebra_after_reverse_stop_ms=3200                     # 倒车后停车多久（旧机制）
+
+# ==========================================================
+# 十七、倒车入库（19 项）
+# ==========================================================
+new_track_post_stop_steer_deg=-100                   # （旧2阶段）停车后舵机偏移
+new_track_post_stop_steer_hold_ms=2000               # （旧2阶段）舵机保持
+new_track_post_stop_reverse_pwm=12000                # （旧2阶段）倒车PWM
+new_track_post_stop_reverse_ms=2000                  # （旧2阶段）倒车时长
+# 第二圈入库专用：接管后视觉不控制舵机、电机或换段；本次参数在触发时冻结。
+new_track_post_stop_enable=1                        # 0=到达入库起点后只停车，不执行倒车
+new_track_post_stop_center_deg=102                  # 实测入库中位约1700us；本值输出1700711ns，不是车轮角度
+new_track_post_stop_left_motor_enable=0             # 保留原车方式：左轮不输出驱动
+new_track_post_stop_right_motor_enable=1            # 右轮按各阶段 pwm 倒车
+new_track_post_stop_s5_steer_deg=0                   # S5 相对入库中位的偏移
+new_track_post_stop_settle_ms=200                    # ★每阶段先停稳叙方向的时间
+new_track_post_stop_s2_enable=1                      # stage2（左倒）开关
+new_track_post_stop_s2_steer_deg=-107                # ★左倒：center102-107=-5 ->1520000ns；当前中心下建议-107..0
+new_track_post_stop_s2_pwm=12700                     # stage2 倒车 PWM（12000=24%占空比）
+new_track_post_stop_s2_ms=2450                       # ★stage2 倒车总时长
+new_track_post_stop_s2_hold_ms=2000                  # ★舵机保持偏置角的时长（0=全程保持）
+new_track_post_stop_s4_enable=1                      # stage4（右倒）开关
+new_track_post_stop_s4_steer_deg=108                 # ★右倒：center102+108=210 ->1883111ns；当前中心下建议0..118
+new_track_post_stop_s4_pwm=12700                     # stage4 倒车 PWM
+new_track_post_stop_s4_ms=3500                       # ★stage4 倒车总时长
+new_track_post_stop_s4_hold_ms=2000                  # ★舵机保持偏置角的时长
+new_track_post_stop_s5_enable=1                      # stage5（直退）开关
+new_track_post_stop_s5_pwm=12700                     # stage5 直退 PWM
+new_track_post_stop_s5_ms=1700                       # ★stage5 直退时长
+new_track_post_stop_s5_hold_ms=0                     # ★舵机保持偏置角的时长（stage5本来就是直行）
+
+# ==========================================================
+# 十八、交叉口 / 计圈（15 项）
+# ==========================================================
+new_track_crossing_far_confirm_frames=2              # 交叉口远区确认帧数
+new_track_crossing_far_hold_ms=8000                  # 交叉口远区锁存保持
+new_track_crossing_enable=1                          # 1=启用交叉口计圈
+new_track_crossing_require_zebra=0                   # 计圈是否要求先过斑马线 0=不要求
+new_track_crossing_startup_block_ms=18000            # 每圈前多久不检测交叉口
+new_track_lap2_force_after_zebra_ms=4000                 # ★第1次人行横道起步后N毫秒直接计第2圈（0=靠车库倒Y）
+new_track_crossing_require_ring_complete=0           # 计圈是否要求环岛完成 0=不要求
+new_track_crossing_fork_min_split_rows=2             # 倒Y分叉最少行数
+new_track_crossing_fork_min_stem_rows=3              # 倒Y主干最少行数
+new_track_crossing_fork_min_separation_px=12         # 倒Y最小分叉距离
+new_track_crossing_after_zebra_delay_ms=1200         # ★过斑马线后多久才认交叉口
+new_track_crossing_near_y_percent=70                 # 近区y百分比
+new_track_crossing_near_min_split_rows=2             # 近区分叉最少行
+new_track_crossing_open_confirm_frames=3             # 开口确认帧数
+new_track_crossing_cooldown_ms=5000                  # 交叉口冷却
+
+# ==========================================================
+# 十九、终停（2 项）
+# ==========================================================
