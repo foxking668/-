@@ -1,0 +1,2 @@
+# Preserve the uploaded source/config bytes, including original CRLF, for SHA256 provenance.
+* -text
